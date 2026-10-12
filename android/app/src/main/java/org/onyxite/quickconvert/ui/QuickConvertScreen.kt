@@ -1,5 +1,8 @@
 package org.onyxite.quickconvert.ui
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,8 +13,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -28,15 +33,20 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import org.onyxite.quickconvert.convert.OutputTemplate
 import org.onyxite.quickconvert.model.Adjustment
 import org.onyxite.quickconvert.model.SongFile
@@ -82,22 +92,8 @@ fun QuickConvertScreen(
                     fileCount(songs.size),
                     style = MaterialTheme.typography.titleSmall,
                 )
-            }
-
-            if (songs.isEmpty()) {
-                item {
-                    Card(colors = cardColors()) {
-                        Text(
-                            "No Rock Band songs yet.",
-                            modifier = Modifier.padding(16.dp),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            } else {
-                items(songs, key = { it.uri }) { song ->
-                    SongRow(song, settings.template)
-                }
+                Spacer(Modifier.height(8.dp))
+                ConsolePane(songListing(songs, settings.template))
             }
 
             item {
@@ -159,30 +155,62 @@ fun QuickConvertScreen(
             }
 
             item {
-                SectionCard(title = "Adjustments") {
-                    Adjustment.entries.forEach { adjustment ->
-                        val checked = adjustment in settings.adjustments
+                var adjustmentsOpen by rememberSaveable { mutableStateOf(false) }
+                val enabledCount = settings.adjustments.size
+                Card(colors = cardColors()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .toggleable(
-                                    value = checked,
-                                    enabled = !viewModel.running,
-                                    role = Role.Switch,
-                                    onValueChange = { viewModel.toggleAdjustment(adjustment) },
-                                )
-                                .padding(vertical = 6.dp),
+                                .clickable { adjustmentsOpen = !adjustmentsOpen }
+                                .padding(vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(adjustment.label, fontWeight = FontWeight.Medium)
+                            Text(
+                                "Adjustments",
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (!adjustmentsOpen && enabledCount > 0) {
                                 Text(
-                                    adjustment.detail,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    if (enabledCount == 1) "1 on" else "$enabledCount on",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.primary,
                                 )
                             }
-                            Switch(checked = checked, onCheckedChange = null)
+                            Text(
+                                if (adjustmentsOpen) "Hide" else "Show",
+                                modifier = Modifier.padding(start = 12.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        if (adjustmentsOpen) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                            Adjustment.entries.forEach { adjustment ->
+                                val checked = adjustment in settings.adjustments
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .toggleable(
+                                            value = checked,
+                                            enabled = !viewModel.running,
+                                            role = Role.Switch,
+                                            onValueChange = { viewModel.toggleAdjustment(adjustment) },
+                                        )
+                                        .padding(vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(adjustment.label, fontWeight = FontWeight.Medium)
+                                        Text(
+                                            adjustment.detail,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    Switch(checked = checked, onCheckedChange = null)
+                                }
+                            }
                         }
                     }
                 }
@@ -201,16 +229,6 @@ fun QuickConvertScreen(
                             Text("%input_base%  %ext%  %title%  %artist%  ·  %input_dir% is the output folder")
                         },
                     )
-                    if (songs.isNotEmpty()) {
-                        Spacer(Modifier.height(8.dp))
-                        songs.take(3).forEach { song ->
-                            val planned = OutputTemplate.plan(song.displayName, settings.template)
-                            Text(
-                                "${song.displayName}  →  ${planned.relativePath}",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                    }
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(
                         onClick = onPickOutput,
@@ -239,18 +257,12 @@ fun QuickConvertScreen(
 
             if (viewModel.log.isNotEmpty()) {
                 item {
-                    SectionCard(title = "Result") {
-                        viewModel.log.forEach { line ->
-                            val color = when (line.tone) {
-                                LogTone.BODY -> MaterialTheme.colorScheme.onSurface
-                                LogTone.OK -> MaterialTheme.colorScheme.primary
-                                LogTone.WARN -> MaterialTheme.colorScheme.secondary
-                                LogTone.BAD -> MaterialTheme.colorScheme.error
-                            }
-                            Text(line.text, color = color, style = MaterialTheme.typography.bodyMedium)
-                            Spacer(Modifier.height(4.dp))
-                        }
-                    }
+                    Text("Result", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    ConsolePane(
+                        text = viewModel.log.joinToString("\n") { it.text },
+                        followEnd = true,
+                    )
                 }
             }
 
@@ -260,22 +272,38 @@ fun QuickConvertScreen(
 }
 
 @Composable
-private fun SongRow(song: SongFile, template: String) {
-    val planned = OutputTemplate.plan(song.displayName, template)
-    Card(colors = cardColors()) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-            Text(song.displayName, fontWeight = FontWeight.Medium)
-            Text(
-                listOfNotNull(song.kind.label, formatSize(song.sizeBytes)).joinToString("  ·  "),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                "→ ${planned.relativePath}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
+private fun ConsolePane(text: String, followEnd: Boolean = false) {
+    val scroll = rememberScrollState()
+    LaunchedEffect(text, followEnd, scroll.maxValue) {
+        if (followEnd) scroll.scrollTo(scroll.maxValue)
+    }
+    val shape = RoundedCornerShape(8.dp)
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(220.dp)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, MaterialTheme.colorScheme.outline, shape)
+            .verticalScroll(scroll)
+            .padding(12.dp),
+    ) {
+        Text(
+            text,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+private fun songListing(songs: List<SongFile>, template: String): String {
+    if (songs.isEmpty()) return "No Rock Band songs yet."
+    return songs.joinToString("\n\n") { song ->
+        val planned = OutputTemplate.plan(song.displayName, template)
+        val meta = listOfNotNull(song.kind.label, formatSize(song.sizeBytes)).joinToString("  ")
+        "${song.displayName}\n$meta\n-> ${planned.relativePath}"
     }
 }
 
