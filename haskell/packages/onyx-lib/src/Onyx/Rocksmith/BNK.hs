@@ -4,17 +4,21 @@ Done with the help of
 https://wiki.xentax.com/index.php/Wwise_SoundBank_(*.bnk)
 
 -}
-{-# LANGUAGE CPP               #-}
-{-# LANGUAGE ImplicitParams    #-}
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE CPP                 #-}
+{-# LANGUAGE ImplicitParams      #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
 module Onyx.Rocksmith.BNK where
 
 import           Control.Monad        (replicateM)
 import           Data.Binary.Get
 import qualified Data.ByteString      as B
 import qualified Data.ByteString.Lazy as BL
+import           Data.Functor         ((<&>))
 import qualified Data.Text            as T
 import           Data.Word
 import           GHC.ByteOrder        (ByteOrder (..))
@@ -32,22 +36,22 @@ import           Control.Applicative  (liftA2)
 #endif
 
 extractRSOgg :: (?endian :: ByteOrder) => Readable -> Folder T.Text Readable -> Readable
-extractRSOgg bnk audioDir = makeHandle "converted .wem audio" $ do
+extractRSOgg bnk audioDir = makeHandle "converted .wem audio" do
   codebook <- getResourcesPath "packed_codebooks_aoTuV_603.bin"
   chunks <- parseBNK <$> useHandle bnk handleToByteString
   let hirc = chunks >>= \case
-        ChunkHIRC h -> hirc_objects h
+        ChunkHIRC h -> h.hirc_objects
         _           -> []
   actionIDs <- case [ e | HIRCEvent e <- hirc ] of
-    [x] -> return $ evt_actions x
+    [x] -> return x.evt_actions
     _   -> fail "Not exactly 1 event in .bnk HIRC"
-  let actions = [ act | HIRCEventAction act <- hirc, elem (eact_id act) actionIDs ]
+  let actions = [ act | HIRCEventAction act <- hirc, elem act.eact_id actionIDs ]
   -- eact_type appears to be 4 for pc/mac, 3 for xbox?
-  soundID <- case [ act | act <- actions, eact_type act == 4 || eact_type act == 3 ] of
-    [act] -> return $ eact_objectID act
+  soundID <- case [ act | act <- actions, act.eact_type == 4 || act.eact_type == 3 ] of
+    [act] -> return act.eact_objectID
     _     -> fail "Not exactly 1 play action in .bnk HIRC"
-  sourceID <- case [ s | HIRCSound s <- hirc, snd_id s == soundID ] of
-    [s] -> return $ snd_sourceID s
+  sourceID <- case [ s | HIRCSound s <- hirc, s.snd_id == soundID ] of
+    [s] -> return s.snd_sourceID
     _   -> fail "Sound referenced by play action not found in .bnk HIRC"
   wem <- case findFile (return $ T.pack $ show sourceID <.> "wem") audioDir of
     Nothing -> fail "Couldn't locate .wem audio file"
@@ -57,7 +61,7 @@ extractRSOgg bnk audioDir = makeHandle "converted .wem audio" $ do
     Just ogg -> byteStringSimpleHandle $ BL.fromStrict ogg
 
 parseBNK :: (?endian :: ByteOrder) => BL.ByteString -> [Chunk]
-parseBNK bs = flip map (splitChunks bs) $ \(magic, chunk) -> case magic of
+parseBNK bs = splitChunks bs <&> \(magic, chunk) -> case magic of
   "BKHD" -> ChunkBKHD $ runGet getBKHD chunk
   "DIDX" -> ChunkDIDX $ runGet getDIDX chunk
   "DATA" -> ChunkDATA $ runGet getDATA chunk
@@ -71,7 +75,7 @@ getWord32Platform = case ?endian of
   LittleEndian -> getWord32le
 
 splitChunks :: (?endian :: ByteOrder) => BL.ByteString -> [(B.ByteString, BL.ByteString)]
-splitChunks = runGet $ let
+splitChunks = runGet let
   go = isEmpty >>= \case
     True -> return []
     False -> do
@@ -235,7 +239,7 @@ getSTID :: (?endian :: ByteOrder) => Get STID
 getSTID = do
   stid_unknown <- getWord32Platform
   bankCount <- getWord32Platform
-  stid_banks <- replicateM (fromIntegral bankCount) $ do
+  stid_banks <- replicateM (fromIntegral bankCount) do
     bankID <- getWord32Platform
     len <- getWord8
     name <- getByteString $ fromIntegral len

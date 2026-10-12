@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments      #-}
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings   #-}
@@ -5,23 +6,23 @@ module Onyx.Import.Base where
 
 import           Codec.Picture
 import           Control.Applicative              ((<|>))
-import           Control.Concurrent.Async         (async, wait)
-import           Control.Monad                    (forM)
-import           Control.Monad.IO.Class           (liftIO)
+import           Control.Concurrent.Stream        (forConcurrentlyBounded)
+import           Control.Monad                    (void)
 import           Control.Monad.Trans.Resource
-import           Control.Monad.Trans.State        (evalStateT, gets, modify)
 import           Data.Char                        (toLower)
 import qualified Data.Conduit.Audio               as CA
 import           Data.Default.Class               (Default, def)
 import           Data.Either                      (lefts, rights)
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Foldable                    (toList)
+import           Data.List.Extra                  (nubOrdOn)
 import qualified Data.Set                         as Set
 import qualified Data.Text                        as T
 import           Data.Tuple.Extra                 (fst3, snd3, thd3)
 import qualified Numeric.NonNegative.Class        as NNC
 import           Onyx.Audio                       (audioIO)
 import           Onyx.Codec.JSON                  (toJSON, yamlEncodeFile)
+import           Onyx.Encore                      (EncoreFile (..))
 import           Onyx.MIDI.Track.Drums
 import qualified Onyx.MIDI.Track.File             as F
 import qualified Onyx.MIDI.Track.ProGuitar        as PG
@@ -57,26 +58,22 @@ type Import m = ImportLevel -> StackTraceT m (SongYaml SoftFile)
 
 saveImport :: FilePath -> SongYaml SoftFile -> IO (SongYaml FilePath)
 saveImport dout yaml = do
-  yaml2 <- flip evalStateT [] $ forM yaml $ \(SoftFile newName contents) -> do
-    gets (lookup newName) >>= \case
-      Just prev -> return prev
-      Nothing -> do
-        newAsync <- liftIO $ async $ do
-          let newNameFull = dout </> newName
-          createDirectoryIfMissing True $ takeDirectory newNameFull
-          case contents of
-            SoftReadable r -> saveReadable r newNameFull
-            SoftImage img -> case map toLower $ takeExtension newName of
-              ".png" -> writePng newNameFull img
-              ext    -> error $ "saveImport: unhandled image extension " <> show ext
-            SoftChart song -> F.saveMIDIUtf8 newNameFull song
-            SoftAudio aud -> audioIO Nothing aud newNameFull
-          return newName
-        modify ((newName, newAsync) :)
-        return newAsync
-  yaml3 <- traverse wait yaml2
-  yamlEncodeFile (dout </> "song.yml") $ toJSON yaml3
-  return yaml3
+  let uniqueFiles = nubOrdOn (\(SoftFile path _) -> path) $ toList yaml
+  -- limit how many runners happen simultaneously to not exhaust file handles
+  -- (tended to happen with BMS import)
+  void $ forConcurrentlyBounded 8 uniqueFiles \(SoftFile newName contents) -> do
+    let newNameFull = dout </> newName
+    createDirectoryIfMissing True $ takeDirectory newNameFull
+    case contents of
+      SoftReadable r -> saveReadable r newNameFull
+      SoftImage img -> case map toLower $ takeExtension newName of
+        ".png" -> writePng newNameFull img
+        ext    -> error $ "saveImport: unhandled image extension " <> show ext
+      SoftChart song -> F.saveMIDIUtf8 newNameFull song
+      SoftAudio aud -> audioIO Nothing aud newNameFull
+  let newYaml = (\(SoftFile path _) -> path) <$> yaml
+  yamlEncodeFile (dout </> "song.yml") $ toJSON newYaml
+  return newYaml
 
 determine2xBass :: T.Text -> (T.Text, Bool)
 determine2xBass s = let
@@ -109,8 +106,8 @@ detectExtProBass :: F.FixedFile t -> PG.GtrBase
 detectExtProBass trks = let
   strs = do
     trk <- [trks.fixedPartRealBass, trks.fixedPartRealBass22]
-    diff <- toList trk.pgDifficulties
-    (str, _) <- toList diff.pgNotes >>= toList
+    diff <- toList trk.difficulties
+    (str, _) <- toList diff.notes >>= toList
     return str
   in if elem PG.S1 strs
     then PG.GtrCustom [28, 33, 38, 43, 47, 52] -- bass with 2 high gtr strings
@@ -129,15 +126,24 @@ emptyChart = F.Song
 checkEnableDynamics
   :: F.Song (F.FixedFile U.Beats)
   -> F.Song (F.FixedFile U.Beats)
-checkEnableDynamics (F.Song tmap mmap ps) = let
-  checkTrack trk = if RTB.null trk.drumEnableDynamics
-    then trk { drumDifficulties = noDynamics <$> trk.drumDifficulties }
-    else trk
+checkEnableDynamics (F.Song tmap mmap trks) = F.Song tmap mmap trks
+  { F.fixedPartDrums       = checkEnableDynamicsTrack trks.fixedPartDrums
+  , F.fixedPartDrums2x     = checkEnableDynamicsTrack trks.fixedPartDrums2x
+  , F.fixedPartRealDrumsPS = checkEnableDynamicsTrack trks.fixedPartRealDrumsPS
+  }
+
+checkEnableDynamicsEncore
+  :: F.Song (EncoreFile U.Beats)
+  -> F.Song (EncoreFile U.Beats)
+checkEnableDynamicsEncore (F.Song tmap mmap trks) = F.Song tmap mmap trks
+  { plasticDrums = checkEnableDynamicsTrack trks.plasticDrums
+  }
+
+checkEnableDynamicsTrack :: DrumTrack t -> DrumTrack t
+checkEnableDynamicsTrack trk = let
   noDynamics dd = dd
-    { drumGems = (\(gem, _) -> (gem, VelocityNormal)) <$> dd.drumGems
+    { gems = (\(gem, _) -> (gem, VelocityNormal)) <$> dd.gems
     }
-  in F.Song tmap mmap ps
-    { F.fixedPartDrums       = checkTrack ps.fixedPartDrums
-    , F.fixedPartDrums2x     = checkTrack ps.fixedPartDrums2x
-    , F.fixedPartRealDrumsPS = checkTrack ps.fixedPartRealDrumsPS
-    }
+  in if RTB.null trk.enableDynamics
+    then trk { difficulties = noDynamics <$> trk.difficulties }
+    else trk

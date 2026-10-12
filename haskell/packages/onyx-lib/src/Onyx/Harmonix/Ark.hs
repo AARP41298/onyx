@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
@@ -11,20 +12,24 @@ import           Control.Monad          (forM, replicateM, replicateM_, when)
 import           Control.Monad.IO.Class (MonadIO, liftIO)
 import           Data.Bifunctor         (first)
 import           Data.Binary.Get        (getByteString, getInt32le, getInt64le,
-                                         getWord32le, getWord64le, skip)
+                                         getWord16le, getWord32le, getWord64le,
+                                         skip)
 import           Data.Bits
 import qualified Data.ByteString        as B
 import qualified Data.ByteString.Char8  as B8
 import qualified Data.ByteString.Lazy   as BL
+import           Data.Functor           ((<&>))
 import           Data.Int
 import           Data.List.HT           (partitionMaybe)
 import qualified Data.List.NonEmpty     as NE
 import qualified Data.Text              as T
 import qualified Data.Vector            as V
 import           Data.Word              (Word32)
+import qualified GHC.IO.Handle          as H
 import           Onyx.Util.Binary       (runGetM)
 import           Onyx.Util.Handle
 import           System.FilePath        (dropExtension, takeFileName, (-<.>))
+import           System.IO              (SeekMode (..), hGetPosn, hSeek)
 
 data FileEntry a = FileEntry
   { offset  :: Integer
@@ -44,7 +49,79 @@ data Hdr = Hdr
   , files :: [FileEntry B.ByteString]
   } deriving (Eq, Show)
 
--- Read a .hdr, or an .ark for old games with no .hdr
+readLoneArk :: Readable -> IO Hdr
+readLoneArk ark = useHandle ark \h -> do
+  BL.hGet h 4 >>= \case
+
+    -- Frequency
+    "ARK\0" -> do
+
+      hSeek h AbsoluteSeek 0
+      headerStart <- BL.hGet h 0x28
+      fileTableOffset   <- runGetM getWord32le $ BL.drop 0x08 headerStart
+      numFiles          <- runGetM getWord32le $ BL.drop 0x0C headerStart
+      dirTableOffset    <- runGetM getWord32le $ BL.drop 0x10 headerStart
+      numDirs           <- runGetM getWord32le $ BL.drop 0x14 headerStart
+      stringTableOffset <- runGetM getWord32le $ BL.drop 0x18 headerStart
+      _numStrings       <- runGetM getWord32le $ BL.drop 0x1C headerStart
+      afterStrings      <- runGetM getWord32le $ BL.drop 0x20 headerStart
+      blockSize         <- runGetM getWord32le $ BL.drop 0x24 headerStart
+
+      hSeek h AbsoluteSeek $ fromIntegral fileTableOffset
+      fileTableBytes <- BL.hGet h $ fromIntegral $ dirTableOffset - fileTableOffset
+
+      hSeek h AbsoluteSeek $ fromIntegral dirTableOffset
+      dirTableBytes <- BL.hGet h $ fromIntegral $ stringTableOffset - dirTableOffset
+
+      hSeek h AbsoluteSeek $ fromIntegral stringTableOffset
+      stringTableBytes <- B.hGet h $ fromIntegral $ afterStrings - stringTableOffset
+      let getString offset = B.takeWhile (/= 0) $ B.drop (fromIntegral $ offset - stringTableOffset) stringTableBytes
+
+      dirNames <- flip runGetM dirTableBytes $ replicateM (fromIntegral numDirs) do
+        skip 4
+        getString <$> getWord32le
+
+      files <- flip runGetM fileTableBytes $ replicateM (fromIntegral numFiles) do
+        _              <- getWord32le -- ?
+        fileName       <- getString <$> getWord32le
+        dir            <- getWord16le
+        blockOffset    <- getWord16le
+        block          <- getWord32le
+        compressedSize <- getWord32le
+        fullSize       <- getWord32le -- assuming
+        return FileEntry
+          { offset  = fromIntegral (block * blockSize) + fromIntegral blockOffset
+          , name    = fileName
+          , folder  = Just $ dirNames !! fromIntegral dir
+          , size    = fullSize
+          , inflate = compressedSize
+          }
+
+      return Hdr { arks = Nothing, files = files }
+
+    -- Amplitude (PS2)
+    "\x02\0\0\0" -> do
+
+      -- could just assume first file offset is end of header, but we'll be smart
+
+      hSeek h AbsoluteSeek 4
+      numEntries <- BL.hGet h 4 >>= runGetM getWord32le
+
+      hSeek h RelativeSeek $ fromIntegral $ numEntries * 20
+      stringSize <- BL.hGet h 4 >>= runGetM getWord32le
+
+      hSeek h RelativeSeek $ fromIntegral stringSize
+      offsetCount <- BL.hGet h 4 >>= runGetM getWord32le
+
+      hSeek h RelativeSeek $ fromIntegral $ offsetCount * 4
+
+      H.HandlePosn _ headerLength <- hGetPosn h
+      hSeek h AbsoluteSeek 0
+      BL.hGet h (fromIntegral headerLength) >>= readHdr
+
+    magic -> fail $ "Unrecognized lone .ARK format: " <> show magic
+
+-- Read a .hdr (or an Amplitude PS2 .ark)
 readHdr :: (MonadFail m) => BL.ByteString -> m Hdr
 readHdr bs = do
   testType <- runGetM getWord32le bs
@@ -68,7 +145,7 @@ readHdr bs = do
       parseOffsets = do
         offsetCount <- getWord32le
         V.replicateM (fromIntegral offsetCount) getWord32le
-  flip runGetM dec $ do
+  flip runGetM dec do
     arkVersion <- getWord32le
     case arkVersion of
       -- ARK v2: Amplitude (PS2)
@@ -76,7 +153,7 @@ readHdr bs = do
         entries <- parseEntries getWord32le
         stringBytes <- parseStrings
         offsets <- parseOffsets
-        entries' <- forM entries $ \entry -> do
+        entries' <- forM entries \entry -> do
           name <- findString offsets stringBytes entry.name
           folder <- mapM (findString offsets stringBytes) entry.folder
           return entry { name = name, folder = folder }
@@ -87,13 +164,13 @@ readHdr bs = do
         arkCount <- getWord32le
         arkCount2 <- getWord32le
         when (arkCount /= arkCount2) $ fail $ "ARK version 3: ark counts don't match (" <> show arkCount <> " and " <> show arkCount2 <> ")"
-        arkSizes <- replicateM (fromIntegral arkCount) $ do
+        arkSizes <- replicateM (fromIntegral arkCount) do
           size <- getWord32le
           return ArkReference { path = Nothing, size = fromIntegral size }
         stringBytes <- parseStrings
         offsets <- parseOffsets
         entries <- parseEntries getWord32le
-        entries' <- forM entries $ \entry -> do
+        entries' <- forM entries \entry -> do
           name <- findString offsets stringBytes entry.name
           folder <- mapM (findString offsets stringBytes) entry.folder
           return entry { name = name, folder = folder }
@@ -103,13 +180,13 @@ readHdr bs = do
         arkCount <- getWord32le
         arkCount2 <- getWord32le
         when (arkCount /= arkCount2) $ fail $ "ARK version 4: ark counts don't match (" <> show arkCount <> " and " <> show arkCount2 <> ")"
-        arkSizes <- replicateM (fromIntegral arkCount) $ do
+        arkSizes <- replicateM (fromIntegral arkCount) do
           size <- getWord64le -- only in v4: each ark size is 8 bytes
           return ArkReference { path = Nothing, size = fromIntegral size }
         stringBytes <- parseStrings
         offsets <- parseOffsets
         entries <- parseEntries getWord64le -- new in v4: each entry's offset index is 8 bytes
-        entries' <- forM entries $ \entry -> do
+        entries' <- forM entries \entry -> do
           name <- findString offsets stringBytes entry.name
           folder <- mapM (findString offsets stringBytes) entry.folder
           return entry { name = name, folder = folder }
@@ -128,7 +205,7 @@ readHdr bs = do
         stringBytes <- parseStrings
         offsets <- parseOffsets
         entries <- parseEntries getWord64le
-        entries' <- forM entries $ \entry -> do
+        entries' <- forM entries \entry -> do
           name <- findString offsets stringBytes entry.name
           folder <- mapM (findString offsets stringBytes) entry.folder
           return entry { name = name, folder = folder }
@@ -151,7 +228,7 @@ readHdr bs = do
         stringBytes <- parseStrings
         offsets <- parseOffsets
         entries <- parseEntries getWord64le
-        entries' <- forM entries $ \entry -> do
+        entries' <- forM entries \entry -> do
           name <- findString offsets stringBytes entry.name
           folder <- mapM (findString offsets stringBytes) entry.folder
           return entry { name = name, folder = folder }
@@ -175,14 +252,14 @@ readHdr bs = do
         -- all empty in amp ps3
         arkCount5 <- getWord32le
         when (arkCount /= arkCount5) $ fail $ "ARK version 9: ark count doesn't match unknown string count (" <> show arkCount <> " and " <> show arkCount4 <> ")"
-        replicateM_ (fromIntegral arkCount5) $ do
+        replicateM_ (fromIntegral arkCount5) do
           stringCount <- getWord32le
-          replicateM_ (fromIntegral stringCount) $ do
+          replicateM_ (fromIntegral stringCount) do
             stringLen <- getWord32le
             skip $ fromIntegral stringLen
         -- new file table format, ignoring a bunch of details here
         numFiles <- getWord32le
-        entries <- replicateM (fromIntegral numFiles) $ do
+        entries <- replicateM (fromIntegral numFiles) do
           arkFileOffset <- getInt64le
           path <- parseStrings
           _flags <- getInt32le
@@ -221,10 +298,10 @@ decryptHdr enc = let
     return $ BL.packZipWith xor (BL.drop 4 enc) cryptStream
 
 entryFolder :: Hdr -> Folder B.ByteString (FileEntry B.ByteString)
-entryFolder entries = fromFiles $ flip map entries.files $ \entry -> let
+entryFolder entries = fromFiles $ entries.files <&> \entry -> let
   path = case entry.folder >>= NE.nonEmpty . B8.split '/' of
-    Just dir -> dir <> return (entry.name)
-    Nothing  -> return (entry.name)
+    Just dir -> dir <> return entry.name
+    Nothing  -> return entry.name
   in (path, entry)
 
 selectArk :: (MonadFail m) => Hdr -> Integer -> m (Int, Integer)
@@ -241,7 +318,7 @@ selectArk hdr offset = case hdr.arks of
 
 readFileEntry :: (MonadFail m) => Hdr -> [Readable] -> FileEntry B.ByteString -> m Readable
 readFileEntry hdr arks entry = do
-  let path = maybe id (\dir f -> dir <> "/" <> f) entry.folder (entry.name)
+  let path = maybe id (\dir f -> dir <> "/" <> f) entry.folder entry.name
   (arkIndex, offset) <- selectArk hdr $ fromIntegral entry.offset
   ark <- case drop arkIndex arks of
     []      -> fail $ "Couldn't find .ARK index " <> show arkIndex
@@ -256,7 +333,7 @@ getFileArks :: Hdr -> T.Text -> [T.Text]
 getFileArks hdr hdrName = case hdr.arks of
   Nothing -> [T.pack $ T.unpack hdrName -<.> "ARK"]
   Just arks -> zipWith
-    (\i ark -> T.pack $ case ark.path of
+    (\i ark -> T.pack case ark.path of
       -- paths are e.g. "gen/main_ps3_0.ark"
       Just p  -> takeFileName $ B8.unpack p
       Nothing -> dropExtension (T.unpack hdrName) <> "_" <> show (i :: Int) <> ".ARK"
@@ -279,8 +356,13 @@ searchGEN gen = do
       findHDR (name : names) = case findFileCI (pure name) gen of
         Nothing -> findHDR names
         Just r  -> Just (name, r)
-  case findHDR ["main.hdr", "main_xbox.hdr", "main_ps3.hdr"] of
-    Nothing        -> return Nothing
+  case findHDR ["main.hdr", "main_xbox.hdr", "main_ps3.hdr", "main_wii.hdr"] of
+    Nothing        -> case findFileCI (pure "main.ark") gen of
+      Nothing -> return Nothing
+      Just r  -> do
+        -- amplitude (ps2)
+        hdr <- readLoneArk r
+        return $ Just (hdr, [r])
     Just (name, r) -> do
       hdr <- useHandle r handleToByteString >>= readHdr
       let arkPaths = getFileArks hdr name

@@ -1,26 +1,69 @@
 name: onyx-exe-toolkit
-version: '20251011'
+version: '20261011'
 github: mtolly/onyx
-author: Michael Tolly <miketolly@gmail.com>
+author: Melody Tolly <miketolly@gmail.com>
 category: Distribution
 license: GPL-3
 license-file: ../../LICENSE.txt
+build-type: Custom
 
 extra-source-files:
 - ../../icon/icon.*
+- cbits/*.h
+- cbits/*.cpp
+- fluid/*.fl
 
 ghc-options: -Wall
+
+custom-setup:
+  dependencies:
+  - Cabal
+  - base
+  - bytestring
+  - directory
+  - process
+  - filepath
 
 executables:
 
   onyx:
     source-dirs: src
     main: Main.hs
+    other-modules:
+    - Onyx.GUI
+    - Onyx.GUI.Batch
+    - Onyx.GUI.Binding
+    - Onyx.GUI.Core
+    - Onyx.GUI.Fluid
+    - Onyx.GUI.Misc
+    - Onyx.GUI.Song
+    - Onyx.GUI.Util
+    - Paths_onyx_exe_toolkit
     c-sources:
     - cbits/time_monotonic.c
+    cxx-sources:
+    - cbits/hs_gl_window.cpp
+    - cbits/Fl_Center.cpp
+    - cbits/hs_scrubber.cpp
+    - cbits/hs_dnd_button.cpp
+    - cbits/hs_sticky_menu_button.cpp
+    - cbits/hs_value_slider.cpp
+    - cbits/hs_dnd_group.cpp
+    - cbits/hs_dnd_box.cpp
+    - cbits/hs_tree.cpp
+    - cbits/Fl_Simple_Terminal.cpp
+    - cbits/onyx_l10n.cpp
+    - cbits/onyx_fluid.cpp
+    include-dirs:
+    - cbits
+    # FLUID-generated sources are added by Setup.hs, along with the gen/
+    # include dir; see fluid/*.fl
 
     dependencies:
     - base
+    - system-cxx-std-lib
+    - inline-c
+    - inline-c-cpp
     - directory
     - aeson
     - text
@@ -30,12 +73,10 @@ executables:
     - yaml
     - process
     - resourcet
-    - hsndfile
     - transformers
     - data-default-class
     - stm
     - req
-    - fltkhs
     - midi
     - event-list
     - containers
@@ -53,16 +94,25 @@ executables:
     - extra
     - JuicyPixels
     - hashable
+    - optics
+    - vector
     # my libraries
     - midi-util
     - conduit-audio
+    - utf8proc
     # local
     - onyx-lib
     - onyx-lib-game
     - onyx-handle
-    - vector
+    - onyx-fluent
 
-    ghc-options: -threaded -O -with-rtsopts=-N
+    # everything for fltk is added via Setup.hs running fltk-config
+
+    cxx-options: -std=c++11
+
+    # -optcxx- needed for inline-c-cpp snippets
+    # (cxx-options only applies to files in cxx-sources)
+    ghc-options: -threaded -O -with-rtsopts=-N -optcxx-std=c++11
 
     when:
     - condition: os(mingw32)
@@ -72,13 +122,12 @@ executables:
         dependencies: Win32
         cxx-sources:
         - cbits/win_open_folder.cpp
-        cxx-options: -std=c++11
       else:
         dependencies: mountpoints
     - condition: os(darwin)
       cpp-options: -DMACOSX
-      # copied from fltkhs-hello-world, also unwind is to avoid https://gitlab.haskell.org/ghc/ghc/issues/11829
-      ghc-options: "-optl-Wl,-lfltkc -optl-Wl,-keep_dwarf_unwind"
+      # avoid https://gitlab.haskell.org/ghc/ghc/issues/11829
+      ghc-options: "-optl-Wl,-keep_dwarf_unwind"
 
   onyx-package:
     main: Installer.hs

@@ -1,9 +1,12 @@
 {-
 Preprocessed version of MIDI file
 -}
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
 module Onyx.PowerGig.GEV where
 
 import           Control.Monad                    (forM_, guard)
@@ -14,6 +17,7 @@ import qualified Data.ByteString                  as B
 import qualified Data.ByteString.Lazy             as BL
 import qualified Data.EventList.Absolute.TimeBody as ATB
 import qualified Data.EventList.Relative.TimeBody as RTB
+import           Data.Functor                     ((<&>))
 import           Data.Int
 import qualified Data.Map                         as Map
 import qualified Data.Vector                      as V
@@ -132,7 +136,7 @@ guitarDrumBit = \case
 
 findBits :: (Enum a, Bounded a) => (a -> Int32) -> Int32 -> Maybe [a]
 findBits _ (-1) = Nothing
-findBits f n    = Just $ do
+findBits f n    = Just do
   x <- [minBound .. maxBound]
   guard $ n .&. f x /= 0
   return x
@@ -205,7 +209,7 @@ readGEV = do
     "GELH" <- getByteString 4
     4 <- getWord32le
     gelhCount <- getWord32le
-    gelhGELS <- V.replicateM (fromIntegral gelhCount) $ do
+    gelhGELS <- V.replicateM (fromIntegral gelhCount) do
       "GELS" <- getByteString 4
       0x20 <- getWord32le
       gelsCount <- getWord32le
@@ -216,7 +220,7 @@ readGEV = do
       gelsUnk5 <- getFloatle
       gelsUnk6 <- getFloatle
       gelsUnk7 <- getWord32le
-      gelsGEVT <- V.replicateM (fromIntegral gelsCount) $ do
+      gelsGEVT <- V.replicateM (fromIntegral gelsCount) do
         "GEVT" <- getByteString 4
         0x20 <- getWord32le
         gevtTime <- getFloatle
@@ -251,7 +255,7 @@ readGEV = do
     tmpoCount <- case quotRem (tmpoSize - 8) 16 of
       (n, 0) -> return n
       _      -> fail $ "TMPO data size not divisible by 16: " <> show (tmpoSize - 8)
-    tmpoEvents <- V.replicateM (fromIntegral tmpoCount) $ do
+    tmpoEvents <- V.replicateM (fromIntegral tmpoCount) do
       tmpoEventTicks <- getWord32le
       tmpoEventUnk2 <- getWord32le
       tmpoEventUSPQN <- getWord32le
@@ -274,7 +278,7 @@ showGEV GEV{..} = do
     putByteString "GELH"
     putWord32le 4
     putWord32le $ fromIntegral $ V.length gelhGELS
-    forM_ gelhGELS $ \GELS{..} -> do
+    forM_ gelhGELS \GELS{..} -> do
       putByteString "GELS"
       putWord32le 0x20
       putWord32le $ fromIntegral $ V.length gelsGEVT
@@ -285,7 +289,7 @@ showGEV GEV{..} = do
       putFloatle gelsUnk5
       putFloatle gelsUnk6
       putWord32le gelsUnk7
-      forM_ gelsGEVT $ \GEVT{..} -> do
+      forM_ gelsGEVT \GEVT{..} -> do
         putByteString "GEVT"
         putWord32le 0x20
         putFloatle gevtTime
@@ -309,7 +313,7 @@ showGEV GEV{..} = do
     putWord32le $ fromIntegral $ V.length tmpoEvents * 16 + 8
     putWord32le tmpoResolution
     putFloatle tmpoFraction
-    forM_ tmpoEvents $ \TMPOEvent{..} -> do
+    forM_ tmpoEvents \TMPOEvent{..} -> do
       putWord32le tmpoEventTicks
       putWord32le tmpoEventUnk2
       putWord32le tmpoEventUSPQN
@@ -317,35 +321,35 @@ showGEV GEV{..} = do
 
 debugPrintGEV :: GEV -> IO ()
 debugPrintGEV GEV{..} = do
-  let printVector typ v each = forM_ (zip [0..] $ V.toList v) $ \(i, x) -> do
+  let printVector typ v each = forM_ (zip [0..] $ V.toList v) \(i, x) -> do
         putStrLn ""
         putStrLn $ typ <> " #" <> show (i :: Int) <> ":"
         each x
   print gevPCMC
-  printVector "GELS" (gelhGELS gevGELH) $ \gels -> do
+  printVector "GELS" gevGELH.gelhGELS \gels -> do
     print gels { gelsGEVT = V.empty }
-    printVector "GEVT" (gelsGEVT gels) $ \gevt -> do
+    printVector "GEVT" gels.gelsGEVT \gevt -> do
       print gevt
-      print $ findBits guitarDrumBit $ gevtGameBits gevt
-  printVector "String" (strhData gevSTRH) $ \offset -> do
-    print $ B.takeWhile (/= 0) $ B.drop (fromIntegral offset) $ strsData gevSTRS
+      print $ findBits guitarDrumBit gevt.gevtGameBits
+  printVector "String" gevSTRH.strhData \offset -> do
+    print $ B.takeWhile (/= 0) $ B.drop (fromIntegral offset) gevSTRS.strsData
   print gevTMPO { tmpoEvents = V.empty }
-  printVector "TMPOEvent" (tmpoEvents gevTMPO) print
+  printVector "TMPOEvent" gevTMPO.tmpoEvents print
 
 getMIDITempos :: GEV -> U.TempoMap
 getMIDITempos gev
   = U.makeTempoMap
   $ RTB.fromAbsoluteEventList
   $ ATB.fromPairList
-  $ flip map (V.toList $ tmpoEvents $ gevTMPO gev) $ \e -> let
-    posn = fromIntegral (tmpoEventTicks e) / fromIntegral (tmpoResolution $ gevTMPO gev)
-    event = E.MetaEvent $ Meta.SetTempo $ fromIntegral $ tmpoEventUSPQN e
+  $ V.toList gev.gevTMPO.tmpoEvents <&> \e -> let
+    posn = fromIntegral e.tmpoEventTicks / fromIntegral gev.gevTMPO.tmpoResolution
+    event = E.MetaEvent $ Meta.SetTempo $ fromIntegral e.tmpoEventUSPQN
     in (posn, event)
 
 getString :: Word32 -> GEV -> Maybe B.ByteString
 getString i gev = do
-  offset <- strhData (gevSTRH gev) V.!? fromIntegral i
-  return $ B.takeWhile (/= 0) $ B.drop (fromIntegral offset) $ strsData $ gevSTRS gev
+  offset <- gev.gevSTRH.strhData V.!? fromIntegral i
+  return $ B.takeWhile (/= 0) $ B.drop (fromIntegral offset) gev.gevSTRS.strsData
 
 makeStringBank :: [B.ByteString] -> (STRH, STRS, Map.Map B.ByteString Word32)
 makeStringBank = go BL.empty [] Map.empty where
@@ -358,7 +362,7 @@ makeStringBank = go BL.empty [] Map.empty where
       }
     in (strh, strs, mapping)
   go bank byteOffsets mapping (x : xs) = let
-    nulls = BL.replicate (if rem (B.length x) 2 == 0 then 2 else 1) 0
+    nulls = BL.replicate (if even $ B.length x then 2 else 1) 0
     bank' = bank <> BL.fromStrict x <> nulls
     byteOffsets' = fromIntegral (BL.length bank) : byteOffsets
     mapping' = Map.insert x (fromIntegral $ length byteOffsets) mapping
@@ -368,7 +372,7 @@ makeTempos :: U.TempoMap -> TMPO
 makeTempos tmap = TMPO
   { tmpoResolution = 480
   , tmpoFraction = 1 / 480
-  , tmpoEvents = V.fromList $ do
+  , tmpoEvents = V.fromList do
     (absBeats, bps) <- ATB.toPairList $ RTB.toAbsoluteEventList 0 $ U.tempoMapToBPS tmap
     return TMPOEvent
       { tmpoEventTicks = round $ absBeats * 480

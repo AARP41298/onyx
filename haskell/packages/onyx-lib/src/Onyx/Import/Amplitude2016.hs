@@ -1,10 +1,10 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE StrictData            #-}
-{-# LANGUAGE TupleSections         #-}
 module Onyx.Import.Amplitude2016 where
 
 import           Control.Monad.Extra                   (forM, guard)
@@ -50,7 +50,7 @@ importAmplitudeArk _src gen = do
   folder <- loadArkFolder hdr arks
   case first TE.decodeLatin1 <$> findFolder ["ps3", "songs"] folder of
     Nothing -> return []
-    Just songsFolder -> fmap concat $ forM (folderSubfolders songsFolder) $ \(name, sub) ->
+    Just songsFolder -> fmap concat $ forM (folderSubfolders songsFolder) \(name, sub) ->
       if ("tut" `T.isPrefixOf` name) || name == "credits" -- just ignore these manually
         then return []
         else return [importAmplitudeSong sub $ name <> ".moggsong"]
@@ -90,14 +90,14 @@ importAmplitudeSong songFolder moggSongName level = do
         return (PartName name, getChannels n, inst, trk)
       midi = case ampMidi of
         Just (F.Song temps sigs _) -> F.Song temps sigs mempty
-          { F.onyxParts = Map.fromList $ do
+          { F.onyxParts = Map.fromList do
             (name, _, _, trk) <- parts
             return (name, mempty
-              { F.onyxPartMania = Map.fromList $ do
+              { F.onyxPartMania = Map.fromList do
                 (diff, catchDiff) <- Map.toList trk.catchDifficulties
                 return (amplitudeDiffNames diff, ManiaTrack
-                  { maniaNotes     = blipEdgesRB_ $ (\gem -> ((fromEnum gem, NoteNormal), Nothing)) <$> catchDiff.catchGems
-                  , maniaOverdrive = RTB.empty
+                  { notes     = blipEdgesRB_ $ (\gem -> ((fromEnum gem, NoteNormal), Nothing)) <$> catchDiff.catchGems
+                  , overdrive = RTB.empty
                   })
               })
           }
@@ -105,7 +105,7 @@ importAmplitudeSong songFolder moggSongName level = do
   return SongYaml
     { metadata = def'
       { title        = Just song.title
-      , artist       = Just $ case song.artist_short of
+      , artist       = Just case song.artist_short of
         "Harmonix" -> song.artist -- human love
         artist     -> artist
       , previewStart = Just $ PreviewSeconds previewStart
@@ -117,13 +117,14 @@ importAmplitudeSong songFolder moggSongName level = do
       , fileBackgroundImage = Nothing
       , fileSongAnim = Nothing
       , fileMidi = SoftFile "notes.mid" $ SoftChart midi
+      , fileMidiOriginal = Nothing -- could import this
       }
     , audio = HM.empty
     , jammit = HM.empty
     , plans = HM.singleton "mogg" $ MoggPlan MoggPlanInfo
       { fileMOGG = Just $ SoftFile "audio.mogg" $ SoftReadable mogg
       , moggMD5 = Nothing
-      , parts = Parts $ HM.fromList $ do
+      , parts = Parts $ HM.fromList do
         (name, chans, _, _) <- parts
         return (name, PartSingle chans)
       , crowd = []
@@ -141,9 +142,9 @@ importAmplitudeSong songFolder moggSongName level = do
       , decryptSilent = False
       }
     , targets = HM.empty
-    , parts = Parts $ HM.fromList $ do
+    , parts = Parts $ HM.fromList do
       (name, _, inst, _) <- parts
-      return (name, emptyPart { mania = Just $ ModeMania $ do
+      return (name, emptyPart { mania = Just $ ModeMania do
         diff <- fmap amplitudeDiffNames $ Easy NE.:| [Medium, Hard, Expert]
         return ManiaChart
           { name = diff

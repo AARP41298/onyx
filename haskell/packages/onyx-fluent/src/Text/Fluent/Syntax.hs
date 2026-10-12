@@ -1,10 +1,11 @@
+{-# LANGUAGE BlockArguments    #-}
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Text.Fluent.Syntax where
 
 import           Control.Monad   (guard, replicateM)
 import           Data.Foldable   (toList)
-import           Data.Functor    (void)
+import           Data.Functor    (void, (<&>))
 import           Data.Maybe      (fromMaybe, isJust, mapMaybe)
 import           Data.Scientific (Scientific)
 import           Data.String     (IsString (..))
@@ -97,7 +98,7 @@ term = do
 commentLine :: Parser T.Text
 commentLine = do
   hashes <- try "###" <|> try "##" <|> "#"
-  comment <- optional $ do
+  comment <- optional do
     void $ single ' '
     chars <- many $ try comment_char
     return $ T.pack $ ' ' : chars
@@ -118,7 +119,7 @@ junk = do
 
 junk_line :: Parser T.Text
 junk_line = do
-  nonNewlines <- takeWhile1P (Just "non-newline") $ \c -> c /= '\n'
+  nonNewlines <- takeWhile1P (Just "non-newline") \c -> c /= '\n'
   end <- "\n" <|> (eof >> return "")
   guard $ not $ T.null nonNewlines && T.null end
   return $ nonNewlines <> end
@@ -144,23 +145,25 @@ pattern :: Parser Pattern
 pattern = do
   els <- many1 $ try patternElement
   -- remove common leading space from block lines
-  let spaceLengths = flip mapMaybe els $ \case
-        BlockText      s   -> Just $ T.length $ T.takeWhile (== ' ') s
-        BlockPlaceable s _ -> Just $ T.length $ T.takeWhile (== ' ') s
-        _                  -> Nothing
+  let spaceLengths = flip mapMaybe els \case
+        BlockText      _ s   -> Just $ T.length $ T.takeWhile (== ' ') s
+        BlockPlaceable _ s _ -> Just $ T.length $ T.takeWhile (== ' ') s
+        _                    -> Nothing
       dropSpaces = case spaceLengths of
         n : ns -> T.drop $ foldr min n ns
         []     -> id
-  return $ flip map els $ \case
-    BlockText      s   -> BlockText      (dropSpaces s)
-    BlockPlaceable s x -> BlockPlaceable (dropSpaces s) x
-    inline             -> inline
+  return $ els <&> \case
+    BlockText      n s   -> BlockText      n (dropSpaces s)
+    BlockPlaceable n s x -> BlockPlaceable n (dropSpaces s) x
+    inline               -> inline
 
 data PatternElement
   = InlineText T.Text
-  | BlockText T.Text
+  -- block elements carry the number of preceding line breaks (blank lines in
+  -- the source produce more than one), so blank lines are preserved on output
+  | BlockText Int T.Text
   | InlinePlaceable Expression
-  | BlockPlaceable T.Text Expression
+  | BlockPlaceable Int T.Text Expression
   deriving (Show)
 
 patternElement :: Parser PatternElement
@@ -174,11 +177,11 @@ inline_text' = T.pack <$> many1 (try text_char)
 
 block_text :: Parser PatternElement
 block_text = do
-  void blank_block -- TODO we should be saving extra newlines here
+  bb <- blank_block
   sp <- blank_inline
   c <- indented_char
   t <- optional inline_text'
-  return $ BlockText $ sp <> T.singleton c <> fromMaybe "" t
+  return $ BlockText (T.count "\n" bb) $ sp <> T.singleton c <> fromMaybe "" t
 
 inline_placeable :: Parser PatternElement
 inline_placeable = InlinePlaceable <$> inline_placeable'
@@ -194,9 +197,9 @@ inline_placeable' = do
 
 block_placeable :: Parser PatternElement
 block_placeable = do
-  void blank_block -- TODO we should be saving extra newlines here
+  bb <- blank_block
   sp <- optional blank_inline
-  BlockPlaceable (fromMaybe "" sp) <$> inline_placeable'
+  BlockPlaceable (T.count "\n" bb) (fromMaybe "" sp) <$> inline_placeable'
 
 data Expression
   = EInline InlineExpression
@@ -299,7 +302,7 @@ callArguments = do
 
 argument_list :: Parser [Argument]
 argument_list = do
-  notFinal <- many $ try $ do
+  notFinal <- many $ try do
     arg <- argument
     void $ optional blank'
     void ","
@@ -378,8 +381,8 @@ type Identifier = T.Text
 
 identifier :: Parser Identifier
 identifier = do
-  x <- satisfy $ \c -> ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
-  xs <- takeWhileP (Just "identifier post-first character") $ \c -> or
+  x <- satisfy \c -> ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
+  xs <- takeWhileP (Just "identifier post-first character") \c -> or
     [ 'a' <= c && c <= 'z'
     , 'A' <= c && c <= 'Z'
     , '0' <= c && c <= '9'
@@ -407,7 +410,7 @@ quoted_char = let
     <|> ("\\"     >> fail "not quoted_char")
     <|> (line_end >> fail "not quoted_char")
     <|> anySingle
-  hex = satisfy $ \c -> or
+  hex = satisfy \c -> or
     [ '0' <= c && c <= '9'
     , 'a' <= c && c <= 'f'
     , 'A' <= c && c <= 'F'
@@ -427,7 +430,7 @@ quoted_char = let
   in try normal <|> try special_escape <|> try unicode_escape_4 <|> unicode_escape_6
 
 digits :: Parser T.Text
-digits = takeWhile1P (Just "digit") $ \c -> '0' <= c && c <= '9'
+digits = takeWhile1P (Just "digit") \c -> '0' <= c && c <= '9'
 
 blank_inline :: Parser T.Text
 blank_inline = takeWhile1P (Just "space") (== ' ')
@@ -440,7 +443,7 @@ line_end' = "\r\n" <|> "\n"
 
 blank_block :: Parser T.Text
 -- probably a better way to do this
-blank_block = fmap (T.concat . concat) $ many1 $ try $ do
+blank_block = fmap (T.concat . concat) $ many1 $ try do
   x <- optional blank_inline
   y <- line_end
   guard $ isJust x || not (T.null y)

@@ -1,3 +1,7 @@
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE TupleSections       #-}
 module Onyx.Controller.ProGuitar where
 
 import           Control.Monad                    (guard)
@@ -99,29 +103,29 @@ sendCommand (cont, msg) = let
     ChangeButtons btns -> let flag n f = if f btns then n else 0 in
       [ 8
       , foldr (.|.) 0
-        [ flag 1 buttonX
-        , flag 2 buttonA
-        , flag 4 buttonB
-        , flag 8 buttonY
+        [ flag 1 (.buttonX)
+        , flag 2 (.buttonA)
+        , flag 4 (.buttonB)
+        , flag 8 (.buttonY)
         ]
       , foldr (.|.) 0
-        [ flag 1 buttonBack
-        , flag 2 buttonStart
-        , flag 16 buttonXbox
-        , flag 64 buttonSync
+        [ flag 1 (.buttonBack)
+        , flag 2 (.buttonStart)
+        , flag 16 (.buttonXbox)
+        , flag 64 (.buttonSync)
         ]
       , foldr (.|.) 0
-        [ fromIntegral $ fromEnum $ buttonDpad btns
-        , flag 32 button32
-        , flag 64 buttonTilt
+        [ fromIntegral $ fromEnum btns.buttonDpad
+        , flag 32 (.button32)
+        , flag 64 (.buttonTilt)
         ]
       , 0
       ]
 
 receiveCommand :: [Word8] -> Maybe Command
 receiveCommand = magic where
-  magic (8 : 64 : 10 : xs) = fmap ((,) Mustang) $ msg xs
-  magic (8 : 64 : 8  : xs) = fmap ((,) Squier ) $ msg xs
+  magic (8 : 64 : 10 : xs) = (Mustang,) <$> msg xs
+  magic (8 : 64 : 8  : xs) = (Squier ,) <$> msg xs
   magic _                  = Nothing
   msg [1, nstr, pitch] = do
     str <- reverseLookup each strNumber nstr

@@ -46,7 +46,7 @@ rhythmLength r = do
     "128th"   -> return (1/32)
     _         -> Nothing
   let dots = maybe 0 (.count) r.augmentationDot
-      dotRatio = 2 - 2 ^^ (negate dots)
+      dotRatio = 2 - 2 ^^ negate dots
       tupleRatio = maybe 1 (\tup -> fromIntegral tup.den / fromIntegral tup.num) r.primaryTuplet
   return $ base * dotRatio * tupleRatio
 
@@ -85,7 +85,7 @@ timingGPIF gpif = do
     if auto.type_ == "Tempo"
       then case readTempo auto.value of
         Nothing  -> fatal $ "Couldn't understand tempo change: " <> show auto.value
-        Just bps -> return $ do
+        Just bps -> return do
           -- need to reapply this tempo change whenever the bar is repeated
           (expandedIndex, (originalIndex, _)) <- zip [0..] expanded
           guard $ originalIndex == auto.bar
@@ -118,7 +118,7 @@ expandRepeats startMBs = let
         (base, alternates) = break (\(_, mb) -> isJust mb.alternateEndings) chunk
     i <- [1 .. count]
     let itxt = T.pack $ show i
-        endingStart = flip dropWhile alternates $ \(_, mb) -> case mb.alternateEndings of
+        endingStart = flip dropWhile alternates \(_, mb) -> case mb.alternateEndings of
           Nothing -> True
           Just ae -> notElem itxt $ T.splitOn "," ae
         ending = fst $ splitOnRepeatEnd endingStart
@@ -295,6 +295,7 @@ importGPIF gpif level = do
     , targets = HM.empty
     , global = def'
       { fileMidi            = SoftFile "notes.mid" $ SoftChart mid
+      , fileMidiOriginal    = Nothing
       , fileSongAnim        = Nothing
       , backgroundVideo     = Nothing
       , fileBackgroundImage = Nothing
@@ -308,7 +309,7 @@ importGPIF gpif level = do
       , tuningCents = 0
       , fileTempo   = Nothing
       }
-    , parts = Parts $ HM.fromList $ do
+    , parts = Parts $ HM.fromList do
       (name, tuning, _) <- imported
       let part = emptyPart
             { proGuitar = Just ModeProGuitar

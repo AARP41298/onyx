@@ -1,10 +1,13 @@
+{-# LANGUAGE BlockArguments    #-}
 {-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE NoFieldSelectors  #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms   #-}
 {-# LANGUAGE TupleSections     #-}
 module Onyx.Beatmania.BMS where
 
 import qualified Data.EventList.Relative.TimeBody as RTB
+import           Data.Functor                     ((<&>))
 import qualified Data.HashMap.Strict              as HM
 import qualified Data.Map                         as Map
 import           Data.Maybe
@@ -101,7 +104,7 @@ readBMSLines lns = BMS
       = U.measureMapFromLengths U.Error
       $ assembleMMap
       $ map getBarLength [0 .. maxBar]
-    getBarLength n = maybe 4 (* 4) $ do
+    getBarLength n = maybe 4 (* 4) do
       obj <- Map.lookup n objects
       lens <- HM.lookup "02" obj
       listToMaybe lens >>= textFloat
@@ -126,13 +129,13 @@ readBMSLines lns = BMS
     refBPMs = HM.mapMaybe textFloat $ HM.fromList $ getReferences "BPM" lns
     baseBPM = fromMaybe 0 $ HM.lookup "BASEBPM" lnsMap >>= textFloat
 
-    readPlayer c = foldr RTB.merge RTB.empty $ do
+    readPlayer c = foldr RTB.merge RTB.empty do
       (col, key) <- bmeMapping
       return $ (key,) <$> getChannel (T.pack [c, col])
 
-    readPlayerLong c = foldr RTB.merge RTB.empty $ do
+    readPlayerLong c = foldr RTB.merge RTB.empty do
       (col, key) <- bmeMapping
       let chan = getChannel $ T.pack [c, col]
           edges = zip (cycle [True, False]) $ RTB.toPairList chan
-      return $ RTB.fromPairList $ flip fmap edges
-        $ \(edge, (dt, chip)) -> (dt, (key, chip, edge))
+      return $ RTB.fromPairList $ edges <&>
+        \(edge, (dt, chip)) -> (dt, (key, chip, edge))

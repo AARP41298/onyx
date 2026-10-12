@@ -1,7 +1,9 @@
+{-# LANGUAGE BlockArguments      #-}
 {-# LANGUAGE CPP                 #-}
 {-# LANGUAGE DeriveFoldable      #-}
 {-# LANGUAGE DeriveFunctor       #-}
 {-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE PatternSynonyms     #-}
@@ -11,6 +13,7 @@ module Onyx.Harmonix.RockBand.Score where
 import           Control.Monad                    (guard, void)
 import           Data.Either                      (lefts, rights)
 import qualified Data.EventList.Relative.TimeBody as RTB
+import           Data.Functor                     ((<&>))
 import qualified Data.Map                         as Map
 import qualified Data.Text                        as T
 import qualified Numeric.NonNegative.Class        as NNC
@@ -119,9 +122,9 @@ data VoxScoreEvent = PhraseEnd | PercNote
 voxBaseAndSolo :: (NNC.C t) => Difficulty -> Vox.VocalTrack t -> (Int, Int)
 voxBaseAndSolo diff vt = let
   phraseEnds = fmap (const PhraseEnd) $ RTB.collectCoincident $ RTB.merge
-    (RTB.filter not $ Vox.vocalPhrase1 vt)
-    (RTB.filter not $ Vox.vocalPhrase2 vt)
-  perc = fmap (const PercNote) $ Vox.vocalPerc vt
+    (RTB.filter not vt.phrase1)
+    (RTB.filter not vt.phrase2)
+  perc = PercNote <$ vt.percussion
   phrasePoints = case diff of
     Easy   -> 200
     Medium -> 400
@@ -142,7 +145,7 @@ baseAndSolo :: F.FixedFile U.Beats -> (ScoreTrack, Difficulty) -> (Int, Int)
 baseAndSolo mid (scoreTrack, diff) = let
   adjustGems breLanes = ignoreBRE breLanes . fixSloppyNotes (10 / 480)
   -- have to ignore notes under the BRE lanes, but not the ones after
-  ignoreBRE breLanes = case mid.fixedEvents.eventsCoda of
+  ignoreBRE breLanes = case mid.fixedEvents.coda of
     Wait breStart () _ -> case RTB.filter not $ U.trackDrop breStart breLanes of
       Wait breLength _ _ -> \gems -> let
         breEnd = breStart <> breLength
@@ -151,29 +154,29 @@ baseAndSolo mid (scoreTrack, diff) = let
     _            -> id
   getDrums gem = let
     trk = mid.fixedPartDrums
-    gems = adjustGems trk.drumActivation $ Drums.computePro (Just diff) trk
+    gems = adjustGems trk.activation $ Drums.computePro (Just diff) trk
     base = drumBase gem gems
-    solo = perfectSoloBonus 100 trk.drumSolo gems
+    solo = perfectSoloBonus 100 trk.solo gems
     in (base, solo)
   getFive :: Int -> Five.FiveTrack U.Beats -> (Int, Int)
   getFive maxStreak trk = let
-    gems = adjustGems trk.fiveBRE
+    gems = adjustGems trk.bre
       $ edgeBlips_ minSustainLengthRB
-      $ maybe RTB.empty (.fiveGems)
-      $ Map.lookup diff trk.fiveDifficulties
+      $ maybe RTB.empty (.gems)
+      $ Map.lookup diff trk.difficulties
     base = gbkBase 25 12 maxStreak $ fmap snd gems
-    solo = perfectSoloBonus 100 trk.fiveSolo $ RTB.collectCoincident gems
+    solo = perfectSoloBonus 100 trk.solo $ RTB.collectCoincident gems
     in (base, solo)
   -- From what I can tell 17 and 22 are same cutoff, and it uses the 22 chart
   getPG maxStreak trk22 trk17 = let
     trk = if PG.nullPG trk22 then trk17 else trk22
     gems
-      = adjustGems (snd <$> trk.pgBRE)
+      = adjustGems (snd <$> trk.bre)
       $ edgeBlips minSustainLengthRB
-      $ maybe RTB.empty (.pgNotes)
-      $ Map.lookup diff trk.pgDifficulties
+      $ maybe RTB.empty (.notes)
+      $ Map.lookup diff trk.difficulties
     base = gbkBase 60 30 maxStreak $ maxChord2 $ fmap (\(_, (_, _), mlen) -> mlen) gems
-    solo = perfectSoloBonus 150 trk.pgSolo $ RTB.collectCoincident gems
+    solo = perfectSoloBonus 150 trk.solo $ RTB.collectCoincident gems
     in (base, solo)
   maxChord2 = RTB.flatten . fmap (take 2) . RTB.collectCoincident
   getVox = voxBaseAndSolo diff
@@ -184,9 +187,9 @@ baseAndSolo mid (scoreTrack, diff) = let
       Hard   -> mid.fixedPartRealKeysH
       Expert -> mid.fixedPartRealKeysX
     expert = mid.fixedPartRealKeysX
-    gems = adjustGems expert.pkBRE $ edgeBlips_ minSustainLengthRB trk.pkNotes
+    gems = adjustGems expert.bre $ edgeBlips_ minSustainLengthRB trk.notes
     base = gbkBase 60 30 4 $ fmap snd gems
-    solo = perfectSoloBonus 100 expert.pkSolo $ RTB.collectCoincident gems
+    solo = perfectSoloBonus 100 expert.solo $ RTB.collectCoincident gems
     in (base, solo)
   in case scoreTrack of
     ScoreDrums     -> getDrums 25
@@ -233,15 +236,15 @@ tracksToStars trks = let
     3 -> 1.52
     _ -> 1.8
   sumOfBases :: Stars Float
-  sumOfBases = foldr (liftA2 (+)) (pure 0) $ flip map trks $ \(scoreTrack, _, (base, solo)) -> liftA2 (+)
+  sumOfBases = foldr (liftA2 (+)) (pure 0) $ trks <&> \(scoreTrack, _, (base, solo)) -> liftA2 (+)
     (((fromIntegral base * new_num_instruments_multiplier) *) <$> new_instrument_thresholds scoreTrack)
     ((fromIntegral solo *) <$> new_bonus_thresholds)
   allCutoffs = Just . (floor :: Float -> Int) <$> sumOfBases
   allExpert = all (\(_, diff, _) -> diff == Expert) trks
-  in allCutoffs { starsGold = guard allExpert >> starsGold allCutoffs }
+  in allCutoffs { starsGold = guard allExpert >> allCutoffs.starsGold }
 
 starCutoffs :: F.FixedFile U.Beats -> [(ScoreTrack, Difficulty)] -> Stars (Maybe Int)
-starCutoffs mid trks = tracksToStars $ do
+starCutoffs mid trks = tracksToStars do
   pair@(strack, diff) <- trks
   let (base, solo) = baseAndSolo mid pair
   return (strack, diff, (base, solo))
@@ -259,9 +262,9 @@ gh2Base diff pt = case Map.lookup diff pt.partDifficulties of
   Just pd -> gh2BaseGems pd.partGems
 
 gh2BaseFixed :: Difficulty -> Five.FiveTrack U.Beats -> Int
-gh2BaseFixed diff ft = case Map.lookup diff ft.fiveDifficulties of
+gh2BaseFixed diff ft = case Map.lookup diff ft.difficulties of
   Nothing -> 0
-  Just fd -> gh2BaseGems fd.fiveGems
+  Just fd -> gh2BaseGems fd.gems
 
 -- In GH2 coop_max_scores (either a .dtb on disc or .dta in 360 DLC)
 -- each song has an entry:
@@ -284,7 +287,7 @@ getScoreTracksGH2 :: F.FixedFile U.Beats -> [(ScoreTrackGH2, Difficulty, Int)]
 getScoreTracksGH2 mid = do
   strack <- [minBound .. maxBound]
   diff   <- [minBound .. maxBound]
-  let base = gh2BaseFixed diff $ case strack of
+  let base = gh2BaseFixed diff case strack of
         ScoreGH2Guitar -> mid.fixedPartGuitar
         ScoreGH2Bass   -> mid.fixedPartBass
         ScoreGH2Rhythm -> mid.fixedPartRhythm

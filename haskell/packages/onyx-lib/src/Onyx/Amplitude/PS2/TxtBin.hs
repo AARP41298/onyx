@@ -1,4 +1,5 @@
 -- gen/*.txt.bin files (and other *.bin)
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
@@ -21,6 +22,7 @@ import           Data.Bits
 import qualified Data.ByteString           as B
 import qualified Data.ByteString.Char8     as B8
 import qualified Data.ByteString.Lazy      as BL
+import           Data.Functor              ((<&>))
 import           Data.Int
 import           Data.List.Extra           (chunksOf, foldl', nubOrd)
 import qualified Data.Map                  as Map
@@ -72,7 +74,7 @@ getNode = do
         (n, 0) -> n
         (n, _) -> n + 1
   typeWords <- replicateM numTypeWords getWord32le
-  contents <- forM [0 .. len - 1] $ \i -> do
+  contents <- forM [0 .. len - 1] \i -> do
     let typeTag = case quotRem i 16 of
           (x, y) -> ((typeWords !! x) `shiftR` (y * 2)) .&. 0x3
     case typeTag of
@@ -84,7 +86,7 @@ getNode = do
   return $ Node id1 id2 contents
 
 putTxtBin :: TxtBin -> BL.ByteString
-putTxtBin tb = runPut $ do
+putTxtBin tb = runPut do
 
   let putLenStr :: B.ByteString -> Put
       putLenStr b = do
@@ -114,7 +116,7 @@ putTxtBin tb = runPut $ do
               $ map (\tags -> sum $ zipWith shiftL tags [0, 2, 4, 6])
               $ chunksOf 4 typeTags
         mapM_ putWord8 typeBytes
-        forM_ node.contents $ \case
+        forM_ node.contents \case
           I int -> putInt32le int
           S str -> putLenStr str
           F flt -> putFloatle flt
@@ -125,7 +127,7 @@ putTxtBin tb = runPut $ do
 -- Discards source and line number info
 txtBinToDTA :: TxtBin -> D.DTA B.ByteString
 txtBinToDTA tb = let
-  encodeNode (Node _ _ vals) = flip map vals $ \case
+  encodeNode (Node _ _ vals) = vals <&> \case
     I int  -> D.Int int
     S str  -> if B8.elem ' ' str || B8.elem '\'' str || B8.elem '\n' str
       then D.String str
@@ -143,7 +145,7 @@ txtBinToTracedDTA tb = let
       [ D.Int $ fromIntegral x
       , D.Int $ fromIntegral y
       ]
-    in (traceNumbers :) $ flip map vals $ \case
+    in (traceNumbers :) $ vals <&> \case
       I int  -> D.Int int
       S str  -> if B8.elem ' ' str || B8.elem '\'' str || B8.elem '\n' str
         then D.String str
@@ -165,7 +167,7 @@ dtaToTxtBin :: (SendMessage m) => D.DTA B.ByteString -> StackTraceT m TxtBin
 dtaToTxtBin (D.DTA _ (D.Tree _ root)) = do
   (sourceList, root') <- case root of
     D.Braces (D.Tree _ sourceChunks) : rest -> do
-      sources <- flip mapMaybeM sourceChunks $ \case
+      sources <- flip mapMaybeM sourceChunks \case
         D.String s -> return $ Just s
         D.Sym s -> return $ Just s
         x -> do
@@ -181,7 +183,7 @@ dtaToTxtBin (D.DTA _ (D.Tree _ root)) = do
         D.Parens (D.Tree _ xs) -> xs >>= getExactTraceInfo
         _ -> []
       fileIndexes = nubOrd $ map snd exactTraceInfo
-      initialTraceState = TraceState $ Map.fromList $ do
+      initialTraceState = TraceState $ Map.fromList do
         i <- fileIndexes
         return (i, foldl' max 0 [ line | (line, j) <- exactTraceInfo, i == j ] + 1)
 
@@ -196,7 +198,7 @@ dtaToTxtBin (D.DTA _ (D.Tree _ root)) = do
             return (fromIntegral x, fromIntegral y, rest)
           D.Brackets (D.Tree _ [D.Int y]) : rest -> freshLine (fromIntegral y) rest
           _ -> freshLine 0 chunks
-        contents <- flip mapMaybeM chunks' $ \case
+        contents <- flip mapMaybeM chunks' \case
           D.Int      int             -> return $ Just $ I int
           D.Sym      str             -> return $ Just $ S str
           D.String   str             -> return $ Just $ S str

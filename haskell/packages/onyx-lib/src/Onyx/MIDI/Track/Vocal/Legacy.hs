@@ -1,7 +1,8 @@
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms   #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE FlexibleInstances   #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
 module Onyx.MIDI.Track.Vocal.Legacy
 ( Percussion(..), Pitch(..)
 , Event(..)
@@ -35,33 +36,33 @@ data Event
 
 vocalFromLegacy :: (NNC.C t) => RTB.T t Event -> VocalTrack t
 vocalFromLegacy leg = VocalTrack
-  { vocalMood          = RTB.mapMaybe (\case Mood x -> Just x; _ -> Nothing) leg
-  , vocalLyrics        = RTB.mapMaybe (\case Lyric x -> Just x; _ -> Nothing) leg
-  , vocalPerc          = RTB.mapMaybe (\case Percussion -> Just (); _ -> Nothing) leg
-  , vocalPercSound     = RTB.mapMaybe (\case PercussionSound -> Just (); _ -> Nothing) leg
-  , vocalPercAnimation = RTB.mapMaybe (\case PercussionAnimation x y -> Just (x, y); _ -> Nothing) leg
-  , vocalPhrase1       = RTB.mapMaybe (\case Phrase x -> Just x; _ -> Nothing) leg
-  , vocalPhrase2       = RTB.mapMaybe (\case Phrase2 x -> Just x; _ -> Nothing) leg
-  , vocalOverdrive     = RTB.mapMaybe (\case Overdrive x -> Just x; _ -> Nothing) leg
-  , vocalLyricShift    = RTB.mapMaybe (\case LyricShift -> Just (); _ -> Nothing) leg
-  , vocalRangeShift    = RTB.mapMaybe (\case RangeShift x -> Just x; _ -> Nothing) leg
-  , vocalNotes         = RTB.mapMaybe (\case Note b p -> Just (p, b); _ -> Nothing) leg
-  , vocalEyesClosed    = RTB.empty
+  { mood                = RTB.mapMaybe (\case Mood x -> Just x; _ -> Nothing) leg
+  , lyrics              = RTB.mapMaybe (\case Lyric x -> Just x; _ -> Nothing) leg
+  , percussion          = RTB.mapMaybe (\case Percussion -> Just (); _ -> Nothing) leg
+  , percussionSound     = RTB.mapMaybe (\case PercussionSound -> Just (); _ -> Nothing) leg
+  , percussionAnimation = RTB.mapMaybe (\case PercussionAnimation x y -> Just (x, y); _ -> Nothing) leg
+  , phrase1             = RTB.mapMaybe (\case Phrase x -> Just x; _ -> Nothing) leg
+  , phrase2             = RTB.mapMaybe (\case Phrase2 x -> Just x; _ -> Nothing) leg
+  , overdrive           = RTB.mapMaybe (\case Overdrive x -> Just x; _ -> Nothing) leg
+  , lyricShift          = RTB.mapMaybe (\case LyricShift -> Just (); _ -> Nothing) leg
+  , rangeShift          = RTB.mapMaybe (\case RangeShift x -> Just x; _ -> Nothing) leg
+  , notes               = RTB.mapMaybe (\case Note b p -> Just (p, b); _ -> Nothing) leg
+  , eyesClosed          = RTB.empty
   }
 
 vocalToLegacy :: (NNC.C t) => VocalTrack t -> RTB.T t Event
 vocalToLegacy o = foldr RTB.merge RTB.empty
-  [ Mood                        <$> vocalMood          o
-  , Lyric                       <$> vocalLyrics        o
-  , const Percussion            <$> vocalPerc          o
-  , const PercussionSound       <$> vocalPercSound     o
-  , uncurry PercussionAnimation <$> vocalPercAnimation o
-  , Phrase                      <$> vocalPhrase1       o
-  , Phrase2                     <$> vocalPhrase2       o
-  , Overdrive                   <$> vocalOverdrive     o
-  , const LyricShift            <$> vocalLyricShift    o
-  , RangeShift                  <$> vocalRangeShift    o
-  , uncurry (flip Note)         <$> vocalNotes         o
+  [ Mood                        <$> o.mood
+  , Lyric                       <$> o.lyrics
+  , const Percussion            <$> o.percussion
+  , const PercussionSound       <$> o.percussionSound
+  , uncurry PercussionAnimation <$> o.percussionAnimation
+  , Phrase                      <$> o.phrase1
+  , Phrase2                     <$> o.phrase2
+  , Overdrive                   <$> o.overdrive
+  , const LyricShift            <$> o.lyricShift
+  , RangeShift                  <$> o.rangeShift
+  , uncurry (flip Note)         <$> o.notes
   ]
 
 {- |
@@ -119,7 +120,10 @@ fixGHVocals
       notLyrics = filter (\case Lyric _ -> False; _ -> True) evts
       in case (lyrics, noteOn) of
         (s : _, []) -> let
-          evts' = Lyric (s <> "^") : Note True (Octave60 C) : notLyrics
+          lyric = if any (`T.isSuffixOf` s) ["#", "^"]
+            then s
+            else s <> "^"
+          evts' = Lyric lyric : Note True (Octave60 C) : notLyrics
           rtb'' = RTB.insert (1/16) [Note False (Octave60 C)] rtb'
           in RTB.cons dt evts' $ fixTalkies rtb''
         _ -> RTB.cons dt evts $ fixTalkies rtb'
@@ -127,7 +131,7 @@ fixGHVocals
   fixEarlyPhraseEnd rtb = case RTB.viewL rtb of
     Nothing -> RTB.empty
     Just ((dt, evts), rtb') -> RTB.cons dt evts $ fixEarlyPhraseEnd
-      $ if null [ () | Note True _ <- evts ]
+      if null [ () | Note True _ <- evts ]
         then rtb'
         else pushPhraseEnd False rtb'
   pushPhraseEnd False rtb = case RTB.viewL rtb of

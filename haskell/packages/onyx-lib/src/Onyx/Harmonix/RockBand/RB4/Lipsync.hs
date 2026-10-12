@@ -2,6 +2,7 @@
 Ported from LibForge
 https://github.com/maxton/LibForge
 -}
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
@@ -52,7 +53,7 @@ getLipsyncPS4 = do
 
 splitFrameGroups :: LipsyncPS4 -> [B.ByteString]
 splitFrameGroups lip = do
-  (this, next) <- zip (0 : lip.frameIndices) $ lip.frameIndices
+  (this, next) <- zip (0 : lip.frameIndices) lip.frameIndices
   return $ B.take (fromIntegral $ next - this) $ B.drop (fromIntegral this) lip.frameData
 
 splitFrameGroup :: Get [Keyframe]
@@ -71,13 +72,13 @@ splitFrameGroup = let
 fromLipsyncPS4 :: (MonadFail m) => LipsyncPS4 -> m [(B.ByteString, Lipsync)]
 fromLipsyncPS4 lip = do
   let groups = splitFrameGroups lip
-  results <- forM groups $ \frame -> do
+  results <- forM groups \frame -> do
     runGetM splitFrameGroup $ BL.fromStrict frame
-  return $ do
+  return do
     (i, player) <- zip [0..] lip.players
     return (player, emptyLipsync
-      { lipsyncVisemes = lip.visemes
-      , lipsyncKeyframes = map
+      { visemes = lip.visemes
+      , keyframes = map
         (\group -> case drop i group of
           []     -> Keyframe []
           kf : _ -> kf

@@ -1,12 +1,14 @@
+{-# LANGUAGE BlockArguments            #-}
 {-# LANGUAGE CPP                       #-}
 {-# LANGUAGE DuplicateRecordFields     #-}
 {-# LANGUAGE LambdaCase                #-}
 {-# LANGUAGE MultiWayIf                #-}
+{-# LANGUAGE NoFieldSelectors          #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
+{-# LANGUAGE OverloadedLabels          #-}
 {-# LANGUAGE OverloadedRecordDot       #-}
 {-# LANGUAGE OverloadedStrings         #-}
 {-# LANGUAGE TupleSections             #-}
-{-# OPTIONS_GHC -fno-warn-ambiguous-fields #-}
 module Onyx.Import where
 
 import           Control.Applicative          ((<|>))
@@ -20,7 +22,8 @@ import qualified Data.ByteString              as B
 import qualified Data.ByteString.Char8        as B8
 import qualified Data.ByteString.Lazy         as BL
 import           Data.Char                    (isAlpha, isDigit, toLower)
-import           Data.Functor                 (void)
+import           Data.Function                ((&))
+import           Data.Functor                 (void, (<&>))
 import           Data.Functor.Identity
 import           Data.Hashable                (hash)
 import qualified Data.HashMap.Strict          as HM
@@ -48,16 +51,12 @@ import           Onyx.Harmonix.Ark.GH2        (GH2Installation (..),
                                                detectGameGH)
 import           Onyx.Harmonix.DTA            (Chunk (..), DTA (..), Tree (..),
                                                readFileDTA)
+import           Onyx.Import.Amplitude        (importAmpPS2Ark)
 import           Onyx.Import.Amplitude2016    (importAmplitude,
                                                importAmplitudeArk)
 import           Onyx.Import.Base             (ImportLevel (..), saveImport)
 import           Onyx.Import.BMS              (importBMS)
-import           Onyx.MIDI.Common             (Difficulty (..))
-import           Onyx.Neversoft.PS2           (HedFormat (..),
-                                               identifyHedFormat, parseHed)
-import           Onyx.Util.Files              (fixFileCase)
-import           Onyx.Zip.Load                (loadZipReadables)
--- import           Onyx.Import.DonkeyKonga      (supportedDKGames)
+import           Onyx.Import.DonkeyKonga      (supportedDKGames)
 import           Onyx.Import.DTXMania         (importDTX, importSet)
 import           Onyx.Import.Encore           (importEncore)
 import           Onyx.Import.Freetar          (importFreetar)
@@ -79,7 +78,13 @@ import           Onyx.Import.RockBand         (importRB4, importRBA,
 import           Onyx.Import.RockRevolution   (importRR)
 import           Onyx.Import.Rocksmith        as RS
 import           Onyx.Import.StepMania        (importSM)
-import           Onyx.ISO                     (folderISO)
+import           Onyx.Import.Taiko            (importTaikoImage,
+                                               importTaikoListBin)
+import           Onyx.ISO                     (folderCueBin, folderISO)
+import           Onyx.MIDI.Common             (Difficulty (..))
+import           Onyx.Neversoft.PS2           (HedFormat (..),
+                                               identifyHedFormat, parseHed)
+import           Onyx.Nintendo.CISO           (cisoReadable)
 import           Onyx.PlayStation.PKG         (getDecryptedUSRDIR, loadPKG,
                                                pkgFolder, tryDecryptEDAT)
 import           Onyx.Preferences
@@ -87,6 +92,7 @@ import           Onyx.Project
 import           Onyx.Resources               (getResourcesPath)
 import           Onyx.StackTrace
 import           Onyx.Util.Binary             (runGetM)
+import           Onyx.Util.Files              (fixFileCase)
 import           Onyx.Util.Handle             (Folder (..), Readable,
                                                crawlFolder, fileReadable,
                                                findFile, findFileCI, findFolder,
@@ -95,6 +101,8 @@ import           Onyx.Util.Handle             (Folder (..), Readable,
                                                singleFolder, useHandle)
 import           Onyx.Xbox.ISO                (loadXboxISO)
 import           Onyx.Xbox.STFS               (getSTFSFolder)
+import           Onyx.Zip.Load                (loadZipReadables)
+import           Optics                       ((.~))
 import qualified Sound.Jammit.Base            as J
 import qualified System.Directory             as Dir
 import           System.FilePath              (dropExtension,
@@ -148,7 +156,7 @@ findAllSongs fp' = do
 
 findSongs :: (SendMessage m, MonadResource m)
   => FilePath -> StackTraceT m ([FilePath], [Importable m])
-findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ errorToWarning $ do
+findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ errorToWarning do
   fp <- stackIO $ Dir.makeAbsolute fp'
   let found imp = foundMany [imp]
       foundMany imps = return ([], imps)
@@ -190,6 +198,10 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
             (hdr, arks) <- stackIO $ loadGEN gen
             folder <- loadArkFolder hdr arks
             importSTFSFolder loc (first TE.decodeLatin1 folder) >>= foundImports "Rock Band (.ARK)" loc
+          Just GameAmp -> do
+            (hdr, arks) <- stackIO $ loadGEN gen
+            folder <- loadArkFolder hdr arks
+            importAmpPS2Ark loc folder >>= foundImports "Amplitude (PS2)" loc
         amp@(_ : _) -> foundImports "Amplitude (2016)" loc amp
       foundDTXSet loc = importSet loc >>= foundImports "DTXMania (set.def)" (takeDirectory loc)
       foundDTX loc = foundImport "DTXMania" loc $ importDTX loc
@@ -247,9 +259,19 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
         case mpsarc of
           Nothing    -> fatal "Couldn't decrypt .psarc.edat"
           Just psarc -> importRS psarc >>= foundImports "Rocksmith" edat
+      foundPKG loc = do
+        magic <- stackIO $ useHandle (fileReadable loc) \h -> B.hGet h 4
+        case magic of
+          "\x7F\&PKG" -> foundPS3 loc
+          "\x7F\&CNT" -> do
+            warn "PS4 .pkg not supported yet"
+            return ([], [])
+          _ -> do
+            warn $ "Unrecognized start to .pkg file: " <> show magic
+            return ([], [])
       foundPS3 loc = do
-        usrdir <- stackIO (pkgFolder <$> loadPKG loc) >>= getDecryptedUSRDIR
-        rbgh <- fmap mconcat $ forM (map snd $ folderSubfolders usrdir) $ \folderBS -> let
+        usrdir <- stackIO ((.pkgFolder) <$> loadPKG loc) >>= getDecryptedUSRDIR
+        rbgh <- fmap mconcat $ forM (map snd $ folderSubfolders usrdir) \folderBS -> let
           folder = first TE.decodeLatin1 folderBS
           in mconcat <$> sequence
             [ case findFile ("songs" :| ["songs.dta"]) folder of
@@ -319,6 +341,11 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
         | isJust $ findFileCI (pure "Data.hdr.e.2") dir
           = foundPowerGig loc dir "Data.hdr.e.2"
         | otherwise = warn "Unrecognized Xbox 360 game" >> return ([], [])
+      foundPS3Game loc dir
+        | isJust $ findFileCI ("DATA" :| ["FRONTEND", "FE_CONFIG.LUA"]) dir = let
+          songsDir = fromMaybe mempty $ findFolder ["DATA", "SONGS"] dir
+          in foundImports "Rock Revolution (PS3)" loc $ importRR songsDir
+        | otherwise = warn "Unrecognized PS3 game" >> return ([], [])
       foundHED loc contents hed = do
         entries <- stackIO (useHandle hed handleToByteString) >>= runGetM parseHed
         case identifyHedFormat entries of
@@ -335,20 +362,30 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
             warn "Couldn't determine game format of DATAP.HED"
             return ([], [])
       foundISO iso = do
-        magic <- stackIO $ IO.withBinaryFile iso IO.ReadMode $ \h -> B.hGet h 6
-        case lookup magic [] {- supportedDKGames -} of
+        magic <- stackIO $ IO.withBinaryFile iso IO.ReadMode \h -> B.hGet h 6
+        case lookup magic supportedDKGames of
           Just importDK -> do
             imps <- importDK $ fileReadable iso
             foundImports "Donkey Konga" iso imps
           Nothing -> stackIO (loadXboxISO $ fileReadable iso) >>= \case
             Just xiso -> found360Game iso $ first TE.decodeLatin1 xiso
-            Nothing   -> do
-              contents <- stackIO $ fmap (first TE.decodeLatin1) $ folderISO $ fileReadable iso
-              case findFolder ["GEN"] contents of
-                Just gen -> foundGEN iso gen
-                Nothing  -> case findFileCI (pure "DATAP.HED") contents of
-                  Just hed -> foundHED iso contents hed
-                  Nothing  -> return ([], [])
+            Nothing   -> stackIO (folderISO $ fileReadable iso) >>= foundISOContents iso
+      foundISOContents loc folder = do
+        let contents = first TE.decodeLatin1 folder
+        case findFolder ["GEN"] contents of
+          Just gen -> foundGEN loc gen
+          Nothing  -> case findFileCI (pure "DATAP.HED") contents of
+            Just hed -> foundHED loc contents hed
+            Nothing
+              | isJust (findFileCI (pure "LIST.BIN") contents)
+                && isJust (findFileCI (pure "DATA.000") contents)
+                -> importTaikoListBin loc contents
+                  >>= foundImports "Taiko no Tatsujin (PS2)" loc
+              | isJust (findFileCI (pure "IMAGE00.TBL") contents)
+                && isJust (findFileCI (pure "IMAGE00.DAT") contents)
+                -> importTaikoImage loc contents
+                  >>= foundImports "Taiko no Tatsujin (PS2)" loc
+              | otherwise -> return ([], [])
       foundSGH sgh = do
         dir <- stackIO $ loadZipReadables (Just "SGH9ZIP2PASS4MXKR") sgh
         imps <- importGH3SGHFolder sgh dir
@@ -364,12 +401,12 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
       foundImportsRB = foundImports' True
       foundImports' isRB fmt path imports = do
         isDir <- stackIO $ Dir.doesDirectoryExist path
-        scanned <- flip concatMapM imports $ \imp -> do
-          errorToWarning (imp ImportQuick) >>= return . \case
+        scanned <- flip concatMapM imports \imp -> do
+          errorToWarning (imp ImportQuick) <&> \case
             Nothing    -> []
             Just quick -> [(imp, quick)]
         let single = null $ drop 1 scanned
-        fmap ([],) $ forM (zip [0..] scanned) $ \(i, (imp, quick)) -> do
+        fmap ([],) $ forM (zip [0..] scanned) \(i, (imp, quick)) -> do
           let index = guard (not single) >> Just i
           return Importable
             { impTitle = quick.metadata.title
@@ -380,8 +417,8 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
             , impPath = path
             , impIndex = index
             -- first, run "imp" before making the temp folder
-            , impProject = imp ImportFull >>= \proj -> importFrom index path isDir $ \key dout ->
-              void $ stackIO $ let
+            , impProject = imp ImportFull >>= \proj -> importFrom index path isDir \key dout ->
+              void $ stackIO let
                 -- then, delete temp folder if there's any exception (like killed thread)
                 -- while saving out the files
                 saver = saveImport dout proj
@@ -404,7 +441,7 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
               [fp </> "config/songs.dta", fp </> "config/gen/songs.dtb"]
             -- filter older supported stepmania formats when a newer one is present
             let sm = map (map toLower) $ filter ((== ".sm") . map toLower . takeExtension) ents
-                filtered = flip filter ents $ \x -> case splitExtension $ map toLower x of
+                filtered = flip filter ents \x -> case splitExtension $ map toLower x of
                   (name, ".dwi") -> notElem (name <.> "sm") sm
                   _              -> True
             case findParadiddle $ map (fp </>) ents of
@@ -418,7 +455,7 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
                     >>= GH2.importGH2DLC fp
                     >>= foundImports "Guitar Hero II Extracted" fp
                   else return (map (fp </>) filtered, [])
-              paras -> fmap mconcat $ forM paras $ \paraDiffs -> do
+              paras -> fmap mconcat $ forM paras \paraDiffs -> do
                 let loc = snd $ NE.head paraDiffs
                 foundImport "Paradiddle" loc $ importParadiddle paraDiffs
           lookFor ((file, use) : rest) = case filter ((== file) . map toLower) ents of
@@ -441,6 +478,7 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
         , ("main_xbox.hdr", foundHDR)
         -- Needed so we don't also pick up game-specific files like a Harmonix GEN folder or Power Gig Data.hdr.e.2
         , ("default.xex", \xex -> let dir = takeDirectory xex in stackIO (crawlFolder dir) >>= found360Game xex)
+        , ("eboot.bin", \bin -> let dir = takeDirectory bin in stackIO (crawlFolder dir) >>= foundPS3Game bin)
         -- Already-extracted .sgh (decrypted zip contents with password)
         , ("songs.info", foundSGHFolder)
         ]
@@ -463,7 +501,7 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
         ".psarc" -> foundRS fp
         ".edat" | map toLower (takeExtension $ dropExtension fp) == ".psarc"
           -> foundRSPS3 fp
-        ".pkg" -> foundPS3 fp
+        ".pkg" -> foundPKG fp
         ".wad" -> foundWAD fp
         ".gp" -> foundGP fp
         ".gpx" -> foundGPX fp
@@ -472,7 +510,7 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
           folder <- stackIO $ crawlFolder dir
           foundPowerGig fp folder $ takeFileName fp
         ".sng" -> do
-          magic <- stackIO $ IO.withBinaryFile fp IO.ReadMode $ \h -> BL.hGet h 6
+          magic <- stackIO $ IO.withBinaryFile fp IO.ReadMode \h -> BL.hGet h 6
           case magic of
             "SNGPKG" -> do
               let r = fileReadable fp
@@ -480,6 +518,13 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
               foundImport "Clone Hero SNG" fp $ importFoF fp $ getSNGFolder True hdr r
             _        -> foundFreetar fp
         ".iso" -> foundISO fp
+        ".cue" -> stackIO (folderCueBin fp) >>= foundISOContents fp
+        ".ciso" -> do
+          let disc = cisoReadable $ fileReadable fp
+          magic <- stackIO $ useHandle disc \h -> B.hGet h 6
+          case lookup magic supportedDKGames of
+            Just importDK -> importDK disc >>= foundImports "Donkey Konga" fp
+            Nothing       -> return ([], [])
         ".osz" -> importOsu True fp >>= foundImports "osu!" fp
         ".sgh" -> foundSGH fp
         ".rlrr" -> foundParadiddle fp
@@ -495,12 +540,16 @@ findSongs fp' = inside ("searching: " <> fp') $ fmap (fromMaybe ([], [])) $ erro
           "main.hdr" -> foundHDR fp
           "main_ps3.hdr" -> foundHDR fp
           "main_xbox.hdr" -> foundHDR fp
+          "main_wii.hdr" -> foundHDR fp
+          "eboot.bin" -> do
+            let dir = takeDirectory fp
+            stackIO (crawlFolder dir) >>= foundPS3Game fp
           "datap.hed" -> do
             let dir = takeDirectory fp
             contents <- stackIO $ crawlFolder dir
             foundHED dir contents $ fileReadable fp
           _ -> do
-            magic <- stackIO $ IO.withBinaryFile fp IO.ReadMode $ \h -> BL.hGet h 4
+            magic <- stackIO $ IO.withBinaryFile fp IO.ReadMode \h -> BL.hGet h 4
             case magic of
               "RBSF" -> foundImportsRB "Magma RBA" fp [importRBA fp]
               "CON " -> foundSTFS fp
@@ -513,15 +562,15 @@ openProject i fp = do
   (_, imps) <- findSongs fp
   case i of
     Nothing -> case imps of
-      [imp] -> impProject imp
+      [imp] -> imp.impProject
       []    -> fatal $ "Couldn't find a song at location: " <> fp
       _     -> fatal $ unlines
         $ ("Found more than 1 song at location: " <> fp) : do
           (j, imp) <- zip [0 :: Int ..] imps
           let f = maybe "?" T.unpack
-          return $ show j <> ": " <> f (impTitle imp) <> " (" <> f (impArtist imp) <> ")"
+          return $ show j <> ": " <> f imp.impTitle <> " (" <> f imp.impArtist <> ")"
     Just j  -> case drop j imps of
-      imp : _ -> impProject imp
+      imp : _ -> imp.impProject
       []      -> fatal $ "Couldn't find song #" <> show j <> " at location: " <> fp
 
 withProject :: (SendMessage m, MonadResource m) =>
@@ -529,13 +578,13 @@ withProject :: (SendMessage m, MonadResource m) =>
 withProject i fp fn = do
   proj <- openProject i fp
   x <- fn proj
-  stackIO $ mapM_ release $ projectRelease proj
+  stackIO $ mapM_ release proj.projectRelease
   return x
 
 getAudioDirs :: (SendMessage m, MonadIO m) => Project -> StackTraceT m [FilePath]
 getAudioDirs proj = do
   jmt <- stackIO J.findJammitDir
-  let addons = maybe id (:) jmt [takeDirectory $ projectLocation proj]
+  let addons = maybe id (:) jmt [takeDirectory proj.projectLocation]
   dirs <- (.prefAudioDirs) <$> readPreferences
   mapM (stackIO . Dir.canonicalizePath) $ addons ++ dirs
 
@@ -547,8 +596,8 @@ shakeBuildMany :: (MonadIO m, Traversable f) =>
   Project -> [(T.Text, Target FilePath)] -> f FilePath -> StackTraceT (QueueLog m) (f FilePath)
 shakeBuildMany proj extraTargets buildables = do
   audioDirs <- getAudioDirs proj
-  buildables' <- shakeBuild audioDirs (projectLocation proj) extraTargets buildables
-  return $ fmap (takeDirectory (projectLocation proj) </>) buildables'
+  buildables' <- shakeBuild audioDirs proj.projectLocation extraTargets buildables
+  return $ fmap (takeDirectory proj.projectLocation </>) buildables'
 
 buildCommon :: (MonadIO m) => Target FilePath -> (String -> FilePath) -> Project -> StackTraceT (QueueLog m) FilePath
 buildCommon target getBuildable proj = do
@@ -562,20 +611,20 @@ randomRBSongID = liftIO $ randomRIO (10000000, 1000000000)
 buildRB3CON :: (MonadIO m) => TargetRB3 FilePath -> Project -> StackTraceT (QueueLog m) FilePath
 buildRB3CON rb3 proj = do
   songID <- randomRBSongID
-  let rb3' = (rb3 :: TargetRB3 FilePath) { songID = SongIDInt songID }
+  let rb3' = (rb3 :: TargetRB3 FilePath) & #songID .~ SongIDInt songID
   buildCommon (RB3 rb3') (\targetHash -> "gen/target" </> targetHash </> "rb3con") proj
 
 buildRB3PKG :: (MonadIO m) => TargetRB3 FilePath -> Project -> StackTraceT (QueueLog m) FilePath
 buildRB3PKG rb3 proj = do
   songID <- randomRBSongID
-  let rb3' = (rb3 :: TargetRB3 FilePath) { songID = SongIDInt songID }
+  let rb3' = (rb3 :: TargetRB3 FilePath) & #songID .~ SongIDInt songID
   buildCommon (RB3 rb3') (\targetHash -> "gen/target" </> targetHash </> "rb3-ps3.pkg") proj
 
 buildRB3LoosePS3 :: (MonadIO m) => TargetRB3 FilePath -> Project -> StackTraceT (QueueLog m) (Folder T.Text Readable)
 buildRB3LoosePS3 rb3 proj = do
   let songYaml = proj.projectSongYaml
   songID <- randomRBSongID
-  let rb3' = (rb3 :: TargetRB3 FilePath) { songID = SongIDInt songID }
+  let rb3' = (rb3 :: TargetRB3 FilePath) & #songID .~ SongIDInt songID
   inner <- buildCommon (RB3 rb3') (\targetHash -> "gen/target" </> targetHash </> "rb3-ps3") proj
   dir <- stackIO $ crawlFolder inner
   return Folder
@@ -586,20 +635,20 @@ buildRB3LoosePS3 rb3 proj = do
 buildRB2CON :: (MonadIO m) => TargetRB2 FilePath -> Project -> StackTraceT (QueueLog m) FilePath
 buildRB2CON rb2 proj = do
   songID <- randomRBSongID
-  let rb2' = (rb2 :: TargetRB2 FilePath) { songID = SongIDInt songID }
+  let rb2' = (rb2 :: TargetRB2 FilePath) & #songID .~ SongIDInt songID
   buildCommon (RB2 rb2') (\targetHash -> "gen/target" </> targetHash </> "rb2con") proj
 
 buildRB2PKG :: (MonadIO m) => TargetRB2 FilePath -> Project -> StackTraceT (QueueLog m) FilePath
 buildRB2PKG rb2 proj = do
   songID <- randomRBSongID
-  let rb2' = (rb2 :: TargetRB2 FilePath) { songID = SongIDInt songID }
+  let rb2' = (rb2 :: TargetRB2 FilePath) & #songID .~ SongIDInt songID
   buildCommon (RB2 rb2') (\targetHash -> "gen/target" </> targetHash </> "rb2-ps3.pkg") proj
 
 buildRB2LoosePS3 :: (MonadIO m) => TargetRB2 FilePath -> Project -> StackTraceT (QueueLog m) (Folder T.Text Readable)
 buildRB2LoosePS3 rb2 proj = do
   let songYaml = proj.projectSongYaml
   songID <- randomRBSongID
-  let rb2' = (rb2 :: TargetRB2 FilePath) { songID = SongIDInt songID }
+  let rb2' = (rb2 :: TargetRB2 FilePath) & #songID .~ SongIDInt songID
   inner <- buildCommon (RB2 rb2') (\targetHash -> "gen/target" </> targetHash </> "rb2-ps3") proj
   dir <- stackIO $ crawlFolder inner
   return Folder
@@ -608,31 +657,31 @@ buildRB2LoosePS3 rb2 proj = do
     }
 
 buildMagmaV2 :: (MonadIO m) => TargetRB3 FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildMagmaV2 rb3 = buildCommon (RB3 rb3) $ \targetHash -> "gen/target" </> targetHash </> "magma"
+buildMagmaV2 rb3 = buildCommon (RB3 rb3) \targetHash -> "gen/target" </> targetHash </> "magma"
 
 buildPSDir :: (MonadIO m) => TargetPS FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildPSDir ps = buildCommon (PS ps) $ \targetHash -> "gen/target" </> targetHash </> "ps"
+buildPSDir ps = buildCommon (PS ps) \targetHash -> "gen/target" </> targetHash </> "ps"
 
 buildPSZip :: (MonadIO m) => TargetPS FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildPSZip ps = buildCommon (PS ps) $ \targetHash -> "gen/target" </> targetHash </> "ps.zip"
+buildPSZip ps = buildCommon (PS ps) \targetHash -> "gen/target" </> targetHash </> "ps.zip"
 
 buildPSSng :: (MonadIO m) => TargetPS FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildPSSng ps = buildCommon (PS ps) $ \targetHash -> "gen/target" </> targetHash </> "ps.sng"
+buildPSSng ps = buildCommon (PS ps) \targetHash -> "gen/target" </> targetHash </> "ps.sng"
 
 buildGH1Dir :: (MonadIO m) => TargetGH1 FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildGH1Dir gh1 = buildCommon (GH1 gh1) $ \targetHash -> "gen/target" </> targetHash </> "gh1"
+buildGH1Dir gh1 = buildCommon (GH1 gh1) \targetHash -> "gen/target" </> targetHash </> "gh1"
 
 buildGH2Dir :: (MonadIO m) => TargetGH2 FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildGH2Dir gh2 = buildCommon (GH2 gh2) $ \targetHash -> "gen/target" </> targetHash </> "gh2"
+buildGH2Dir gh2 = buildCommon (GH2 gh2) \targetHash -> "gen/target" </> targetHash </> "gh2"
 
 buildGH2LIVE :: (MonadIO m) => TargetGH2 FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildGH2LIVE gh2 = buildCommon (GH2 gh2) $ \targetHash -> "gen/target" </> targetHash </> "gh2live"
+buildGH2LIVE gh2 = buildCommon (GH2 gh2) \targetHash -> "gen/target" </> targetHash </> "gh2live"
 
 buildGH3LIVE :: (MonadIO m) => TargetGH3 FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildGH3LIVE gh3 = buildCommon (GH3 gh3) $ \targetHash -> "gen/target" </> targetHash </> "gh3live"
+buildGH3LIVE gh3 = buildCommon (GH3 gh3) \targetHash -> "gen/target" </> targetHash </> "gh3live"
 
 buildGH3PKG :: (MonadIO m) => TargetGH3 FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildGH3PKG gh3 = buildCommon (GH3 gh3) $ \targetHash -> "gen/target" </> targetHash </> "ps3.pkg"
+buildGH3PKG gh3 = buildCommon (GH3 gh3) \targetHash -> "gen/target" </> targetHash </> "ps3.pkg"
 
 buildGH3LoosePS3 :: (MonadIO m) => TargetGH3 FilePath -> Project -> StackTraceT (QueueLog m) (Folder T.Text Readable)
 buildGH3LoosePS3 gh3 proj = do
@@ -645,10 +694,10 @@ buildGH3LoosePS3 gh3 proj = do
     }
 
 buildGHWORLIVE :: (MonadIO m) => TargetGH5 FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildGHWORLIVE gh5 = buildCommon (GH5 gh5) $ \targetHash -> "gen/target" </> targetHash </> "ghworlive"
+buildGHWORLIVE gh5 = buildCommon (GH5 gh5) \targetHash -> "gen/target" </> targetHash </> "ghworlive"
 
 buildGHWORPKG :: (MonadIO m) => TargetGH5 FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildGHWORPKG gh5 = buildCommon (GH5 gh5) $ \targetHash -> "gen/target" </> targetHash </> "ps3.pkg"
+buildGHWORPKG gh5 = buildCommon (GH5 gh5) \targetHash -> "gen/target" </> targetHash </> "ps3.pkg"
 
 buildGHWORLoosePS3 :: (MonadIO m) => TargetGH5 FilePath -> Project -> StackTraceT (QueueLog m) (Folder T.Text Readable)
 buildGHWORLoosePS3 gh5 proj = do
@@ -665,10 +714,10 @@ buildGHWORLoosePS3 gh5 proj = do
     }
 
 buildRRLIVE :: (MonadIO m) => TargetRR FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildRRLIVE rr = buildCommon (RR rr) $ \targetHash -> "gen/target" </> targetHash </> "rrlive"
+buildRRLIVE rr = buildCommon (RR rr) \targetHash -> "gen/target" </> targetHash </> "rrlive"
 
 buildRRPKG :: (MonadIO m) => TargetRR FilePath -> Project -> StackTraceT (QueueLog m) FilePath
-buildRRPKG rr = buildCommon (RR rr) $ \targetHash -> "gen/target" </> targetHash </> "rr.pkg"
+buildRRPKG rr = buildCommon (RR rr) \targetHash -> "gen/target" </> targetHash </> "rr.pkg"
 
 installGH1 :: (MonadIO m) => TargetGH1 FilePath -> Project -> FilePath -> StackTraceT (QueueLog m) ()
 installGH1 gh1 proj gen = do
@@ -678,29 +727,30 @@ installGH1 gh1 proj gen = do
     Just GameGH2    -> fatal "This appears to be a Guitar Hero II or 80's ARK!"
     Just GameGH2DX2 -> fatal "This appears to be a Guitar Hero II Deluxe ARK!"
     Just GameRB     -> fatal "This appears to be a Rock Band ARK!"
+    Just GameAmp    -> fatal "This appears to be an Amplitude ARK!"
   dir <- buildGH1Dir gh1 proj
   files <- stackIO $ Dir.listDirectory dir
   dta <- stackIO $ readFileDTA $ dir </> "songs-inner.dta"
   sym <- stackIO $ B.readFile $ dir </> "symbol"
-  let chunks = treeChunks $ topTree $ fmap (B8.pack . T.unpack) dta
-      filePairs = flip mapMaybe files $ \f -> do
+  let chunks = (fmap (B8.pack . T.unpack) dta).topTree.treeChunks
+      filePairs = flip mapMaybe files \f -> do
         guard $ elem (takeExtension f) [".mid", ".vgs", ".voc"]
         return (sym <> B8.pack (dropWhile isAlpha f), dir </> f)
   let toBytes = B8.pack . T.unpack
   prefs <- readPreferences
-  let meta = getTargetMetadata (projectSongYaml proj) $ GH1 gh1
+  let meta = getTargetMetadata proj.projectSongYaml $ GH1 gh1
   stackIO $ addBonusSongGH1 GH2Installation
     { gen              = gen
     , symbol           = sym
     , song             = chunks
     , coop_max_scores  = [] -- not used
-    , shop_title       = Just $ toBytes $ targetTitle (projectSongYaml proj) $ GH1 gh1 -- not used
+    , shop_title       = Just $ toBytes $ targetTitle proj.projectSongYaml $ GH1 gh1 -- not used
     , shop_description = Just $ toBytes $ T.unlines
       [ "Artist: " <> getArtist meta
       , "Album: "  <> getAlbum  meta
       , "Author: " <> getAuthor meta
       ]
-    , author           = toBytes . adjustSongText <$> (projectSongYaml proj).metadata.author
+    , author           = toBytes . adjustSongText <$> proj.projectSongYaml.metadata.author
     , album_art        = Nothing -- not used
     , files            = filePairs
     , sort_            = guard prefs.prefSortGH2 >> if prefs.prefArtistSort
@@ -718,34 +768,35 @@ installGH2 gh2 proj gen = do
     Just GameGH2    -> lg "ARK detected as GH2, no drums support."
     Just GameGH2DX2 -> lg "ARK detected as GH2 Deluxe with drums support."
     Just GameRB     -> fatal "This appears to be a Rock Band ARK!"
+    Just GameAmp    -> fatal "This appears to be an Amplitude ARK!"
   dir <- buildGH2Dir gh2 proj
   files <- stackIO $ Dir.listDirectory dir
   dta <- stackIO $ readFileDTA $ dir </> "songs-inner.dta"
   sym <- stackIO $ B.readFile $ dir </> "symbol"
   coop <- stackIO $ readFileDTA $ dir </> "coop_max_scores.dta"
-  let chunks = treeChunks $ topTree $ fmap (B8.pack . T.unpack) dta
-      filePairs = flip mapMaybe files $ \f -> do
+  let chunks = (fmap (B8.pack . T.unpack) dta).topTree.treeChunks
+      filePairs = flip mapMaybe files \f -> do
         guard $ elem (takeExtension f) [".mid", ".vgs", ".voc"]
         return (sym <> B8.pack (dropWhile isAlpha f), dir </> f)
       filePairsDX = if gh2.gh2Deluxe
-        then flip mapMaybe files $ \f -> case f of
+        then flip mapMaybe files \f -> case f of
           "cover.png_ps2" -> Just ("gen/" <> sym <> ".bmp_ps2", dir </> f)
           _               -> Nothing
         else []
   coopNums <- case coop of
-    DTA 0 (Tree _ [Parens (Tree _ [Sym _, Parens (Tree _ nums)])]) -> forM nums $ \case
+    DTA 0 (Tree _ [Parens (Tree _ [Sym _, Parens (Tree _ nums)])]) -> forM nums \case
       Int n -> return $ fromIntegral n
       _     -> fatal "unexcepted non-int in coop scores list"
     _ -> fatal "Couldn't read coop scores list"
   let toBytes = B8.pack . T.unpack
   prefs <- readPreferences
-  let meta = getTargetMetadata (projectSongYaml proj) $ GH2 gh2
+  let meta = getTargetMetadata proj.projectSongYaml $ GH2 gh2
   stackIO (addBonusSongGH2 GH2Installation
     { gen              = gen
     , symbol           = sym
     , song             = chunks
     , coop_max_scores  = coopNums
-    , shop_title       = Just $ toBytes $ targetTitle (projectSongYaml proj) $ GH2 gh2
+    , shop_title       = Just $ toBytes $ targetTitle proj.projectSongYaml $ GH2 gh2
     , shop_description = Just $ toBytes $ T.unlines
       [ "Artist: " <> getArtist meta
       , "Album: "  <> getAlbum  meta
@@ -767,11 +818,11 @@ makeGH1DIY gh1 proj dout = do
   stackIO $ Dir.createDirectoryIfMissing False dout
   files <- stackIO $ Dir.listDirectory dir
   sym <- stackIO $ fmap B8.unpack $ B.readFile $ dir </> "symbol"
-  let filePairs = flip mapMaybe files $ \f -> let ext = takeExtension f in if
+  let filePairs = flip mapMaybe files \f -> let ext = takeExtension f in if
         | elem ext [".vgs", ".mid"]               -> Just (sym <> dropWhile isAlpha f, dir </> f)
         | ext == ".dta" && f /= "songs-inner.dta" -> Just (f, dir </> f)
         | otherwise                               -> Nothing
-  stackIO $ forM_ filePairs $ \(dest, src) -> Dir.copyFile src $ dout </> dest
+  stackIO $ forM_ filePairs \(dest, src) -> Dir.copyFile src $ dout </> dest
   let s = T.pack sym
   stackIO $ B.writeFile (dout </> "README.txt") $ encodeUtf8 $ T.intercalate "\r\n"
     [ "Instructions for GH1 song installation"
@@ -792,12 +843,12 @@ makeGH2DIY gh2 proj dout = do
   stackIO $ Dir.createDirectoryIfMissing False dout
   files <- stackIO $ Dir.listDirectory dir
   sym <- stackIO $ fmap B8.unpack $ B.readFile $ dir </> "symbol"
-  let filePairs = flip mapMaybe files $ \f -> let ext = takeExtension f in if
+  let filePairs = flip mapMaybe files \f -> let ext = takeExtension f in if
         | elem ext [".voc", ".vgs", ".mid"]       -> Just (sym <> dropWhile isAlpha f          , dir </> f)
         | ext == ".dta" && f /= "songs-inner.dta" -> Just (f                                   , dir </> f)
         | ext == ".png_ps2"                       -> Just ("us_logo_" <> sym <> "_keep.png_ps2", dir </> f)
         | otherwise                               -> Nothing
-  stackIO $ forM_ filePairs $ \(dest, src) -> Dir.copyFile src $ dout </> dest
+  stackIO $ forM_ filePairs \(dest, src) -> Dir.copyFile src $ dout </> dest
   let s = T.pack sym
   stackIO $ B.writeFile (dout </> "README.txt") $ encodeUtf8 $ T.intercalate "\r\n" $
     [ "Instructions for GH2 song installation"
@@ -819,7 +870,7 @@ buildPlayer :: (MonadIO m) => Maybe T.Text -> Project -> StackTraceT (QueueLog m
 buildPlayer mplan proj = do
   planName <- case mplan of
     Just planName -> return planName
-    Nothing       -> case HM.toList (projectSongYaml proj).plans of
+    Nothing       -> case HM.toList proj.projectSongYaml.plans of
       [(planName, _)] -> return planName
       []              -> fatal "Project has no audio plans"
       _ : _ : _       -> fatal "Project has more than 1 audio plan"
@@ -827,7 +878,7 @@ buildPlayer mplan proj = do
 
 choosePlan :: (Monad m) => Maybe T.Text -> Project -> StackTraceT m T.Text
 choosePlan (Just plan) _    = return plan
-choosePlan Nothing     proj = case HM.keys (projectSongYaml proj).plans of
+choosePlan Nothing     proj = case HM.keys proj.projectSongYaml.plans of
   [p]   -> return p
   plans -> fatal $ "No plan selected, and the project doesn't have exactly 1 plan: " <> show plans
 
@@ -860,7 +911,7 @@ installPS3Folder gameID extraResPath contents dout = do
     Just (path, place) -> fmap place $ getResourcesPath path >>= crawlFolder
   saveHandleFolder (foldr singleFolder contents upperLayers) dout
   savePkgGameMetadata extra dout
-  return $ do
+  return do
     x <- map fst (folderSubfolders contents) <> map fst (folderFiles contents)
     return $ dout </> foldr (</>) (T.unpack x) (map T.unpack upperLayers)
 
@@ -868,11 +919,11 @@ installPS3Folder gameID extraResPath contents dout = do
 savePkgGameMetadata :: Folder T.Text Readable -> FilePath -> IO ()
 savePkgGameMetadata folder dest = do
   Dir.createDirectoryIfMissing False dest
-  forM_ (folderSubfolders folder) $ \(name, sub) -> do
+  forM_ (folderSubfolders folder) \(name, sub) -> do
     let subdest = dest </> T.unpack name
     Dir.createDirectoryIfMissing False subdest
     savePkgGameMetadata sub subdest
-  forM_ (folderFiles folder) $ \(name, file) -> do
+  forM_ (folderFiles folder) \(name, file) -> do
     newPath <- fixFileCase $ dest </> T.unpack name
     let overwrite = notElem (T.toUpper name) ["PARAM.SFO", "ICON0.PNG", "PIC1.PNG"]
         save = saveReadable file newPath

@@ -1,9 +1,10 @@
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE DeriveGeneric       #-}
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE NoFieldSelectors    #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE PatternSynonyms     #-}
-{-# LANGUAGE TupleSections       #-}
 module Onyx.Sections
 ( SectionType(..), Section(..)
 , simpleSection
@@ -23,6 +24,7 @@ import           Data.List                        (sort)
 import           Data.List.HT                     (partitionMaybe)
 import           Data.Maybe                       (fromMaybe)
 import qualified Data.Text                        as T
+import           GHC.Generics                     (Generic)
 import           Onyx.FretsOnFire                 (stripTags)
 import           Onyx.MIDI.Common                 (pattern RNil, pattern Wait)
 import           Onyx.Sections.GH2                (gh2Sections)
@@ -37,7 +39,7 @@ data Section = Section
   { type_   :: SectionType
   , segment :: Maybe T.Text -- song name using my format for album projects
   , name    :: T.Text
-  } deriving (Eq, Ord, Show)
+  } deriving (Eq, Ord, Show, Generic)
 
 simpleSection :: T.Text -> Section
 simpleSection t = Section
@@ -53,7 +55,7 @@ parseSection = \case
     x' <- T.stripPrefix "prc_" x
     withType SectionRB3 $ T.unwords $ x' : xs
   []            -> Nothing
-  where withType t s = Just $ case T.stripPrefix "<" s of
+  where withType t s = Just case T.stripPrefix "<" s of
           Nothing -> Section t Nothing s
           Just s' -> case T.breakOn ">" s' of
             (x, y) -> Section t (Just x) $ T.strip $ T.drop 1 y
@@ -76,7 +78,7 @@ makeDisplaySection :: Section -> Section
 makeDisplaySection s = s
   { type_ = SectionRB2
   -- segment left unchanged
-  , name = T.replace "_" " " $ stripTags $ case findRBN2Section s.name of
+  , name = T.replace "_" " " $ stripTags case findRBN2Section s.name of
     Nothing           -> s.name
     Just (_, display) -> display
   }
@@ -128,7 +130,7 @@ makeRBN2Sections :: (Ord a) => [(a, Section)] -> ([(a, Section)], [Section])
 makeRBN2Sections sects = let
   (valid, notValid) = partitionMaybe (mapM tryRBN2Form) sects
   used = map (\(_, s) -> s.name) valid
-  replacements = map (Section SectionRB3 Nothing) $ filter (`notElem` used) $ do
+  replacements = map (Section SectionRB3 Nothing) $ filter (`notElem` used) do
     x <- ['a'..'k']
     y <- ['0'..'9']
     return $ T.pack $ x : [y | y /= '0']
@@ -144,7 +146,7 @@ addSectionNumbers :: (Eq a) => RTB.T t a -> RTB.T t (a, Maybe Int)
 addSectionNumbers = let
   go _    RNil            = RNil
   go prev (Wait t x rest) = let
-    num = case (length $ filter (== x) prev, any (== x) rest) of
+    num = case (length $ filter (== x) prev, elem x rest) of
       (0, False) -> Nothing
       (n, _    ) -> Just $ n + 1
     in Wait t (x, num) $ go (x : prev) rest

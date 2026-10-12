@@ -1,12 +1,17 @@
-{-# LANGUAGE DeriveFoldable      #-}
-{-# LANGUAGE DeriveFunctor       #-}
-{-# LANGUAGE FlexibleInstances   #-}
-{-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE PatternSynonyms     #-}
-{-# LANGUAGE RecordWildCards     #-}
-{-# LANGUAGE TupleSections       #-}
+{-# LANGUAGE BlockArguments        #-}
+{-# LANGUAGE DeriveFoldable        #-}
+{-# LANGUAGE DeriveFunctor         #-}
+{-# LANGUAGE DeriveGeneric         #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE FlexibleInstances     #-}
+{-# LANGUAGE LambdaCase            #-}
+{-# LANGUAGE NoFieldSelectors      #-}
+{-# LANGUAGE OverloadedLabels      #-}
+{-# LANGUAGE OverloadedRecordDot   #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE PatternSynonyms       #-}
+{-# LANGUAGE RecordWildCards       #-}
+{-# LANGUAGE TupleSections         #-}
 module Onyx.Harmonix.RockBand.Milo.Lipsync where
 
 import           Control.Arrow                           (first)
@@ -25,6 +30,7 @@ import           Data.Char                               (isAlpha, toLower,
 import qualified Data.EventList.Absolute.TimeBody        as ATB
 import qualified Data.EventList.Relative.TimeBody        as RTB
 import           Data.Foldable                           (toList)
+import           Data.Functor                            ((<&>))
 import qualified Data.HashMap.Strict                     as HM
 import           Data.List.Extra                         (foldl', nubOrd, sort,
                                                           (\\))
@@ -36,6 +42,7 @@ import qualified Data.Text                               as T
 import qualified Data.Text.Encoding                      as TE
 import qualified Data.Vector                             as V
 import qualified Data.Yaml                               as Y
+import           GHC.Generics                            (Generic)
 import qualified Numeric.NonNegative.Class               as NNC
 import           Onyx.Codec.Binary
 import           Onyx.Guitar                             (applyStatus1)
@@ -61,6 +68,7 @@ import           Onyx.StackTrace                         (StackTraceT, fatal,
                                                           inside, logStdout,
                                                           stackIO)
 import           Onyx.Vocal.DryVox                       (vocalTubes)
+import           Optics                                  (mapped, (%), (%~))
 import qualified Sound.MIDI.Util                         as U
 import           System.FilePath                         (takeExtension)
 import           Text.Read                               (readMaybe)
@@ -74,20 +82,20 @@ data MagmaLipsync
 
 magmaMiloDir :: MagmaLipsync -> MiloDir
 magmaMiloDir ml = MiloDir
-  { miloVersion = 28
-  , miloType = "ObjectDir"
-  , miloName = "lipsync"
-  , miloU1 = case ml of
+  { version = 28
+  , type_ = "ObjectDir"
+  , name = "lipsync"
+  , hashReserve = case ml of
     MagmaLipsync1{} -> 4
     MagmaLipsync2{} -> 6
     MagmaLipsync3{} -> 8
     MagmaLipsync4{} -> 10 -- not verified!
-  , miloU2 = case ml of
+  , stringReserve = case ml of
     MagmaLipsync1{} -> 0x15
     MagmaLipsync2{} -> 0x23
     MagmaLipsync3{} -> 0x31
     MagmaLipsync4{} -> 0x3F -- not verified!
-  , miloEntryNames = concat
+  , entryNames = concat
     [ case ml of
       MagmaLipsync1{} -> []
       _               -> [("CharLipSync", "part2.lipsync")]
@@ -100,22 +108,30 @@ magmaMiloDir ml = MiloDir
       _               -> []
     , [("CharLipSync", "song.lipsync")]
     ]
-  , miloU3 = 0x1B
-  , miloU4 = Just 2
-  , miloSubname = Just ""
-  , miloU5 = Just 0
-  , miloU6 = Just 0
-  , miloMatrices = dummyMatrices
-  , miloU7 = 0
-  , miloU8 = 1
-  , miloU9 = 0
-  , miloParents = []
-  , miloU10 = 0
-  , miloChildren = []
-  , miloU11 = Nothing
-  , miloSubdirs = []
-  , miloUnknownBytes = BL.replicate 13 0
-  , miloFiles = map (runPut . putLipsync) $ case ml of
+  , extResources = Nothing
+  , objectDir = ObjectDirInfo
+    { version = 27
+    , objectType = Just (2, "")
+    , alwaysInlined = Just 0
+    , alwaysInlineHash = Just ""
+    , viewports = dummyMatrices
+    , curViewport = 0
+    , inlineProxy = Just 1
+    , proxyPath = ""
+    , extSubdirPaths = []
+    , rev23Ints = Nothing
+    , inlineSubdirType = Just 0
+    , subdirs = []
+    , rev18Int = Nothing
+    , unknownString = ""
+    , curCamera = ""
+    , objectTypePost = Nothing
+    , typeProps = Nothing
+    , reserved = Just ""
+    }
+  , classInfo = InfoObjectDir
+  , remainder = ""
+  , files = map (\l -> MiloEntry (runPut $ putLipsync l) Nothing) case ml of
     MagmaLipsync1 h1          -> [h1]
     MagmaLipsync2 h1 h2       -> [h2, h1]
     MagmaLipsync3 h1 h2 h3    -> [h2, h3, h1]
@@ -126,20 +142,20 @@ magmaMiloDir ml = MiloDir
 -- RB2 will only read the first.
 rb2MiloDir :: MagmaLipsync -> MiloDir
 rb2MiloDir ml = MiloDir
-  { miloVersion = 25
-  , miloType = "ObjectDir"
-  , miloName = "lipsync"
-  , miloU1 = case ml of
+  { version = 25
+  , type_ = "ObjectDir"
+  , name = "lipsync"
+  , hashReserve = case ml of
     MagmaLipsync1{} -> 4
     MagmaLipsync2{} -> 6
     MagmaLipsync3{} -> 8
     MagmaLipsync4{} -> 10
-  , miloU2 = case ml of
+  , stringReserve = case ml of
     MagmaLipsync1{} -> 0x15
     MagmaLipsync2{} -> 0x23
     MagmaLipsync3{} -> 0x31
     MagmaLipsync4{} -> 0x3F
-  , miloEntryNames = concat
+  , entryNames = concat
     [ case ml of
       MagmaLipsync1{} -> []
       _               -> [("CharLipSync", "part2.lipsync")]
@@ -152,22 +168,30 @@ rb2MiloDir ml = MiloDir
       _               -> []
     , [("CharLipSync", "song.lipsync")]
     ]
-  , miloU3 = 20
-  , miloU4 = Nothing
-  , miloSubname = Nothing
-  , miloU5 = Nothing
-  , miloU6 = Nothing
-  , miloMatrices = dummyMatrices
-  , miloU7 = 0
-  , miloU8 = 1
-  , miloU9 = 0
-  , miloParents = []
-  , miloU10 = 0
-  , miloChildren = []
-  , miloU11 = Nothing
-  , miloSubdirs = []
-  , miloUnknownBytes = "\NUL\NUL\NUL\NUL\NUL\NUL\STX\NUL\NUL\NUL\NUL\NUL\NUL\NUL\NUL\NUL"
-  , miloFiles = map (runPut . putLipsync . setRB2) $ case ml of
+  , extResources = Nothing
+  , objectDir = ObjectDirInfo
+    { version = 20
+    , objectType = Nothing
+    , alwaysInlined = Nothing
+    , alwaysInlineHash = Nothing
+    , viewports = dummyMatrices
+    , curViewport = 0
+    , inlineProxy = Just 1
+    , proxyPath = ""
+    , extSubdirPaths = []
+    , rev23Ints = Nothing
+    , inlineSubdirType = Nothing
+    , subdirs = []
+    , rev18Int = Nothing
+    , unknownString = ""
+    , curCamera = ""
+    , objectTypePost = Just (2, "")
+    , typeProps = Nothing
+    , reserved = Just ""
+    }
+  , classInfo = InfoObjectDir
+  , remainder = ""
+  , files = map (\l -> MiloEntry (runPut $ putLipsync $ setRB2 l) Nothing) case ml of
     MagmaLipsync1 h1          -> [h1]
     MagmaLipsync2 h1 h2       -> [h2, h1]
     MagmaLipsync3 h1 h2 h3    -> [h2, h3, h1]
@@ -219,34 +243,35 @@ magmaMilo :: MagmaLipsync -> BL.ByteString
 magmaMilo = addMiloHeader . makeMiloFile . magmaMiloDir
 
 data Lipsync = Lipsync
-  { lipsyncVersion    :: Word32 -- 1 from magma v2, 0 from magma v1
-  , lipsyncSubversion :: Word32 -- 2 from magma v1/v2
-  , lipsyncDTAImport  :: B.ByteString -- empty string from magma v1/v2
-  , lipsyncVisemes    :: [B.ByteString]
-  , lipsyncKeyframes  :: [Keyframe]
-  } deriving (Eq, Show)
+  { version    :: Word32 -- 1 from magma v2, 0 from magma v1
+  , subversion :: Word32 -- 2 from magma v1/v2
+  , dtaImport  :: B.ByteString -- empty string from magma v1/v2
+  , visemes    :: [B.ByteString]
+  , keyframes  :: [Keyframe]
+  } deriving (Eq, Show, Generic)
 
 newtype Keyframe = Keyframe
-  { keyframeEvents :: [VisemeEvent () Int]
+  { events :: [VisemeEvent () Int]
   } deriving (Eq, Show)
 
 type LipsyncStates = [Map.Map B.ByteString Word8] -- each map is an absolute state of visemes
 
 emptyLipsync :: Lipsync
 emptyLipsync = Lipsync
-  { lipsyncVersion    = 1
-  , lipsyncSubversion = 2
-  , lipsyncDTAImport  = ""
-  , lipsyncVisemes    = []
-  , lipsyncKeyframes  = []
+  { version    = 1
+  , subversion = 2
+  , dtaImport  = ""
+  , visemes    = []
+  , keyframes  = []
   }
 
 lipsyncToStates :: Lipsync -> LipsyncStates
-lipsyncToStates l = go Map.empty $ lipsyncKeyframes l where
+lipsyncToStates l = go Map.empty l.keyframes where
+  go :: Map.Map B.ByteString Word8 -> [Keyframe] -> [Map.Map B.ByteString Word8]
   go _ [] = []
   go m (kf : rest) = let
     m' = Map.filter (/= 0) $
-      foldr (\(VisemeEvent i w ()) -> Map.insert (lipsyncVisemes l !! i) w) m (keyframeEvents kf)
+      foldr (\(VisemeEvent i w ()) -> Map.insert (l.visemes !! i) w) m kf.events
     in m' : go m' rest
 
 lipsyncFromStates :: LipsyncStates -> Lipsync
@@ -259,13 +284,13 @@ lipsyncFromStates ms = let
       return (vis, fromMaybe 0 $ Map.lookup vis next)
     in this : changes next rest
   in Lipsync
-    { lipsyncVersion = 1
-    , lipsyncSubversion = 2
-    , lipsyncDTAImport = ""
-    , lipsyncVisemes = Set.toList visemes
-    , lipsyncKeyframes = do
+    { version = 1
+    , subversion = 2
+    , dtaImport = ""
+    , visemes = Set.toList visemes
+    , keyframes = do
       frame <- redundantZero $ changes Map.empty ms
-      return $ Keyframe $ sort $ flip map frame $ \(bs, w) -> VisemeEvent
+      return $ Keyframe $ sort $ frame <&> \(bs, w) -> VisemeEvent
         { visemeKey = Set.findIndex bs visemes
         , visemeWeight = w
         , visemeGraph = ()
@@ -291,21 +316,21 @@ addLipsync lx ly = lipsyncFromStates $
 
 parseLipsync :: Get Lipsync
 parseLipsync = do
-  lipsyncVersion <- getWord32be
-  lipsyncSubversion <- getWord32be
-  lipsyncDTAImport <- getStringBE
+  version <- getWord32be
+  subversion <- getWord32be
+  dtaImport <- getStringBE
   dtb <- getWord8
   case dtb of
     0 -> return ()
     _ -> fail "Parsing of Lipsync files with embedded DTB is not currently supported"
   skip 4 -- skips zeroes
   visemeCount <- getWord32be
-  lipsyncVisemes <- replicateM (fromIntegral visemeCount) getStringBE
+  visemes <- replicateM (fromIntegral visemeCount) getStringBE
   keyframeCount <- getWord32be
   _followingSize <- getWord32be
-  lipsyncKeyframes <- replicateM (fromIntegral keyframeCount) $ do
+  keyframes <- replicateM (fromIntegral keyframeCount) do
     eventCount <- getWord8
-    keyframeEvents <- replicateM (fromIntegral eventCount) $ do
+    events <- replicateM (fromIntegral eventCount) do
       visemeKey <- fromIntegral <$> getWord8
       visemeWeight <- getWord8
       let visemeGraph = ()
@@ -315,19 +340,19 @@ parseLipsync = do
 
 putLipsync :: Lipsync -> Put
 putLipsync lip = do
-  putWord32be $ lipsyncVersion lip
-  putWord32be $ lipsyncSubversion lip
-  putStringBE $ lipsyncDTAImport lip
+  putWord32be lip.version
+  putWord32be lip.subversion
+  putStringBE lip.dtaImport
   putWord8 0
   putWord32be 0
-  putWord32be $ fromIntegral $ length $ lipsyncVisemes lip
-  mapM_ putStringBE $ lipsyncVisemes lip
-  putWord32be $ fromIntegral $ length $ lipsyncKeyframes lip
-  let keyframeBS = runPut $ forM_ (lipsyncKeyframes lip) $ \key -> do
-        putWord8 $ fromIntegral $ length $ keyframeEvents key
-        forM_ (keyframeEvents key) $ \evt -> do
-          putWord8 $ fromIntegral $ visemeKey evt
-          putWord8 $ visemeWeight evt
+  putWord32be $ fromIntegral $ length lip.visemes
+  mapM_ putStringBE lip.visemes
+  putWord32be $ fromIntegral $ length lip.keyframes
+  let keyframeBS = runPut $ forM_ lip.keyframes \key -> do
+        putWord8 $ fromIntegral $ length key.events
+        forM_ key.events \evt -> do
+          putWord8 $ fromIntegral evt.visemeKey
+          putWord8 evt.visemeWeight
   putWord32be $ fromIntegral $ BL.length keyframeBS
   putLazyByteString keyframeBS
   putWord32be 0
@@ -338,22 +363,22 @@ lipsyncToMIDITrack lip
   $ RTB.flatten
   $ RTB.fromPairList
   $ do
-    (dt, key) <- zip (0 : repeat (1/30 :: U.Seconds)) $ lipsyncKeyframes lip
-    let lookupViseme i = TE.decodeLatin1 $ lipsyncVisemes lip !! i
+    (dt, key) <- zip (0 : repeat (1/30 :: U.Seconds)) lip.keyframes
+    let lookupViseme i = TE.decodeLatin1 $ lip.visemes !! i
         modifyEvent (VisemeEvent i w ()) = VisemeEvent (lookupViseme i) w GraphHold
-    return (dt, map modifyEvent $ keyframeEvents key)
+    return (dt, map modifyEvent key.events)
 
 data VisemeMap vis = VisemeMap
-  { vmVowels     :: CMUVowel     -> (vis, Maybe vis)
-  , vmConsonants :: CMUConsonant -> [vis]
-  , vmDefault    :: vis
+  { vowels     :: CMUVowel     -> (vis, Maybe vis)
+  , consonants :: CMUConsonant -> [vis]
+  , default_   :: vis
   } deriving (Functor)
 
 applyVisemeMap :: VisemeMap vis -> CMUSyllable -> VisemeSyllable vis
 applyVisemeMap vmap cmu = Syllable
-  { sylInitial = concatMap (vmConsonants vmap) $ sylInitial cmu
-  , sylVowel   = vmVowels vmap $ sylVowel cmu
-  , sylFinal   = concatMap (vmConsonants vmap) $ sylFinal cmu
+  { initial = concatMap vmap.consonants cmu.initial
+  , vowel   = vmap.vowels cmu.vowel
+  , final   = concatMap vmap.consonants cmu.final
   }
 
 loadVisemesRB3 :: (MonadIO m) => StackTraceT m (VisemeMap [(T.Text, Word8)])
@@ -363,14 +388,14 @@ loadVisemesTBRB :: (MonadIO m) => StackTraceT m (VisemeMap [(T.Text, Word8)])
 loadVisemesTBRB = stackIO (getResourcesPath "visemes/beatles.yml") >>= loadVisemeMap
 
 loadVisemeMap :: (MonadIO m) => FilePath -> StackTraceT m (VisemeMap [(T.Text, Word8)])
-loadVisemeMap f = inside ("Loading viseme map from: " <> f) $ do
+loadVisemeMap f = inside ("Loading viseme map from: " <> f) do
   stackIO (Y.decodeFileEither f) >>= \case
     Right v -> return v
     Left  e -> fatal $ Y.prettyPrintParseException e
 
 instance A.FromJSON (VisemeMap [(T.Text, Word8)]) where
-  parseJSON = A.withObject "VisemeMap" $ \o -> do
-    let readMap m = forM (HM.toList $ KM.toHashMapText m) $ \(k, v) -> do
+  parseJSON = A.withObject "VisemeMap" \o -> do
+    let readMap m = forM (HM.toList $ KM.toHashMapText m) \(k, v) -> do
           v' <- A.parseJSON v
           return (k, v')
         readVowel A.Null = return ([], Nothing)
@@ -389,25 +414,25 @@ instance A.FromJSON (VisemeMap [(T.Text, Word8)]) where
         readConsonant (A.Object obj) = (: []) <$> readMap obj
         readConsonant v = A.typeMismatch "object/array/null" v
     objVowels <- o .: "vowels"
-    vmVowels <- do
-      m <- fmap Map.fromList $ forM (HM.toList objVowels) $ \(k, v) -> do
+    vowels <- do
+      m <- fmap Map.fromList $ forM (HM.toList objVowels) \(k, v) -> do
         cmuv <- case readMaybe $ T.unpack k of
           Just cmuv -> return cmuv
           Nothing   -> fail $ "Unrecognized vowel: " <> show k
         vm <- readVowel v
         return (cmuv, vm)
-      return $ \vowel -> fromMaybe ([], Nothing) $ Map.lookup vowel m
+      return \vowel -> fromMaybe ([], Nothing) $ Map.lookup vowel m
     objConsonants <- o .: "consonants"
-    vmConsonants <- do
-      m <- fmap Map.fromList $ forM (HM.toList objConsonants) $ \(k, v) -> do
+    consonants <- do
+      m <- fmap Map.fromList $ forM (HM.toList objConsonants) \(k, v) -> do
         cmuc <- case readMaybe $ T.unpack k of
           Just cmuc -> return cmuc
           Nothing   -> fail $ "Unrecognized consonant: " <> show k
         cm <- readConsonant v
         return (cmuc, cm)
-      return $ \consonant -> fromMaybe [] $ Map.lookup consonant m
+      return \consonant -> fromMaybe [] $ Map.lookup consonant m
     objDefault <- o .: "default"
-    vmDefault <- A.withObject "default viseme setting" readMap objDefault
+    default_ <- A.withObject "default viseme setting" readMap objDefault
     return VisemeMap{..}
 
 -- TODO add diphthongs and consonants
@@ -430,9 +455,9 @@ cmuToGH2Viseme = \case
   CMU_UH -> Just GH2_Though -- ʊ : book
 
 data Syllable c v = Syllable
-  { sylInitial :: [c]
-  , sylVowel   :: v
-  , sylFinal   :: [c]
+  { initial :: [c]
+  , vowel   :: v
+  , final   :: [c]
   }
 type CMUSyllable        = Syllable CMUConsonant CMUVowel
 type VisemeSyllable vis = Syllable vis          (vis, Maybe vis)
@@ -442,18 +467,18 @@ justVowel v = Syllable [] v []
 
 mapVisemeSyllable :: (a -> b) -> VisemeSyllable [(a, Word8)] -> VisemeSyllable [(b, Word8)]
 mapVisemeSyllable f syl = Syllable
-  { sylInitial = map f' $ sylInitial syl
-  , sylVowel = case sylVowel syl of
+  { initial = map f' syl.initial
+  , vowel = case syl.vowel of
     (v1, Nothing) -> (f' v1, Nothing)
     (v1, Just v2) -> (f' v1, Just $ f' v2)
-  , sylFinal = map f' $ sylFinal syl
+  , final = map f' syl.final
   } where f' = map $ first f
 
 type Transcribe = [T.Text] -> [CMUSyllable]
 
 spanishVowels :: Transcribe
-spanishVowels = fmap $ \t -> let
-  vowels = flip mapMaybe (T.unpack $ T.toLower t) $ \case
+spanishVowels = fmap \t -> let
+  vowels = flip mapMaybe (T.unpack $ T.toLower t) \case
     'á' -> Just 'a'
     'é' -> Just 'e'
     'í' -> Just 'i'
@@ -468,7 +493,7 @@ spanishVowels = fmap $ \t -> let
     'o' -> CMU_OW
     'u' -> CMU_UW
     _   -> CMU_AH -- shouldn't happen
-  in justVowel $ case vowels of
+  in justVowel case vowels of
     [v] -> sound v
     _   -> case filter (\c -> c /= 'i' && c /= 'u') vowels of
       v : _ -> sound v
@@ -480,9 +505,9 @@ spanishVowels = fmap $ \t -> let
           else CMU_AH -- default
 
 germanVowels :: Transcribe
-germanVowels = fmap $ \t -> let
+germanVowels = fmap \t -> let
   vowels = T.filter (`elem` ("aeiouäöü" :: String)) $ T.toLower t
-  in justVowel $ case vowels of
+  in justVowel case vowels of
     "ei" -> CMU_AY
     "ie" -> CMU_IY
     "eu" -> CMU_OY
@@ -507,20 +532,20 @@ splitSyllables :: [CMUPhoneme] -> [CMUSyllable]
 splitSyllables [] = []
 splitSyllables (CMUConsonant c : ps) = case splitSyllables ps of
   []         -> []
-  syl : syls -> syl { sylInitial = c : sylInitial syl } : syls
+  syl : syls -> syl { initial = c : syl.initial } : syls
 splitSyllables (CMUVowel v : ps) = case ps of
   CMUConsonant _ : CMUVowel _ : _ -> noFinal
   -- TODO smarter rules for consuming final consonants
   CMUConsonant c : rest           -> Syllable
-    { sylInitial = []
-    , sylVowel   = v
-    , sylFinal   = [c]
+    { initial = []
+    , vowel   = v
+    , final   = [c]
     } : splitSyllables rest
   _                               -> noFinal
   where noFinal = Syllable
-          { sylInitial = []
-          , sylVowel = v
-          , sylFinal = []
+          { initial = []
+          , vowel = v
+          , final = []
           } : splitSyllables ps
 
 englishSyllables :: Transcribe
@@ -532,7 +557,7 @@ englishSyllables syllables = let
   word = B8.pack $ T.unpack $ T.toUpper $ T.concat $ map filterLyric syllables
   in case filter ((== numSyllables) . length) $ map splitSyllables $ fromMaybe [] $ HM.lookup word cmuDict of
     match : _ -> match
-    []        -> const (justVowel CMU_AH) <$> syllables -- TODO better default syllables
+    []        -> justVowel CMU_AH <$ syllables -- TODO better default syllables
 
 runTranscribe :: RTB.T t (Maybe (Transcribe, T.Text)) -> RTB.T t (Maybe CMUSyllable)
 runTranscribe = let
@@ -595,7 +620,7 @@ simpleAnimations transition = go [] where
     Wait t1 s (Wait t2 x rest) -> let
       front = min halfTransition t1
       back = min halfTransition (t2 / 2)
-      in Wait (t1 - front) (VisemeLine prev s) $ if back == t2 / 2
+      in Wait (t1 - front) (VisemeLine prev s) if back == t2 / 2
         then go s $ Wait (t2 - back) x rest -- don't need to hold, will immediately do another transition
         else Wait (front + back) (VisemeHold s)
           $ go s $ Wait (t2 - back) x rest
@@ -610,7 +635,7 @@ syllablesToAnimations
   -> VisemeMap [pair]
   -> RTB.T U.Seconds (Maybe (VisemeSyllable [pair]))
   -> RTB.T U.Seconds (VisemeAnimation [pair])
-syllablesToAnimations transition vmap = removeCancelled . Wait 0 (VisemeHold $ vmDefault vmap) . go where
+syllablesToAnimations transition vmap = removeCancelled . Wait 0 (VisemeHold vmap.default_) . go where
   halfTransition = transition / 2
   go = \case
     RNil -> RNil
@@ -621,11 +646,11 @@ syllablesToAnimations transition vmap = removeCancelled . Wait 0 (VisemeHold $ v
       finalBack = case rest of
         RNil        -> halfTransition
         Wait t3 _ _ -> min halfTransition (t3 / 2)
-      vowelBody = case sylVowel syl of
+      vowelBody = case syl.vowel of
         (v1, Nothing) -> VisemeHold v1
         (v1, Just v2) -> VisemeFall v1 v2
-      vowelStart = fst $ sylVowel syl
-      vowelEnd = case sylVowel syl of
+      vowelStart = fst syl.vowel
+      vowelEnd = case syl.vowel of
         (v1, Nothing) -> v1
         (_, Just v2)  -> v2
       lineSequence len x [] z continue = Wait 0 (VisemeLine x z) $ RTB.delay len continue
@@ -635,11 +660,11 @@ syllablesToAnimations transition vmap = removeCancelled . Wait 0 (VisemeHold $ v
         in Wait 0 (VisemeLine x y) $ RTB.delay firstLen
           $ lineSequence (len - firstLen) y ys z continue
       in RTB.delay (t1 - initialFront)
-        $ lineSequence (initialFront + initialBack) (vmDefault vmap) (sylInitial syl) vowelStart
+        $ lineSequence (initialFront + initialBack) vmap.default_ syl.initial vowelStart
         $ Wait 0 vowelBody
         $ RTB.delay (t2 - initialBack - finalFront)
-        $ lineSequence (finalFront + finalBack) vowelEnd (sylFinal syl) (vmDefault vmap)
-        $ Wait 0 (VisemeHold $ vmDefault vmap)
+        $ lineSequence (finalFront + finalBack) vowelEnd syl.final vmap.default_
+        $ Wait 0 (VisemeHold vmap.default_)
         $ go $ U.trackDrop finalBack rest
     Wait t1 Nothing rest -> RTB.delay t1 $ go rest -- shouldn't happen
     Wait t1 (Just syl1) (Wait t2 (Just syl2) rest) -- shouldn't happen
@@ -659,7 +684,7 @@ singleAnimsToStates vis anims = let
   animate animFunction len thisViseme1 thisViseme2 rest = let
     transitionSteps = ceiling $ len * 30 :: Int
     normalStep = len / fromIntegral transitionSteps
-    inBetween i = makeVisemeEvent $ let
+    inBetween i = makeVisemeEvent let
       animProgress = animFunction $ realToFrac i / realToFrac transitionSteps
       in thisViseme1 + round ((realToFrac thisViseme2 - realToFrac thisViseme1) * animProgress)
     steps = do
@@ -673,7 +698,7 @@ singleAnimsToStates vis anims = let
     Wait t1 (VisemeHold v) rest -> Wait t1 [makeVisemeEvent v] $ go rest
     Wait t1 (VisemeLine v1 v2) (Wait t2 x xs) -> if t2 /= 0
       then RTB.delay t1 $ animate id t2 v1 v2 $ Wait 0 x xs
-      else go $ Wait t1 (VisemeHold v1) $ let -- probably shouldn't happen
+      else go $ Wait t1 (VisemeHold v1) let -- probably shouldn't happen
         x' = case x of
           VisemeLine next1 next2 | next1 == v2 -> VisemeLine v1 next2
           VisemeFall next1 next2 | next1 == v2 -> VisemeFall v1 next2
@@ -681,7 +706,7 @@ singleAnimsToStates vis anims = let
         in Wait t2 x' xs
     Wait t1 (VisemeFall v1 v2) (Wait t2 x xs) -> if t2 /= 0
       then RTB.delay t1 $ animate easeInExpo t2 v1 v2 $ Wait 0 x xs
-      else go $ Wait t1 (VisemeHold v1) $ let -- can happen if a diphthong has zero time to do its transition
+      else go $ Wait t1 (VisemeHold v1) let -- can happen if a diphthong has zero time to do its transition
         x' = case x of
           VisemeLine next1 next2 | next1 == v2 -> VisemeLine v1 next2
           VisemeFall next1 next2 | next1 == v2 -> VisemeFall v1 next2
@@ -722,7 +747,7 @@ animationsToStates anims = let
   animate animFunction len v1 v2 rest = let
     transitionSteps = ceiling $ len * 30 :: Int
     normalStep = len / fromIntegral transitionSteps
-    inBetween i = makeVisemeEvent $ do
+    inBetween i = makeVisemeEvent do
       let animProgress = animFunction $ realToFrac i / realToFrac transitionSteps
       k <- nubOrd $ map fst v1 <> map fst v2
       let thisViseme1 = fromMaybe 0 $ lookup k v1
@@ -739,7 +764,7 @@ animationsToStates anims = let
     Wait t1 (VisemeHold v) rest -> Wait t1 (makeVisemeEvent v) $ go rest
     Wait t1 (VisemeLine v1 v2) (Wait t2 x xs) -> if t2 /= 0
       then RTB.delay t1 $ animate id t2 v1 v2 $ Wait 0 x xs
-      else go $ Wait t1 (VisemeHold v1) $ let -- probably shouldn't happen
+      else go $ Wait t1 (VisemeHold v1) let -- probably shouldn't happen
         x' = case x of
           VisemeLine next1 next2 | next1 == v2 -> VisemeLine v1 next2
           VisemeFall next1 next2 | next1 == v2 -> VisemeFall v1 next2
@@ -747,7 +772,7 @@ animationsToStates anims = let
         in Wait t2 x' xs
     Wait t1 (VisemeFall v1 v2) (Wait t2 x xs) -> if t2 /= 0
       then RTB.delay t1 $ animate easeInExpo t2 v1 v2 $ Wait 0 x xs
-      else go $ Wait t1 (VisemeHold v1) $ let -- can happen if a diphthong has zero time to do its transition
+      else go $ Wait t1 (VisemeHold v1) let -- can happen if a diphthong has zero time to do its transition
         x' = case x of
           VisemeLine next1 next2 | next1 == v2 -> VisemeLine v1 next2
           VisemeFall next1 next2 | next1 == v2 -> VisemeFall v1 next2
@@ -769,7 +794,7 @@ autoLipsync transition vmap trans vt = let
     = animationsToStates
     $ simpleAnimations transition
     $ fmap (\b -> guard b >> [("Blink", 255)])
-    $ vocalEyesClosed vt
+    $ vt.eyesClosed
   mouth
     = animationsToStates
     $ syllablesToAnimations transition vmap
@@ -786,7 +811,7 @@ autoLipsync' transition vmap trans vt = let
     = animationsToEvents
     $ simpleAnimations transition
     $ fmap (\b -> guard b >> [("Blink", 255)])
-    $ vocalEyesClosed vt
+    $ vt.eyesClosed
   mouth
     = animationsToEvents
     $ syllablesToAnimations transition vmap
@@ -798,23 +823,23 @@ autoLipsync' transition vmap trans vt = let
 
 setRB3 :: Lipsync -> Lipsync
 setRB3 lip = lip
-  { lipsyncVersion = 1
-  , lipsyncSubversion = 2
-  , lipsyncDTAImport = ""
+  { version = 1
+  , subversion = 2
+  , dtaImport = ""
   }
 
 setRB2 :: Lipsync -> Lipsync
 setRB2 lip = lip
-  { lipsyncVersion = 0
-  , lipsyncSubversion = 2
-  , lipsyncDTAImport = ""
+  { version = 0
+  , subversion = 2
+  , dtaImport = ""
   }
 
 setBeatles :: Lipsync -> Lipsync
 setBeatles lip = lip
-  { lipsyncVersion = 0
-  , lipsyncSubversion = 2
-  , lipsyncDTAImport = "proj9"
+  { version = 0
+  , subversion = 2
+  , dtaImport = "proj9"
   }
 
 beatlesLipsync :: U.Seconds -> VisemeMap [(T.Text, Word8)] -> Transcribe -> VocalTrack U.Seconds -> Lipsync
@@ -823,7 +848,7 @@ beatlesLipsync transition vmap trans vt = let
     = animationsToStates
     $ simpleAnimations transition
     $ fmap (\b -> guard b >> [("l_lids", 255), ("r_lids", 255)])
-    $ vocalEyesClosed vt
+    $ vt.eyesClosed
   mouth
     = animationsToStates
     $ syllablesToAnimations transition vmap
@@ -840,7 +865,7 @@ beatlesLipsync' transition vmap trans vt = let
     = animationsToEvents
     $ simpleAnimations transition
     $ fmap (\b -> guard b >> [("l_lids", 255), ("r_lids", 255)])
-    $ vocalEyesClosed vt
+    $ vt.eyesClosed
   mouth
     = animationsToEvents
     $ syllablesToAnimations transition vmap
@@ -853,7 +878,7 @@ beatlesLipsync' transition vmap trans vt = let
 gh2Lipsync :: Transcribe -> VocalTrack U.Seconds -> VocFile
 gh2Lipsync trans
   = visemesToVoc
-  . fmap (\msyl -> case msyl >>= cmuToGH2Viseme . sylVowel of
+  . fmap (\msyl -> case msyl >>= cmuToGH2Viseme . (.vowel) of
     Nothing  -> []
     Just vis -> [(T.replace "_" " " $ T.pack $ drop 4 $ show vis, 0.5)]
     )
@@ -876,8 +901,8 @@ lipEventsStates = let
 lipEventsStates' :: RTB.T U.Seconds (VisemeEvent VisemeGraph T.Text) -> LipsyncStates
 lipEventsStates' events = let
   allVisemes :: [T.Text]
-  allVisemes = nubOrd $ map visemeKey $ toList events
-  getSingleStates k = singleAnimsToStates k $ toAnimations $ RTB.filter (\e -> visemeKey e == k) events
+  allVisemes = nubOrd $ map (.visemeKey) $ toList events
+  getSingleStates k = singleAnimsToStates k $ toAnimations $ RTB.filter (\e -> e.visemeKey == k) events
   toAnimations = \case
     RNil -> RNil
     Wait t (VisemeEvent _ w _) RNil -> Wait t (VisemeHold w) RNil
@@ -894,11 +919,11 @@ data LipsyncTarget
 lipLyricsStates :: VisemeMap [(T.Text, Word8)] -> LipsyncTrack U.Seconds -> LipsyncStates
 lipLyricsStates vmap lip = let
   tubes = vocalTubes mempty
-    { vocalLyrics = lipLyrics lip
-    , vocalNotes  = lipNotes  lip
+    { lyrics = lip.lipLyrics
+    , notes  = lip.lipNotes
     }
-  withLang = applyStatus1 LyricEnglish (lipLanguage lip) tubes
-  transcribed = runTranscribe $ flip fmap withLang $ \(lang, mtext) -> let
+  withLang = applyStatus1 LyricEnglish lip.lipLanguage tubes
+  transcribed = runTranscribe $ withLang <&> \(lang, mtext) -> let
     trans = case lang of
       LyricEnglish -> englishSyllables
       LyricGerman  -> germanVowels
@@ -913,7 +938,7 @@ lipsyncFromMIDITrack' :: LipsyncTarget -> VisemeMap [(T.Text, Word8)] -> Lipsync
 lipsyncFromMIDITrack' tgt vmap lip
   = (case tgt of LipsyncTBRB -> setBeatles; LipsyncRB3 -> setRB3)
   $ lipsyncFromStates
-  $ addLipsyncStates (lipEventsStates' $ lipEvents lip) (lipLyricsStates vmap lip)
+  $ addLipsyncStates (lipEventsStates' lip.lipEvents) (lipLyricsStates vmap lip)
 
 lipsyncFromMIDITrack :: VisemeMap [(T.Text, Word8)] -> LipsyncTrack U.Seconds -> Lipsync
 lipsyncFromMIDITrack = lipsyncFromMIDITrack' LipsyncRB3
@@ -922,33 +947,33 @@ lipsyncAdjustSpeed :: Rational -> Lipsync -> Lipsync
 lipsyncAdjustSpeed 1 lip = lip
 lipsyncAdjustSpeed r lip = let
   emptyMap = VisemeMap
-    { vmVowels     = \_ -> ([], Nothing)
-    , vmConsonants = \_ -> []
-    , vmDefault    = []
+    { vowels     = \_ -> ([], Nothing)
+    , consonants = \_ -> []
+    , default_    = []
     }
   r' = realToFrac r :: U.Seconds
   adjust = mapTrack $ RTB.mapTime (/ r')
   in (lipsyncFromMIDITrack emptyMap $ adjust $ lipsyncToMIDITrack lip)
-    { lipsyncVersion    = lipsyncVersion    lip
-    , lipsyncSubversion = lipsyncSubversion lip
-    , lipsyncDTAImport  = lipsyncDTAImport  lip
+    { version    = lip.version
+    , subversion = lip.subversion
+    , dtaImport  = lip.dtaImport
     }
 
 lipsyncPad :: U.Seconds -> Lipsync -> Lipsync
 lipsyncPad 0    lip = lip
 lipsyncPad secs lip = let
   pad = replicate (round $ secs * 30) $ Keyframe []
-  in lip { lipsyncKeyframes = pad <> lipsyncKeyframes lip }
+  in lip { keyframes = pad <> lip.keyframes }
 
 lipsyncTake :: U.Seconds -> Lipsync -> Lipsync
 lipsyncTake secs lip = lip
-  { lipsyncKeyframes = take (round $ secs * 30) $ lipsyncKeyframes lip
+  { keyframes = take (round $ secs * 30) lip.keyframes
   }
 
 -- TODO not quite right; should make sure to initialize first frame state correctly
 lipsyncDrop :: U.Seconds -> Lipsync -> Lipsync
 lipsyncDrop secs lip = lip
-  { lipsyncKeyframes = drop (round $ secs * 30) $ lipsyncKeyframes lip
+  { keyframes = drop (round $ secs * 30) lip.keyframes
   }
 
 testConvertLipsync :: FilePath -> [FilePath] -> FilePath -> IO ()
@@ -957,8 +982,8 @@ testConvertLipsync fmid fvocs fout = do
   mid <- case res of
     Left err  -> error $ show err
     Right mid -> return mid
-  trks <- forM fvocs $ \fvoc -> do
-    trk <- BL.readFile fvoc >>= return . case takeExtension fvoc of
+  trks <- forM fvocs \fvoc -> do
+    trk <- BL.readFile fvoc <&> case takeExtension fvoc of
       ".voc" -> vocToMIDITrack     . runGet parseVocFile
       _      -> lipsyncToMIDITrack . runGet parseLipsync
     return $ mapTrack (U.unapplyTempoTrack mid.tempos) trk
@@ -978,166 +1003,176 @@ testConvertLipsync fmid fvocs fout = do
 -- Older RB4 lipsync stored in the rbsong has all lowercase visemes.
 -- RB3 requires them to be specific casing.
 standardVisemeCase :: Lipsync -> Lipsync
-standardVisemeCase lip = lip
-  { lipsyncVisemes = flip map lip.lipsyncVisemes $ \vis ->
-    if "singalong" `B.isSuffixOf` vis
-      -- bass_singalong etc. are all lower
-      then B8.map toLower vis
-      -- otherwise: first char upper, rest lower
-      else case B8.unpack vis of
-        []     -> vis
-        c : cs -> B8.pack $ toUpper c : map toLower cs
-  }
+standardVisemeCase = #visemes % mapped %~ \vis ->
+  if "singalong" `B.isSuffixOf` vis
+    -- bass_singalong etc. are all lower
+    then B8.map toLower vis
+    -- otherwise: first char upper, rest lower
+    else case B8.unpack vis of
+      []     -> vis
+      c : cs -> B8.pack $ toUpper c : map toLower cs
 
 data VocFile = VocFile
-  { vocMystery1  :: Word32 -- RB: 1500, GH2: 1200
-  , vocMystery2  :: Word16 -- RB: 1, GH2: 0
-  , vocCompany   :: B.ByteString -- "Harmonix"
-  , vocMystery3  :: Word16 -- 1
-  , vocComment   :: B.ByteString
+  { mystery1  :: Word32 -- RB: 1500, GH2: 1200
+  , mystery2  :: Word16 -- RB: 1, GH2: 0
+  , company   :: B.ByteString -- "Harmonix"
+  , mystery3  :: Word16 -- 1
+  , comment   :: B.ByteString
     -- RB: "5 projects developed before 5/7/2007"
     -- GH2: "Karaoke Revolution Vol 4"
   -- boundaries between next few are uncertain
-  , vocMystery4  :: Word32 -- 1000
-  , vocMystery5  :: Word32 -- 0
-  , vocMystery6  :: Word16 -- 0
-  , vocMystery7  :: Word16 -- RB: 1, GH2: 0
-  , vocName      :: B.ByteString -- "alright_dryvox"
-  , vocMystery8  :: Word16 -- 3
-  , vocFileSize  :: Word32 -- total size of the file. 123525 (0x1E285)
-  , vocMystery9  :: Word16 -- 0
-  , vocVisemes   :: [VocViseme]
+  , mystery4  :: Word32 -- 1000
+  , mystery5  :: Word32 -- 0
+  , mystery6  :: Word16 -- 0
+  , mystery7  :: Word16 -- RB: 1, GH2: 0
+  , name      :: B.ByteString -- "alright_dryvox"
+  , mystery8  :: Word16 -- 3
+  , fileSize  :: Word32 -- total size of the file. 123525 (0x1E285)
+  , mystery9  :: Word16 -- 0
+  , visemes   :: [VocViseme]
   -- again, boundaries uncertain
-  , vocMystery10 :: Word32 -- 0
-  , vocMystery11 :: Word16 -- 0
+  , mystery10 :: Word32 -- 0
+  , mystery11 :: Word16 -- 0
   -- pretty sure these are floats. could be weight transition times
-  , vocMystery12 :: Float -- 0.16
-  , vocMystery13 :: Float -- 0.22
+  , mystery12 :: Float -- 0.16
+  , mystery13 :: Float -- 0.22
   -- GH2 file ends here. RB file continues
-  , vocMystery14 :: Maybe Word32 -- 0
-  , vocMystery15 :: Maybe Word16 -- 0
-  , vocMystery16 :: Maybe Word32 -- 1
-  , vocMystery17 :: Maybe Word16 -- 0
-  , vocMystery18 :: Maybe Word32 -- 1
-  , vocMystery19 :: Maybe Word16 -- 0
-  , vocMystery20 :: Maybe Int32 -- -1
+  , mystery14 :: Maybe Word32 -- 0
+  , mystery15 :: Maybe Word16 -- 0
+  , mystery16 :: Maybe Word32 -- 1
+  , mystery17 :: Maybe Word16 -- 0
+  , mystery18 :: Maybe Word32 -- 1
+  , mystery19 :: Maybe Word16 -- 0
+  , mystery20 :: Maybe Int32 -- -1
   } deriving (Show)
 
 data VocViseme = VocViseme
-  { vvMystery1 :: Word32 -- 0
-  , vvMystery2 :: Word16 -- 0
-  , vvMystery3 :: Word16 -- RB: 1, GH2: 0
-  , vvName     :: B.ByteString -- "Eat", "If", etc.
-  , vvMystery4 :: Word32 -- 0
-  , vvMystery5 :: Word32 -- 0
-  , vvEvents   :: [VocEvent] -- each is 18 bytes
-  , vvMystery6 :: Word16 -- 0
+  { mystery1 :: Word32 -- 0
+  , mystery2 :: Word16 -- 0
+  , mystery3 :: Word16 -- RB: 1, GH2: 0
+  , name     :: B.ByteString -- "Eat", "If", etc.
+  , mystery4 :: Word32 -- 0
+  , mystery5 :: Word32 -- 0
+  , events   :: [VocEvent] -- each is 18 bytes
+  , mystery6 :: Word16 -- 0
   } deriving (Show)
 
 data VocEvent = VocEvent
-  { veMystery1 :: Word32 -- 0
-  , veTime     :: Float -- timestamp in seconds
-  , veWeight   :: Float -- range appears to vary per property. 0 to 1 is typical but some are negative or higher than 1
-  , veMystery2 :: Word32 -- 0
-  , veMystery3 :: Word16 -- 0
+  { mystery1 :: Word32 -- 0
+  , time     :: Float -- timestamp in seconds
+  , weight   :: Float -- range appears to vary per property. 0 to 1 is typical but some are negative or higher than 1
+  , mystery2 :: Word32 -- 0
+  , mystery3 :: Word16 -- 0
   } deriving (Show)
 
 parseVocFile :: Get VocFile
 parseVocFile = do
   "FACE" <- getByteString 4
-  vocMystery1 <- getWord32le
-  vocMystery2 <- getWord16le
-  vocCompany <- getStringLE
-  vocMystery3 <- getWord16le
-  vocComment <- getStringLE
-  vocMystery4 <- getWord32le
-  vocMystery5 <- getWord32le
-  vocMystery6 <- getWord16le
-  vocMystery7 <- getWord16le
-  vocName <- getStringLE
-  vocMystery8 <- getWord16le
-  vocFileSize <- getWord32le
-  vocMystery9 <- getWord16le
+  mystery1 <- getWord32le
+  mystery2 <- getWord16le
+  company <- getStringLE
+  mystery3 <- getWord16le
+  comment <- getStringLE
+  mystery4 <- getWord32le
+  mystery5 <- getWord32le
+  mystery6 <- getWord16le
+  mystery7 <- getWord16le
+  name <- getStringLE
+  mystery8 <- getWord16le
+  fileSize <- getWord32le
+  mystery9 <- getWord16le
   visemeCount <- getWord32le
-  vocVisemes <- replicateM (fromIntegral visemeCount) $ do
-    vvMystery1 <- getWord32le
-    vvMystery2 <- getWord16le
-    vvMystery3 <- getWord16le
-    vvName <- getStringLE
-    vvMystery4 <- getWord32le
-    vvMystery5 <- getWord32le
-    eventCount <- getWord16le
-    vvEvents <- replicateM (fromIntegral eventCount) $ do
-      veMystery1 <- getWord32le
-      veTime <- getFloatle
-      veWeight <- getFloatle
-      veMystery2 <- getWord32le
-      veMystery3 <- getWord16le
-      return VocEvent{..}
-    vvMystery6 <- getWord16le
-    return VocViseme{..}
-  vocMystery10 <- getWord32le
-  vocMystery11 <- getWord16le
-  vocMystery12 <- getFloatle
-  vocMystery13 <- getFloatle
+  visemes <- replicateM (fromIntegral visemeCount) parseVocViseme
+  mystery10 <- getWord32le
+  mystery11 <- getWord16le
+  mystery12 <- getFloatle
+  mystery13 <- getFloatle
   isGH <- isEmpty
-  vocMystery14 <- if isGH then return Nothing else Just <$> getWord32le
-  vocMystery15 <- if isGH then return Nothing else Just <$> getWord16le
-  vocMystery16 <- if isGH then return Nothing else Just <$> getWord32le
-  vocMystery17 <- if isGH then return Nothing else Just <$> getWord16le
-  vocMystery18 <- if isGH then return Nothing else Just <$> getWord32le
-  vocMystery19 <- if isGH then return Nothing else Just <$> getWord16le
-  vocMystery20 <- if isGH then return Nothing else Just <$> getInt32le
+  mystery14 <- if isGH then return Nothing else Just <$> getWord32le
+  mystery15 <- if isGH then return Nothing else Just <$> getWord16le
+  mystery16 <- if isGH then return Nothing else Just <$> getWord32le
+  mystery17 <- if isGH then return Nothing else Just <$> getWord16le
+  mystery18 <- if isGH then return Nothing else Just <$> getWord32le
+  mystery19 <- if isGH then return Nothing else Just <$> getWord16le
+  mystery20 <- if isGH then return Nothing else Just <$> getInt32le
   return VocFile{..}
+
+parseVocViseme :: Get VocViseme
+parseVocViseme = do
+  mystery1 <- getWord32le
+  mystery2 <- getWord16le
+  mystery3 <- getWord16le
+  name <- getStringLE
+  mystery4 <- getWord32le
+  mystery5 <- getWord32le
+  eventCount <- getWord16le
+  events <- replicateM (fromIntegral eventCount) parseVocEvent
+  mystery6 <- getWord16le
+  return VocViseme{..}
+
+parseVocEvent :: Get VocEvent
+parseVocEvent = do
+  mystery1 <- getWord32le
+  time <- getFloatle
+  weight <- getFloatle
+  mystery2 <- getWord32le
+  mystery3 <- getWord16le
+  return VocEvent{..}
 
 putVocFileRaw :: VocFile -> Put
 putVocFileRaw VocFile{..} = do
   putByteString "FACE"
-  putWord32le vocMystery1
-  putWord16le vocMystery2
-  putStringLE vocCompany
-  putWord16le vocMystery3
-  putStringLE vocComment
-  putWord32le vocMystery4
-  putWord32le vocMystery5
-  putWord16le vocMystery6
-  putWord16le vocMystery7
-  putStringLE vocName
-  putWord16le vocMystery8
-  putWord32le vocFileSize
-  putWord16le vocMystery9
-  putWord32le $ fromIntegral $ length vocVisemes
-  forM_ vocVisemes $ \VocViseme{..} -> do
-    putWord32le vvMystery1
-    putWord16le vvMystery2
-    putWord16le vvMystery3
-    putStringLE vvName
-    putWord32le vvMystery4
-    putWord32le vvMystery5
-    putWord16le $ fromIntegral $ length vvEvents
-    forM_ vvEvents $ \VocEvent{..} -> do
-      putWord32le veMystery1
-      putFloatle veTime
-      putFloatle veWeight
-      putWord32le veMystery2
-      putWord16le veMystery3
-    putWord16le vvMystery6
-  putWord32le vocMystery10
-  putWord16le vocMystery11
-  putFloatle vocMystery12
-  putFloatle vocMystery13
-  mapM_ putWord32le vocMystery14
-  mapM_ putWord16le vocMystery15
-  mapM_ putWord32le vocMystery16
-  mapM_ putWord16le vocMystery17
-  mapM_ putWord32le vocMystery18
-  mapM_ putWord16le vocMystery19
-  mapM_ putInt32le vocMystery20
+  putWord32le mystery1
+  putWord16le mystery2
+  putStringLE company
+  putWord16le mystery3
+  putStringLE comment
+  putWord32le mystery4
+  putWord32le mystery5
+  putWord16le mystery6
+  putWord16le mystery7
+  putStringLE name
+  putWord16le mystery8
+  putWord32le fileSize
+  putWord16le mystery9
+  putWord32le $ fromIntegral $ length visemes
+  mapM_ putVocViseme visemes
+  putWord32le mystery10
+  putWord16le mystery11
+  putFloatle mystery12
+  putFloatle mystery13
+  mapM_ putWord32le mystery14
+  mapM_ putWord16le mystery15
+  mapM_ putWord32le mystery16
+  mapM_ putWord16le mystery17
+  mapM_ putWord32le mystery18
+  mapM_ putWord16le mystery19
+  mapM_ putInt32le mystery20
+
+putVocViseme :: VocViseme -> Put
+putVocViseme VocViseme{..} = do
+  putWord32le mystery1
+  putWord16le mystery2
+  putWord16le mystery3
+  putStringLE name
+  putWord32le mystery4
+  putWord32le mystery5
+  putWord16le $ fromIntegral $ length events
+  mapM_ putVocEvent events
+  putWord16le mystery6
+
+putVocEvent :: VocEvent -> Put
+putVocEvent VocEvent{..} = do
+  putWord32le mystery1
+  putFloatle time
+  putFloatle weight
+  putWord32le mystery2
+  putWord16le mystery3
 
 putVocFile :: VocFile -> Put
 putVocFile voc = let
   len = fromIntegral $ BL.length $ runPut $ putVocFileRaw voc
-  in putVocFileRaw voc { vocFileSize = len }
+  in putVocFileRaw voc { fileSize = len }
 
 getStringLE :: Get B.ByteString
 getStringLE = do
@@ -1153,68 +1188,67 @@ vocToMIDITrack :: VocFile -> LipsyncTrack U.Seconds
 vocToMIDITrack voc
   = LipsyncTrack RTB.empty RTB.empty RTB.empty
   $ foldr RTB.merge RTB.empty
-  $ flip map (vocVisemes voc)
-  $ \vis -> let
-    name = TE.decodeLatin1 $ vvName vis
+  $ voc.visemes <&> \vis -> let
+    name = TE.decodeLatin1 vis.name
     in RTB.fromAbsoluteEventList
       $ ATB.fromPairList
-      $ flip map (vvEvents vis) $ \evt -> let
-        -- arterialblack.voc has a veTime of -2.3666643e-2 so we clamp to 0
-        time = realToFrac $ if veTime evt < 0 then 0 else veTime evt
+      $ vis.events <&> \evt -> let
+        -- arterialblack.voc has a time of -2.3666643e-2 so we clamp to 0
+        time = realToFrac $ max evt.time 0
         -- TODO extend lipsync track to support the full range
         weight
-          | veWeight evt < 0 = 0
-          | veWeight evt > 1 = 255
-          | otherwise        = round $ veWeight evt * 255
+          | evt.weight < 0 = 0
+          | evt.weight > 1 = 255
+          | otherwise        = round $ evt.weight * 255
         in (time, VisemeEvent name weight GraphHold)
 
 visemesToVoc :: RTB.T U.Seconds [(T.Text, Float)] -> VocFile
 visemesToVoc visemes = VocFile
-  { vocMystery1 = 1200
-  , vocMystery2 = 0
-  , vocCompany = "Harmonix"
-  , vocMystery3 = 0
-  , vocComment = "Karaoke Revolution Vol 4"
-  , vocMystery4 = 1000
-  , vocMystery5 = 0
-  , vocMystery6 = 0
-  , vocMystery7 = 0
-  , vocName = "onyx_toolkit_lipsync"
-  , vocMystery8 = 0
-  , vocFileSize = 0xDEADBEEF -- calculated later
-  , vocMystery9 = 0
-  , vocVisemes = flip map (nubOrd $ map fst $ concat $ RTB.getBodies visemes) $ \vis -> VocViseme
-    { vvMystery1 = 0
-    , vvMystery2 = 0
-    , vvMystery3 = 0
-    , vvName = TE.encodeUtf8 vis
-    , vvMystery4 = 0
-    , vvMystery5 = 0
-    , vvEvents
+  { mystery1 = 1200
+  , mystery2 = 0
+  , company = "Harmonix"
+  , mystery3 = 0
+  , comment = "Karaoke Revolution Vol 4"
+  , mystery4 = 1000
+  , mystery5 = 0
+  , mystery6 = 0
+  , mystery7 = 0
+  , name = "onyx_toolkit_lipsync"
+  , mystery8 = 0
+  , fileSize = 0xDEADBEEF -- calculated later
+  , mystery9 = 0
+  , visemes = nubOrd (map fst $ concat $ RTB.getBodies visemes) <&> \vis -> VocViseme
+    { mystery1 = 0
+    , mystery2 = 0
+    , mystery3 = 0
+    , name = TE.encodeUtf8 vis
+    , mystery4 = 0
+    , mystery5 = 0
+    , events
       = map (\(t, weight) -> VocEvent
-        { veMystery1 = 0
-        , veTime = realToFrac t
-        , veWeight = weight
-        , veMystery2 = 0
-        , veMystery3 = 0
+        { mystery1 = 0
+        , time = realToFrac t
+        , weight = weight
+        , mystery2 = 0
+        , mystery3 = 0
         })
       $ ATB.toPairList
       $ RTB.toAbsoluteEventList 0
       $ noRedundantStatus
       $ fmap (\set -> fromMaybe 0 $ lookup vis set) visemes
-    , vvMystery6 = 0
+    , mystery6 = 0
     }
-  , vocMystery10 = 0
-  , vocMystery11 = 0
-  , vocMystery12 = 0.16
-  , vocMystery13 = 0.22
-  , vocMystery14 = Nothing
-  , vocMystery15 = Nothing
-  , vocMystery16 = Nothing
-  , vocMystery17 = Nothing
-  , vocMystery18 = Nothing
-  , vocMystery19 = Nothing
-  , vocMystery20 = Nothing
+  , mystery10 = 0
+  , mystery11 = 0
+  , mystery12 = 0.16
+  , mystery13 = 0.22
+  , mystery14 = Nothing
+  , mystery15 = Nothing
+  , mystery16 = Nothing
+  , mystery17 = Nothing
+  , mystery18 = Nothing
+  , mystery19 = Nothing
+  , mystery20 = Nothing
   }
 
 -- Lego Rock Band (but not RB2) seems to require the lipsync file to cover the
@@ -1223,7 +1257,7 @@ extendLipsync :: U.Seconds -> Lipsync -> Lipsync
 extendLipsync len lip = let
   lenFrames = ceiling $ len * 30 :: Int
   in lip
-    { lipsyncKeyframes
+    { keyframes
         = take lenFrames
-        $ lipsyncKeyframes lip <> repeat (Keyframe [])
+        $ lip.keyframes <> repeat (Keyframe [])
     }

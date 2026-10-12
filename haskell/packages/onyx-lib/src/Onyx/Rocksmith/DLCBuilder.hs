@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
@@ -39,7 +40,7 @@ data RS2DLC = RS2DLC
   } deriving (Show)
 
 instance StackJSON RS2DLC where
-  stackJSON = asObject ".rs2dlc" $ do
+  stackJSON = asObject ".rs2dlc" do
     version            <- (.version           ) =. req "Version"            stackJSON
     author             <- (.author            ) =. req "Author"             stackJSON
     dlcKey             <- (.dlcKey            ) =. req "DLCKey"             stackJSON
@@ -63,7 +64,7 @@ data Sortable = Sortable
   } deriving (Show)
 
 instance StackJSON Sortable where
-  stackJSON = asObject "display and sort values" $ do
+  stackJSON = asObject "display and sort values" do
     value     <- (.value    ) =. req "Value"     stackJSON
     sortValue <- (.sortValue) =. req "SortValue" stackJSON
     return Sortable{..}
@@ -74,7 +75,7 @@ data AudioFile = AudioFile
   } deriving (Show)
 
 instance StackJSON AudioFile where
-  stackJSON = asObject "audio path and volume" $ do
+  stackJSON = asObject "audio path and volume" do
     path   <- (.path  ) =. req "Path"   stackJSON
     volume <- (.volume) =. req "Volume" stackJSON
     return AudioFile{..}
@@ -102,7 +103,7 @@ instance StackJSON Arrangement where
           "Showlights"   -> ArrShowlights   <$> parseFrom arrFields1 (codecIn stackJSON)
           _              -> fatal $ "Unrecognized arrangement Case: " <> show arrCase
       _ -> fatal "Not an object"
-    , codecOut = makeOut $ \case
+    , codecOut = makeOut \case
       ArrInstrumental x -> A.object
         [ "Case"   .= ("Instrumental" :: T.Text)
         , "Fields" .= toJSON [x]
@@ -133,7 +134,7 @@ data Instrumental = Instrumental
   } deriving (Show)
 
 instance StackJSON Instrumental where
-  stackJSON = asObject "Instrumental" $ do
+  stackJSON = asObject "Instrumental" do
     xml          <- (.xml         ) =. req "XML"          stackJSON
     name         <- (.name        ) =. req "Name"         stackJSON
     routeMask    <- (.routeMask   ) =. req "RouteMask"    stackJSON
@@ -157,7 +158,7 @@ data Vocals = Vocals
   } deriving (Show)
 
 instance StackJSON Vocals where
-  stackJSON = asObject "Vocals" $ do
+  stackJSON = asObject "Vocals" do
     xml          <- (.xml         ) =. req "XML"          stackJSON
     japanese     <- (.japanese    ) =. req "Japanese"     stackJSON
     customFont   <- (.customFont  ) =. req "CustomFont"   stackJSON
@@ -170,6 +171,6 @@ data Showlights = Showlights
   } deriving (Show)
 
 instance StackJSON Showlights where
-  stackJSON = asObject "Showlights" $ do
+  stackJSON = asObject "Showlights" do
     xml <- (.xml) =. req "XML" stackJSON
     return Showlights{..}

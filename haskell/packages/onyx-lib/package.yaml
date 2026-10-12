@@ -1,7 +1,7 @@
 name: onyx-lib
-version: '20251011'
+version: '20261011'
 github: mtolly/onyx
-author: Michael Tolly <miketolly@gmail.com>
+author: Melody Tolly <miketolly@gmail.com>
 category: Distribution
 license: GPL-3
 license-file: ../../LICENSE.txt
@@ -11,19 +11,12 @@ extra-source-files:
 
 ghc-options: -Wall
 
-# this doesn't actually customize anything,
-# it just makes sure that we use the patched Cabal
-# which works around a c2hs invocation issue on Windows
-custom-setup:
-  dependencies:
-  - base
-  - Cabal
-
 library:
 
   source-dirs: src
   dependencies:
   - base
+  - system-cxx-std-lib
   - shake
   - hashable
   - directory
@@ -40,8 +33,6 @@ library:
   - bytestring
   - process
   - resourcet
-  - hsndfile
-  - hsndfile-vector
   - JuicyPixels
   - conduit
   - vector
@@ -86,14 +77,15 @@ library:
   - stache
   - linear
   - pretty-simple
+  - optics
+  - inline-c
+  - megaparsec
   # my libraries
   - jammittools
   - midi-util
   - conduit-audio
-  - conduit-audio-sndfile
   - conduit-audio-samplerate
   - conduit-audio-lame
-  - conduit-audio-mpg123
   - rubberband
   - JuicyPixels-stbir
   - onyx-arktool
@@ -106,11 +98,12 @@ library:
   - onyx-moggcrypt
   - onyx-autochart
   - onyx-libzip
+  - onyx-vorbisenc
   - utf8proc
+  - onyx-js
 
   ghc-options: -O
   build-tools:
-  - c2hs >= 0.27.1
   - alex
   - happy
 
@@ -121,7 +114,6 @@ library:
   - cbits/encode_vag.c
   - cbits/cross_correlate.c
   extra-libraries:
-  - stdc++
   - vorbisfile # needed for ghci to work, even though it's under pkg-config?
   pkg-config-dependencies:
   - vorbisfile

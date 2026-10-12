@@ -1,9 +1,9 @@
+{-# LANGUAGE BlockArguments             #-}
 {-# LANGUAGE DataKinds                  #-}
 {-# LANGUAGE DeriveFoldable             #-}
 {-# LANGUAGE DeriveFunctor              #-}
 {-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE DeriveTraversable          #-}
-{-# LANGUAGE DerivingStrategies         #-}
 {-# LANGUAGE DerivingVia                #-}
 {-# LANGUAGE DuplicateRecordFields      #-}
 {-# LANGUAGE FlexibleContexts           #-}
@@ -12,6 +12,7 @@
 {-# LANGUAGE LambdaCase                 #-}
 {-# LANGUAGE MultiWayIf                 #-}
 {-# LANGUAGE NoFieldSelectors           #-}
+{-# LANGUAGE OverloadedLabels           #-}
 {-# LANGUAGE OverloadedRecordDot        #-}
 {-# LANGUAGE PatternSynonyms            #-}
 {-# LANGUAGE RecordWildCards            #-}
@@ -19,7 +20,6 @@
 {-# LANGUAGE TupleSections              #-}
 {-# LANGUAGE TypeOperators              #-}
 {-# LANGUAGE UndecidableInstances       #-}
-{-# OPTIONS_GHC -fno-warn-ambiguous-fields #-}
 module Onyx.Game.Time where
 
 import           Control.Applicative              ((<|>))
@@ -28,6 +28,8 @@ import           Control.Monad.Trans.State        (evalState, get, put)
 import           Data.Bits
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Foldable                    (find, toList)
+import           Data.Function                    ((&))
+import           Data.Functor                     ((<&>))
 import qualified Data.Map.Strict.Internal         as Map
 import           Data.Maybe                       (fromMaybe, isJust, isNothing,
                                                    listToMaybe, mapMaybe)
@@ -45,6 +47,7 @@ import qualified Onyx.MIDI.Track.ProGuitar        as PG
 import           Onyx.MIDI.Track.Venue
 import           Onyx.MIDI.Track.Vocal
 import           Onyx.PhaseShift.Dance            (NoteType (..))
+import           Optics                           ((.~))
 import qualified Sound.MIDI.Util                  as U
 
 data PNF sust now
@@ -120,7 +123,7 @@ makeToggle m = let
   go b = do
     cur <- get
     put b
-    return $ case (cur, b) of
+    return case (cur, b) of
       (False, False) -> ToggleEmpty
       (False, True)  -> ToggleStart ()
       (True, False)  -> ToggleEnd ()
@@ -495,7 +498,7 @@ data DrumPlayState t pad lane = DrumPlayState
   { events    :: [(t, (EventResult t pad, GamePlayState))]
   , track     :: Map.Map t (CommonState (DrumState pad lane))
   , noteTimes :: Set.Set t
-  } deriving (Show)
+  } deriving (Show, Generic)
 
 data NoteStatus t
   = NoteFuture
@@ -504,7 +507,7 @@ data NoteStatus t
   deriving (Eq, Show)
 
 processedNotes :: [(t, (EventResult t pad, GamePlayState))] -> [(t, pad, NoteStatus t)]
-processedNotes = concatMap $ \(eventTime, (res, _)) -> let
+processedNotes = concatMap \(eventTime, (res, _)) -> let
   hit = case res.hit of
     Just (pad, Just t) -> [(t, pad, NoteHitAt eventTime)]
     _                  -> []
@@ -558,13 +561,13 @@ applyDrumEvent tNew mpadNew halfWindow dps = let
     mClosestTime = case (Set.lookupLE t dps.noteTimes, Set.lookupGE t dps.noteTimes) of
       (x, Nothing)     -> x
       (Nothing, y)     -> y
-      (Just x, Just y) -> Just $ if t - x < y - t then x else y
+      (Just x, Just y) -> Just if t - x < y - t then x else y
     mClosestTime' = mClosestTime >>= \ct -> do
       guard $ abs (ct - t) < halfWindow
       return ct
-    hit = flip fmap mpad $ \pad -> let
+    hit = mpad <&> \pad -> let
       hitNote = mClosestTime' >>= \closestTime -> do
-        guard $ case Map.lookup closestTime dps.track of
+        guard case Map.lookup closestTime dps.track of
           Nothing -> False
           Just cs -> Set.member pad cs.inner.notes
         guard $ noteStatus closestTime pad evts == NoteFuture
@@ -616,10 +619,10 @@ applyDrumEvent tNew mpadNew halfWindow dps = let
       _             -> (t, (EventResult{..}, newState)) : evts
   in case span ((> tNew) . fst) dps.events of
     (eventsToRewind, rest) -> let
-      eventsToRewind' = flip map eventsToRewind $ \(t, (res, _)) ->
+      eventsToRewind' = eventsToRewind <&> \(t, (res, _)) ->
         (t, fmap fst res.hit)
       newEvents = foldr applyNoRewind rest $ eventsToRewind' ++ [(tNew, mpadNew)]
-      in dps { events = newEvents }
+      in dps & #events .~ newEvents
 
 ----------------------------
 
@@ -639,7 +642,7 @@ data EliteDrumPlayState t = EliteDrumPlayState
   { events    :: [(t, (Maybe EliteDrumInput, EliteDrumGameState t))]
   , track     :: Map.Map t (CommonState (EliteDrumState t (EliteDrumNote FlamStatus) (EliteGem ())))
   , noteTimes :: Set.Set t
-  } deriving (Show)
+  } deriving (Show, Generic)
 
 data EliteDrumGameState t = EliteDrumGameState
   { score       :: Int
@@ -647,7 +650,7 @@ data EliteDrumGameState t = EliteDrumGameState
   , hihatOpen   :: Bool
   , noteResults :: [(t, Map.Map (EliteDrumNote FlamStatus) (NoteResult t))] -- times are of notes
   , overhits    :: [(t, EliteDrumHit)] -- times are of inputs
-  } deriving (Show)
+  } deriving (Show, Generic)
 
 data NoteResult t
   = EDMissed
@@ -696,7 +699,7 @@ applyEliteDrumEvent tNew mpadNew halfWindow dps = let
       ct <- case (Set.lookupLE t dps.noteTimes, Set.lookupGE t dps.noteTimes) of
         (x, Nothing)     -> x
         (Nothing, y)     -> y
-        (Just x, Just y) -> Just $ if t - x < y - t then x else y
+        (Just x, Just y) -> Just if t - x < y - t then x else y
       guard $ abs (ct - t) < halfWindow
       return ct
     originalSlices = case evts of
@@ -744,22 +747,22 @@ applyEliteDrumEvent tNew mpadNew halfWindow dps = let
       case input of
         EDInputHihatOpen -> Nothing
         EDInputHit hit -> let
-          match note = note.tdn_gem == hit.gem
+          match note = note.gem == hit.gem
           in find match state.inner.notes
     normalHitData = case matchingHit of
       Nothing -> Nothing
       Just note -> case Map.lookup note currentSlice of
         Nothing -> let
-          newStatus = case tdn_type note of
+          newStatus = case note.type_ of
             GemHihatOpen -> if previousState.hihatOpen then EDHit t else EDHitPendingHihat True
             GemHihatClosed -> if previousState.hihatOpen then EDHitPendingHihat False else EDHit t
             _ -> EDHit t
           in Just (note, newStatus)
         Just EDMissed -> Nothing -- probably shouldn't happen?
-        Just (EDHit _) -> case tdn_extra note of
+        Just (EDHit _) -> case note.extra of
           Flam    -> Just (note, EDTwoHits t)
           NotFlam -> Nothing
-        Just (EDHitPendingHihat b) -> case tdn_extra note of
+        Just (EDHitPendingHihat b) -> case note.extra of
           Flam    -> Just (note, EDTwoHitsPendingHihat b)
           NotFlam -> Nothing
         Just (EDTwoHits _) -> Nothing
@@ -824,9 +827,9 @@ applyEliteDrumEvent tNew mpadNew halfWindow dps = let
     in (t, (maybeInput, newState)) : evts
   in case span ((> tNew) . fst) dps.events of
     (eventsToRewind, rest) -> let
-      eventsToRewind' = flip map eventsToRewind $ \(t, (hit, _)) -> (t, hit)
+      eventsToRewind' = eventsToRewind <&> \(t, (hit, _)) -> (t, hit)
       newEvents = foldr applyNoRewind rest $ eventsToRewind' ++ [(tNew, mpadNew)]
-      in dps { events = newEvents }
+      in dps & #events .~ newEvents
 
 ----------------------------------------------------
 
@@ -838,7 +841,7 @@ data GuitarGameState t = GuitarGameState
   , inputs      :: [(t, GuitarInput)]
   , overstrums  :: [t]
   , noteResults :: [(t, GuitarResult t)] -- times are of notes
-  } deriving (Eq, Show)
+  } deriving (Eq, Show, Generic)
 
 newtype FretSet = FretSet Int
   deriving (Eq, Bits)
@@ -878,7 +881,7 @@ data GuitarPlayState t = GuitarPlayState
   { events    :: [(t, (Maybe GuitarInput, GuitarGameState t))]
   , track     :: Map.Map t (CommonState (GuitarState t (Maybe Five.Color)))
   , noteTimes :: Set.Set t
-  } deriving (Show)
+  } deriving (Show, Generic)
 
 data GuitarInput
   = GuitarFret Five.Color Bool
@@ -924,7 +927,7 @@ applyGuitarEvent tNew minputNew halfWindow gps = let
       ct <- case (Set.lookupLE t gps.noteTimes, Set.lookupGE t gps.noteTimes) of
         (x, Nothing)     -> x
         (Nothing, y)     -> y
-        (Just x, Just y) -> Just $ if t - x < y - t then x else y
+        (Just x, Just y) -> Just if t - x < y - t then x else y
       guard $ abs (ct - t) < halfWindow
       return ct
     originalResults = case evts of
@@ -965,11 +968,11 @@ applyGuitarEvent tNew minputNew halfWindow gps = let
     newResult = case targetNote of
       Nothing     -> currentResult
       Just common -> let
-        newHeldFretsMinusExtSustains = (.&.) newHeldFrets $ complement $ makeFretSet $ do
+        newHeldFretsMinusExtSustains = (.&.) newHeldFrets $ complement $ makeFretSet do
           (Just fret, pnf) <- Map.toList common.inner.notes
           guard $ isNothing (getNow pnf) && isJust (getFuture pnf)
           return fret
-        targetFrets = makeFretSet $ do
+        targetFrets = makeFretSet do
           (Just fret, pnf) <- Map.toList common.inner.notes
           guard $ isJust $ getNow pnf
           return fret
@@ -1011,7 +1014,7 @@ applyGuitarEvent tNew minputNew halfWindow gps = let
       _                        -> False
 
     newSustains = if newHit
-      then Map.fromList $ do
+      then Map.fromList do
         -- both of these should succeed
         common <- toList targetNote
         time <- toList mClosestTime
@@ -1059,6 +1062,6 @@ applyGuitarEvent tNew minputNew halfWindow gps = let
 
   in case span ((> tNew) . fst) gps.events of
     (eventsToRewind, rest) -> let
-      eventsToRewind' = flip map eventsToRewind $ \(t, (input, _)) -> (t, input)
+      eventsToRewind' = eventsToRewind <&> \(t, (input, _)) -> (t, input)
       newEvents = foldr applyNoRewind rest $ eventsToRewind' ++ [(tNew, minputNew)]
-      in gps { events = newEvents }
+      in gps & #events .~ newEvents

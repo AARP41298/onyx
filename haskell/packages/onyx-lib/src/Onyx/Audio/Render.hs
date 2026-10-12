@@ -1,9 +1,10 @@
+{-# LANGUAGE BlockArguments            #-}
+{-# LANGUAGE DuplicateRecordFields     #-}
 {-# LANGUAGE LambdaCase                #-}
 {-# LANGUAGE NamedFieldPuns            #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE OverloadedRecordDot       #-}
 {-# LANGUAGE OverloadedStrings         #-}
-{-# LANGUAGE RecordWildCards           #-}
 {-# LANGUAGE TupleSections             #-}
 module Onyx.Audio.Render
 ( checkDefined
@@ -38,7 +39,7 @@ import           Development.Shake.FilePath
 import           Onyx.Audio
 import           Onyx.Audio.Search
 import qualified Onyx.MIDI.Track.Drums        as Drums
-import           Onyx.MIDI.Track.File         (PartName)
+import           Onyx.MIDI.Track.File         (PartName, SampleTrigger (..))
 import           Onyx.Project
 import           Onyx.StackTrace              (SendMessage, StackTraceT,
                                                Staction, fatal, inside, lg,
@@ -70,7 +71,7 @@ checkDefined :: (Monad m) => SongYaml f -> StackTraceT m ()
 checkDefined songYaml = do
   -- TODO this doesn't actually check that the keys are in the right place (audio vs jammit vs mogg-plans)
   let definedLeaves = HM.keys songYaml.audio ++ HM.keys songYaml.jammit ++ HM.keys songYaml.plans
-  forM_ (HM.toList songYaml.plans) $ \(planName, plan) -> do
+  forM_ (HM.toList songYaml.plans) \(planName, plan) -> do
     let leaves = case plan of
           MoggPlan _ -> []
           StandardPlan x -> let
@@ -116,13 +117,13 @@ manualLeaf
   => FilePath
   -> AudioLibrary
   -> (T.Text -> StackTraceT m FilePath) -- build audio object by name, return path to file
-  -> StackTraceT m [(T.Text, [(Double, T.Text, T.Text)])] -- get sample triggers list
+  -> StackTraceT m [(T.Text, [(Double, SampleTrigger (Maybe Double))])] -- get sample triggers list
   -> SongYaml FilePath
   -> AudioInput
   -> StackTraceT m (Audio Duration FilePath)
 manualLeaf rel alib buildDependency getSamples songYaml (Named name) = case HM.lookup name songYaml.audio of
   Just audioQuery -> case audioQuery of
-    AudioFile ainfo -> inside ("Looking for the audio file named " ++ show name) $ do
+    AudioFile ainfo -> inside ("Looking for the audio file named " ++ show name) do
       aud <- searchInfo rel alib buildDependency ainfo
       -- lg $ "Found audio file " ++ show name ++ " at: " ++ show (toList aud)
       return aud
@@ -132,14 +133,26 @@ manualLeaf rel alib buildDependency getSamples songYaml (Named name) = case HM.l
       let polyphony = case info.groupPolyphony of
             Nothing -> Nothing
             Just p  -> Just (p, realToFrac info.groupCrossfade)
-          uniqueSamples = nubOrd [ sample | (_, _, sample) <- triggers ]
+          uniqueSamples = nubOrd [ trigger.audio | (_, trigger) <- triggers ]
       -- only locate each sample once
-      sampleToAudio <- fmap HM.fromList $ forM uniqueSamples $ \sample -> do
+      sampleToAudio <- fmap HM.fromList $ forM uniqueSamples \sample -> do
         audio <- manualLeaf rel alib buildDependency getSamples songYaml $ Named sample
         return (sample, audio)
-      return $ Samples polyphony $ flip mapMaybe triggers $ \(secs, group, sample) -> do
-        audio <- HM.lookup sample sampleToAudio
-        return (Seconds secs, (group, audio))
+      return $ Samples polyphony $ flip mapMaybe triggers \(secs, trigger) -> do
+        audio <- HM.lookup trigger.audio sampleToAudio
+        let tweak = tweakPanVol . tweakTranspose . tweakDuration
+            tweakPanVol = case (trigger.pan, trigger.volume) of
+              -- note, this leaves center mono sources as mono. will stereofy later
+              (0  , 0    ) -> id
+              (0  , volDB) -> Gain $ 10 ** (volDB / 20)
+              (pan, volDB) -> PansVols [realToFrac pan] [realToFrac volDB]
+            tweakTranspose = case trigger.transpose of
+              0 -> id
+              _ -> StretchSimple $ 1 / (2 ** (trigger.transpose / 12))
+            tweakDuration = case trigger.link of
+              Just duration -> Take Start $ Seconds duration
+              Nothing       -> id
+        return (Seconds secs, (trigger.group, tweak audio))
   Nothing -> fatal $ "Couldn't find an audio source named " ++ show name
 manualLeaf rel _alib _buildDependency _getSamples songYaml (JammitSelect audpart name) = case HM.lookup name songYaml.jammit of
   Just _  -> return $ Input $ rel </> jammitPath "gen" name audpart
@@ -185,7 +198,7 @@ fitToSpec pvIn pvOut src = let
   vols = map snd pvIn
   in case pvOut of
     [(pan, 0)] -> if [pan] == pans
-      then return $ case fromMaybe 0 $ listToMaybe vols of
+      then return case fromMaybe 0 $ listToMaybe vols of
         0   -> src
         vol -> gain (10 ** (realToFrac vol / 20)) src -- just apply vol to single channel and we're done
       else fatal $ "Mono output (" ++ show pvOut ++ ") does not match input pans: " ++ show pans
@@ -202,7 +215,7 @@ channelsToSpec
   -> [(Double, Double)]
   -> [Int]
   -> Staction (AudioSource m Float)
-channelsToSpec pvOut pathChannel pvIn chans = inside "conforming MOGG channels to output spec" $ do
+channelsToSpec pvOut pathChannel pvIn chans = inside "conforming MOGG channels to output spec" do
   let partPVIn = map (pvIn !!) chans
   src <- case NE.nonEmpty chans of
     Nothing -> do
@@ -221,7 +234,7 @@ loadSamplesFromBuildDir
   :: (MonadIO m)
   => (FilePath -> StackTraceT m FilePath)
   -> T.Text -- plan
-  -> StackTraceT m [(T.Text, [(Double, T.Text, T.Text)])]
+  -> StackTraceT m [(T.Text, [(Double, SampleTrigger (Maybe Double))])]
 loadSamplesFromBuildDir builder planName = do
   txt <- builder $ "gen/plan" </> T.unpack planName </> "samples.txt"
   fmap read $ stackIO $ readFile txt
@@ -229,8 +242,8 @@ loadSamplesFromBuildDir builder planName = do
 loadSamplesFromBuildDirShake
   :: FilePath
   -> T.Text -- plan
-  -> Staction [(T.Text, [(Double, T.Text, T.Text)])]
-loadSamplesFromBuildDirShake rel = loadSamplesFromBuildDir $ \f -> do
+  -> Staction [(T.Text, [(Double, SampleTrigger (Maybe Double))])]
+loadSamplesFromBuildDirShake rel = loadSamplesFromBuildDir \f -> do
   opts <- lift $ lift getShakeOptions
   let isSlash c = c == '/' || c == '\\'
       realPath = rel </> case break isSlash f of
@@ -249,7 +262,7 @@ buildAudioToSpec
   -> T.Text -- plan
   -> Maybe (Audio Duration AudioInput)
   -> Staction (AudioSource m Float)
-buildAudioToSpec rel alib buildDependency songYaml pvOut planName maud = inside "conforming audio file to output spec" $ do
+buildAudioToSpec rel alib buildDependency songYaml pvOut planName maud = inside "conforming audio file to output spec" do
   (expr, pans, vols) <- completeAudio songYaml
     $ fromMaybe (Silence 1 $ Frames 0) maud
   let loadSamples = loadSamplesFromBuildDirShake rel planName
@@ -283,7 +296,7 @@ computeDrumsPart
   -> Plan f
   -> SongYaml f
   -> StackTraceT m (([(Double, Double)], [(Double, Double)], [(Double, Double)]), Drums.Audio, Bool)
-computeDrumsPart fpart plan songYaml = inside "Computing drums audio mix" $ case plan of
+computeDrumsPart fpart plan songYaml = inside "Computing drums audio mix" case plan of
   MoggPlan x -> case HM.lookup fpart x.parts.getParts of
     Nothing -> return stereo
     Just (PartSingle _) -> return stereo
@@ -306,7 +319,7 @@ computeDrumsPart fpart plan songYaml = inside "Computing drums audio mix" $ case
       maybeMix <- lookupSplit
         ( maybe 0 (computeChannelsPlan songYaml) kick
         , maybe 0 (computeChannelsPlan songYaml) snare
-        , computeChannelsPlan songYaml $ case toms of
+        , computeChannelsPlan songYaml case toms of
           Nothing -> kit
           Just t  -> Mix $ kit NE.:| [t]
         )

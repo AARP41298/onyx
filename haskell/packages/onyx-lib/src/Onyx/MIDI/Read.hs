@@ -1,8 +1,11 @@
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes        #-}
-{-# LANGUAGE TupleSections     #-}
-{-# LANGUAGE ViewPatterns      #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE TupleSections       #-}
+{-# LANGUAGE ViewPatterns        #-}
 module Onyx.MIDI.Read where
 
 import           Control.Monad                    (forM, guard, void)
@@ -13,6 +16,7 @@ import           Control.Monad.Trans.State.Strict (State, StateT, execState,
 import qualified Data.EventList.Absolute.TimeBody as ATB
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Foldable                    (toList)
+import           Data.Functor                     ((<&>))
 import           Data.Functor.Identity            (Identity (..))
 import           Data.List.Extra                  (nubOrd)
 import qualified Data.Map                         as Map
@@ -44,19 +48,19 @@ data MIDITrack f = MIDITrack
 
 mapMIDITrack :: (forall a. f a -> g a) -> MIDITrack f -> MIDITrack g
 mapMIDITrack f mt = mt
-  { midiNotes       = fmap f $ midiNotes       mt
-  , midiCommands    = f      $ midiCommands    mt
-  , midiLyrics      = f      $ midiLyrics      mt
-  , midiComments    = f      $ midiComments    mt
-  , midiPhaseShift  = f      $ midiPhaseShift  mt
-  , midiPowerGig    = f      $ midiPowerGig    mt
-  , midiUnknown     = f      $ midiUnknown     mt
-  , midiControllers = fmap f $ midiControllers mt
+  { midiNotes       = fmap f mt.midiNotes
+  , midiCommands    = f      mt.midiCommands
+  , midiLyrics      = f      mt.midiLyrics
+  , midiComments    = f      mt.midiComments
+  , midiPhaseShift  = f      mt.midiPhaseShift
+  , midiPowerGig    = f      mt.midiPowerGig
+  , midiUnknown     = f      mt.midiUnknown
+  , midiControllers = fmap f mt.midiControllers
   }
 
 -- Note, this does not yet process different channel notes separately
 fixZeroLengthNotes :: (NNC.C t) => t -> MIDITrack (RTB.T t) -> MIDITrack (RTB.T t)
-fixZeroLengthNotes oneTick mt = mt { midiNotes = fmap fixRow $ midiNotes mt } where
+fixZeroLengthNotes oneTick mt = mt { midiNotes = fmap fixRow mt.midiNotes } where
   fixRow = go False . RTB.normalize
   go False (Wait t1 x@EdgeOff{} (Wait t2 y@EdgeOn{} rest)) | t2 == mempty
     = case rest of
@@ -81,35 +85,35 @@ getMIDITrack = let
           noteEdge = case mv of
             Nothing -> EdgeOff                 $ C.toChannel c
             Just v  -> EdgeOn (V.toVelocity v) $ C.toChannel c
-          in Map.alter f (V.toPitch p) $ midiNotes cur
+          in Map.alter f (V.toPitch p) cur.midiNotes
         }
       -- note, we do PS before commands so our PS command parser goes first
       (parsePS -> Just msgs) -> cur
-        { midiPhaseShift = foldr (At t) (midiPhaseShift cur) msgs
+        { midiPhaseShift = foldr (At t) cur.midiPhaseShift msgs
         }
       (readCommandList -> Just cmd) -> cur
-        { midiCommands = At t cmd $ midiCommands cur
+        { midiCommands = At t cmd cur.midiCommands
         }
       E.MetaEvent (Meta.TextEvent (T.uncons -> Just ('#', cmt))) -> cur
-        { midiComments = At t cmt $ midiComments cur
+        { midiComments = At t cmt cur.midiComments
         }
       E.MetaEvent (Meta.Lyric lyric) -> cur
-        { midiLyrics = At t lyric $ midiLyrics cur
+        { midiLyrics = At t lyric cur.midiLyrics
         }
       E.MetaEvent (Meta.TextEvent lyric)
         | lyric == "\\n" || lyric == "\\r" -> cur
-          { midiPowerGig = At t lyric $ midiPowerGig cur
+          { midiPowerGig = At t lyric cur.midiPowerGig
           }
         | otherwise -> cur
-          { midiLyrics = At t lyric $ midiLyrics cur
+          { midiLyrics = At t lyric cur.midiLyrics
           }
       E.MIDIEvent (C.Cons chan (C.Voice (V.Control cont v))) -> cur
         { midiControllers = let
           f = Just . At t (chan, v) . fromMaybe ANil
-          in Map.alter f cont $ midiControllers cur
+          in Map.alter f cont cur.midiControllers
         }
       _ -> cur
-        { midiUnknown = At t x $ midiUnknown cur
+        { midiUnknown = At t x cur.midiUnknown
         }
     in go new rest
   empty = MIDITrack
@@ -125,19 +129,19 @@ getMIDITrack = let
   in go empty . reverse . ATB.toPairList
 
 putMIDITrack :: (Functor f) => (f (E.T T.Text) -> f (E.T T.Text) -> f (E.T T.Text)) -> MIDITrack f -> f (E.T T.Text)
-putMIDITrack merge mt = foldr merge (midiUnknown mt) $ let
-  notes = flip map (Map.toList $ midiNotes mt) $ \(p, lane) -> let
+putMIDITrack merge mt = foldr merge mt.midiUnknown let
+  notes = Map.toList mt.midiNotes <&> \(p, lane) -> let
     f (EdgeOff  c) = makeEdgeCPV (C.fromChannel c) (V.fromPitch p) Nothing
     f (EdgeOn v c) = makeEdgeCPV (C.fromChannel c) (V.fromPitch p) (Just $ V.fromVelocity v)
     in f <$> lane
-  controllers = flip fmap (Map.toList $ midiControllers mt) $ \(cont, lane) -> let
+  controllers = Map.toList mt.midiControllers <&> \(cont, lane) -> let
     f (chan, v) = E.MIDIEvent (C.Cons chan (C.Voice (V.Control cont v)))
     in f <$> lane
   in notes ++ controllers ++
-    [ showCommand' <$> midiCommands mt
-    , (\cmt -> E.MetaEvent $ Meta.TextEvent $ T.cons '#' cmt) <$> midiComments mt
-    , (\t -> E.MetaEvent $ Meta.TextEvent t) <$> midiPowerGig mt
-    , unparsePSSysEx <$> midiPhaseShift mt
+    [ showCommand' <$> mt.midiCommands
+    , (\cmt -> E.MetaEvent $ Meta.TextEvent $ T.cons '#' cmt) <$> mt.midiComments
+    , (\t -> E.MetaEvent $ Meta.TextEvent t) <$> mt.midiPowerGig
+    , unparsePSSysEx <$> mt.midiPhaseShift
     ]
 
 -- like the json/dta one but uses StateT so it can modify the source as it goes
@@ -148,7 +152,7 @@ type TrackCodec m t a = Codec (TrackParser m t) (TrackBuilder t) a
 type TrackEvent m t a = TrackCodec m t (RTB.T t a)
 
 makeTrackBuilder :: (NNC.C t) => (c -> RTB.T t (E.T T.Text)) -> (c -> TrackBuilder t c)
-makeTrackBuilder f = fmapArg $ \xs -> modify' $ \ys -> let
+makeTrackBuilder f = fmapArg \xs -> modify' \ys -> let
   ys' = RTB.merge ys $ f xs
   in seq (forceTrackSpine ys') ys'
 
@@ -162,7 +166,7 @@ forceTrackSpine rtb = case RTB.viewL rtb of
   Just ((dt, x), rtb') -> seq dt $ seq x $ forceTrackSpine rtb'
 
 slurpTrack :: (Monad m) => (trk -> (RTB.T t b, trk)) -> StackTraceT (StateT trk m) (RTB.T t b)
-slurpTrack f = lift $ do
+slurpTrack f = lift do
   (slurp, leave) <- f <$> get
   -- TODO do we need to re-add a force for `leave`
   seq (forceTrackSpine slurp) $ return ()
@@ -190,13 +194,13 @@ slurpTrack f = lift $ do
 
 blipCV :: (Monad m) => Int -> TrackEvent m U.Beats (Int, Int)
 blipCV p = Codec
-  { codecIn = slurpTrack $ \mt -> case Map.lookup (V.toPitch p) (midiNotes mt) of
+  { codecIn = slurpTrack \mt -> case Map.lookup (V.toPitch p) mt.midiNotes of
     Nothing        -> (RTB.empty, mt)
     Just noteEdges -> let
-      cvs = flip RTB.mapMaybe noteEdges $ \case
+      cvs = flip RTB.mapMaybe noteEdges \case
         EdgeOn v c -> Just (C.fromChannel c, V.fromVelocity v)
         _          -> Nothing
-      mt' = mt { midiNotes = Map.delete (V.toPitch p) $ midiNotes mt }
+      mt' = mt { midiNotes = Map.delete (V.toPitch p) mt.midiNotes }
       in (cvs, mt')
   , codecOut = makeTrackBuilder $ U.trackJoin . fmap (\(c, v) -> unparseBlipCPV (c, p, v))
   }
@@ -205,18 +209,18 @@ blipCV p = Codec
 -- In Rock Band, these can always have their length set to 1\/32 of a beat,
 -- which is the smallest allowed distance between events.
 blip :: (Monad m) => Int -> TrackEvent m U.Beats ()
-blip = dimap (fmap $ \() -> (0, 96)) void . blipCV
+blip = dimap (fmap \() -> (0, 96)) void . blipCV
 
 edge :: (Monad m) => Int -> Bool -> TrackEvent m U.Beats ()
 edge p b = Codec
-  { codecIn = slurpTrack $ \mt -> case Map.lookup (V.toPitch p) (midiNotes mt) of
+  { codecIn = slurpTrack \mt -> case Map.lookup (V.toPitch p) mt.midiNotes of
     Nothing -> (RTB.empty, mt)
     Just noteEdges -> let
-      (matches, rest) = flip RTB.partitionMaybe noteEdges $ \case
+      (matches, rest) = flip RTB.partitionMaybe noteEdges \case
         EdgeOn _ _ | b     -> Just ()
         EdgeOff  _ | not b -> Just ()
         _                  -> Nothing
-      mt' = mt { midiNotes = Map.insert (V.toPitch p) rest $ midiNotes mt }
+      mt' = mt { midiNotes = Map.insert (V.toPitch p) rest mt.midiNotes }
       in (matches, mt')
   , codecOut = makeTrackBuilder $ fmap (\() -> makeEdge p b)
   }
@@ -251,12 +255,12 @@ removeEdgeGroup (p : ps) b evts = let
 
 edgesBRE :: (Monad m, NNC.C t) => [Int] -> TrackEvent m t Bool
 edgesBRE ps = Codec
-  { codecIn = slurpTrack $ \mt -> let
+  { codecIn = slurpTrack \mt -> let
     ourPitches
       = foldr RTB.merge RTB.empty
       $ map (\(p, xs) -> fmap (p,) xs)
       $ filter (\(p, _) -> elem (V.fromPitch p) ps)
-      $ Map.toList $ midiNotes mt
+      $ Map.toList mt.midiNotes
     f evts = let
       (hasOn, evts') = case removeEdgeGroup ps True evts of
         Nothing  -> (False, evts)
@@ -271,8 +275,8 @@ edgesBRE ps = Codec
     getLeavePitch p = fmap snd $ RTB.filter (\(p', _) -> p == p') leave'
     mt' = mt
       { midiNotes = Map.union
-        (Map.fromList $ flip map ps $ (\p -> (p, getLeavePitch p)) . V.toPitch)
-        (midiNotes mt)
+        (Map.fromList $ ps <&> (\p -> (p, getLeavePitch p)) . V.toPitch)
+        mt.midiNotes
       }
     in if RTB.null slurp' then (RTB.empty, mt) else (slurp', mt')
   , codecOut = makeTrackBuilder $ RTB.flatten . fmap (\b -> [makeEdge p b | p <- ps])
@@ -280,27 +284,27 @@ edgesBRE ps = Codec
 
 edgesCV :: (Monad m, NNC.C t) => Int -> TrackEvent m t (Int, Maybe Int)
 edgesCV p = Codec
-  { codecIn = slurpTrack $ \mt -> case Map.lookup (V.toPitch p) (midiNotes mt) of
+  { codecIn = slurpTrack \mt -> case Map.lookup (V.toPitch p) mt.midiNotes of
     Nothing -> (RTB.empty, mt)
     Just noteEdges -> let
-      cvs = flip fmap noteEdges $ \case
+      cvs = noteEdges <&> \case
         EdgeOn v c -> (C.fromChannel c, Just $ V.fromVelocity v)
         EdgeOff c  -> (C.fromChannel c, Nothing)
-      mt' = mt { midiNotes = Map.delete (V.toPitch p) $ midiNotes mt }
+      mt' = mt { midiNotes = Map.delete (V.toPitch p) mt.midiNotes }
       in (cvs, mt')
   , codecOut = makeTrackBuilder $ fmap (\(c, mv) -> makeEdgeCPV c p mv)
   }
 
 command :: (Monad m, NNC.C t, Command a) => TrackEvent m t a
 command = Codec
-  { codecIn = slurpTrack $ \mt -> case RTB.partitionMaybe toCommand (midiCommands mt) of
+  { codecIn = slurpTrack \mt -> case RTB.partitionMaybe toCommand mt.midiCommands of
     (matches, rest) -> (matches, mt { midiCommands = rest })
   , codecOut = makeTrackBuilder $ fmap showCommand'
   }
 
 commandMatch' :: (Monad m, NNC.C t) => ([T.Text] -> Maybe a) -> (a -> [T.Text]) -> TrackEvent m t a
 commandMatch' fp fs = Codec
-  { codecIn = slurpTrack $ \mt -> case RTB.partitionMaybe fp (midiCommands mt) of
+  { codecIn = slurpTrack \mt -> case RTB.partitionMaybe fp mt.midiCommands of
     (matches, rest) -> (matches, mt { midiCommands = rest })
   , codecOut = makeTrackBuilder $ fmap $ showCommand' . fs
   }
@@ -310,15 +314,15 @@ commandMatch c = commandMatch'
   (\c' -> guard (c == c') >> Just ())
   (const c)
 
-lyrics :: (Monad m, NNC.C t) => TrackEvent m t T.Text
-lyrics = Codec
-  { codecIn = slurpTrack $ \mt -> (midiLyrics mt, mt { midiLyrics = RTB.empty })
+lyricEvents :: (Monad m, NNC.C t) => TrackEvent m t T.Text
+lyricEvents = Codec
+  { codecIn = slurpTrack \mt -> (mt.midiLyrics, mt { midiLyrics = RTB.empty })
   , codecOut = makeTrackBuilder $ fmap $ E.MetaEvent . Meta.Lyric
   }
 
 powerGigText :: (Monad m, NNC.C t) => T.Text -> TrackEvent m t ()
 powerGigText t = Codec
-  { codecIn = slurpTrack $ \mt -> case RTB.partitionMaybe (\x -> guard (x == t) >> Just ()) (midiPowerGig mt) of
+  { codecIn = slurpTrack \mt -> case RTB.partitionMaybe (\x -> guard (x == t) >> Just ()) mt.midiPowerGig of
     (matches, rest) -> (matches, mt { midiPowerGig = rest })
   , codecOut = makeTrackBuilder $ fmap $ E.MetaEvent . Meta.TextEvent . const t
   }
@@ -342,9 +346,9 @@ matchEdgesCV = dimap
 -- start simultaneous with the earlier note.
 chordSnap :: (Monad m) => [Int] -> CodecFor (TrackParser m U.Beats) (TrackBuilder U.Beats) a ()
 chordSnap pitches = Codec
-  { codecIn = lift $ modify' $ \mt -> let
+  { codecIn = lift $ modify' \mt -> let
     pitches' = map V.toPitch pitches
-    (target, other) = Map.partitionWithKey (\p _ -> elem p pitches') $ midiNotes mt
+    (target, other) = Map.partitionWithKey (\p _ -> elem p pitches') mt.midiNotes
 
     -- note, this is 1 more tick than the max distance we will snap
     maxSnapAnchorLength :: U.Beats
@@ -441,10 +445,10 @@ eachKey
   -> (k -> TrackCodec m t a)
   -> TrackCodec m t (Map.Map k a)
 eachKey keys f = Codec
-  { codecIn = fmap Map.fromList $ forM keys $ \k -> do
+  { codecIn = fmap Map.fromList $ forM keys \k -> do
     trk <- codecIn $ f k
     return (k, trk)
-  , codecOut = makeTrackBuilder $ \m -> foldr RTB.merge RTB.empty $ do
+  , codecOut = makeTrackBuilder \m -> foldr RTB.merge RTB.empty do
     k <- keys
     trk <- toList $ Map.lookup k m
     return $ runTrackBuilder (codecOut $ f k) trk
@@ -452,15 +456,15 @@ eachKey keys f = Codec
 
 translateEdges :: (Functor m) => TrackCodec m t (RTB.T t (k, Bool)) -> TrackCodec m t (RTB.T t (Edge () k))
 translateEdges = dimap
-  (fmap $ \case EdgeOn () k -> (k, True); EdgeOff k -> (k, False))
-  (fmap $ \(k, b) -> (if b then EdgeOn () else EdgeOff) k)
+  (fmap \case EdgeOn () k -> (k, True); EdgeOff k -> (k, False))
+  (fmap \(k, b) -> (if b then EdgeOn () else EdgeOff) k)
 
 condenseMap
   :: (Monad m, NNC.C t, Ord k, Ord a)
   => TrackCodec m t (Map.Map k (RTB.T t a))
   -> TrackCodec m t (RTB.T t (k, a))
 condenseMap = let
-  fs trk = Map.fromList $ do
+  fs trk = Map.fromList do
     k <- nubOrd $ map fst $ toList trk
     return (k, RTB.mapMaybe (\(k', v) -> guard (k == k') >> Just v) trk)
   fp m = foldr RTB.merge RTB.empty [fmap (k,) trk | (k, trk) <- Map.toList m]
@@ -477,13 +481,13 @@ blipSustainRB
   => TrackCodec m U.Beats (RTB.T U.Beats (a, U.Beats))
   -> TrackCodec m U.Beats (RTB.T U.Beats (a, Maybe U.Beats))
 blipSustainRB = let
-  fs = fmap $ \(a, mt) -> (a, fromMaybe (1/480) mt)
-  fp = fmap $ \(a, t) -> (a, guard (t > (1/3)) >> Just t)
+  fs = fmap \(a, mt) -> (a, fromMaybe (1/480) mt)
+  fp = fmap \(a, t) -> (a, guard (t > (1/3)) >> Just t)
   in dimap fs fp
 
 sysexPS :: (Monad m, NNC.C t) => Difficulty -> PS.PhraseID -> TrackEvent m t Bool
 sysexPS diff pid = Codec
-  { codecIn = slurpTrack $ \mt -> let
+  { codecIn = slurpTrack \mt -> let
     otherDiffs = filter (/= diff) each
     matcher (PS.PSMessage (Just diff') pid' b) = do
       guard $ (diff, pid) == (diff', pid')
@@ -491,9 +495,9 @@ sysexPS diff pid = Codec
     matcher (PS.PSMessage Nothing pid' b) = do
       guard $ pid == pid'
       Just (b, otherDiffs)
-    in case RTB.partitionMaybe matcher (midiPhaseShift mt) of
+    in case RTB.partitionMaybe matcher mt.midiPhaseShift of
       (matches, rest) -> let
-        leftover = RTB.flatten $ flip fmap matches $ \(b, diffs) ->
+        leftover = RTB.flatten $ matches <&> \(b, diffs) ->
           map (\diff' -> PS.PSMessage (Just diff') pid b) diffs
         in (fmap fst matches, mt { midiPhaseShift = RTB.merge leftover rest })
   , codecOut = makeTrackBuilder $ fmap $ PS.unparsePSSysEx . PS.PSMessage (Just diff) pid
@@ -575,24 +579,24 @@ channelBlip_
 channelBlip_ = dimap (fmap (, 100)) (fmap fst) . channelBlip
 
 -- (channel, value)
-controller :: (Monad m, NNC.C t) => Int -> TrackEvent m t (Int, Int)
+controller :: (Monad m, NNC.C t) => Int -> TrackEvent m t (C.Channel, Int)
 controller cont = Codec
-  { codecIn = slurpTrack $ \mt -> case Map.lookup (V.toController cont) (midiControllers mt) of
+  { codecIn = slurpTrack \mt -> case Map.lookup (V.toController cont) mt.midiControllers of
     Nothing -> (RTB.empty, mt)
     Just events -> let
-      cvs = flip fmap events $ \(chan, v) -> (C.fromChannel chan, v)
-      mt' = mt { midiControllers = Map.delete (V.toController cont) $ midiControllers mt }
+      cvs = events <&> \(chan, v) -> (chan, v)
+      mt' = mt { midiControllers = Map.delete (V.toController cont) mt.midiControllers }
       in (cvs, mt')
   , codecOut = makeTrackBuilder $ fmap
-    (\(chan, v) -> E.MIDIEvent (C.Cons (C.toChannel chan) (C.Voice (V.Control (V.toController cont) v))))
+    (\(chan, v) -> E.MIDIEvent (C.Cons chan (C.Voice (V.Control (V.toController cont) v))))
   }
 
 -- Only value
 controller_ :: (Monad m, NNC.C t) => Int -> TrackEvent m t Int
 controller_ = let
-  fs v      = (0, v)
+  fs v      = (C.toChannel 0, v)
   fp (_, v) = v
   in dimap (fmap fs) (fmap fp) . controller
 
 controllerBool :: (Monad m, NNC.C t) => Int -> TrackEvent m t Bool
-controllerBool = dimap (fmap $ \b -> if b then 127 else 0) (fmap (/= 0)) . controller_
+controllerBool = dimap (fmap \b -> if b then 127 else 0) (fmap (/= 0)) . controller_

@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments    #-}
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Onyx.Harmonix.RockBand.Milo.Compression where
@@ -24,7 +25,7 @@ data MiloCompression
 
 -- decompresses zlib stream, but ignores "input ended prematurely" error
 zlibTruncate :: BL.ByteString -> BL.ByteString
-zlibTruncate bs = runST $ let
+zlibTruncate bs = runST let
   go input = \case
     Z.DecompressInputRequired f              -> case input of
       []     -> f B.empty >>= go []
@@ -43,7 +44,9 @@ decompressBlock comp bs = case comp of
   MILO_A -> bs
   MILO_B -> zlibTruncate $ zlib_info <> bs
   MILO_C -> GZ.decompress bs
-  MILO_D -> zlibTruncate $ zlib_info <> BL.drop 4 (BL.take (BL.length bs - 1) bs)
+  -- first 4 bytes are the uncompressed length (little endian), then raw deflate
+  -- (ChunkStream::DecompressChunk / DecompressMemHelper in RB3)
+  MILO_D -> zlibTruncate $ zlib_info <> BL.drop 4 bs
   where zlib_info = BL.pack [0x78, 0x9C]
 
 decompressMilo :: Get BL.ByteString
@@ -59,7 +62,7 @@ decompressMilo = do
   blockCount <- getWord32le
   _largestBlock <- getWord32le -- max uncompressed size
   let maxSize = 1 `shiftL` 24
-  blockInfo <- replicateM (fromIntegral blockCount) $ do
+  blockInfo <- replicateM (fromIntegral blockCount) do
     size <- getWord32le
     let (compressed, size') = case comp of
           MILO_A -> (False, size)
@@ -71,9 +74,9 @@ decompressMilo = do
     return (size', compressed)
   posn <- bytesRead
   skip $ fromIntegral offset - fromIntegral (posn - startingOffset)
-  fmap BL.concat $ forM blockInfo $ \(size, compressed) -> do
+  fmap BL.concat $ forM blockInfo \(size, compressed) -> do
     bs <- getLazyByteString $ fromIntegral size
-    return $ if compressed then decompressBlock comp bs else bs
+    return if compressed then decompressBlock comp bs else bs
 
 magicBarrier :: [Word8]
 magicBarrier = [0xAD, 0xDE, 0xAD, 0xDE]
@@ -86,7 +89,7 @@ addMiloHeader bs = let
       []           -> []
       [c]          -> [c]
       c1 : c2 : cs -> (c1 ++ c2) : cs
-  header = runPut $ do
+  header = runPut do
     putWord32le 0xCABEDEAF
     putWord32le headerSize
     putWord32le $ fromIntegral $ length chunks

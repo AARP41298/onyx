@@ -1,7 +1,7 @@
 {-# LANGUAGE BangPatterns          #-}
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE CPP                   #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE NoFieldSelectors      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
@@ -18,8 +18,8 @@ import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy  as BL
 import           Data.Foldable         (find, toList)
+import           Data.Functor          ((<&>))
 import qualified Data.HashMap.Strict   as HM
-import           Data.Int
 import qualified Data.List.NonEmpty    as NE
 import           Data.List.Split       (chunksOf)
 import qualified Data.Map.Strict       as Map
@@ -28,7 +28,7 @@ import qualified Data.Text.Encoding    as TE
 import           Data.Word
 import           Onyx.Neversoft.CRC
 import           Onyx.Nintendo.WAD     (skipToMultiple)
-import           Onyx.Util.Binary      (runGetM)
+import           Onyx.Util.Binary      (runGetM, splitEvery)
 import           Onyx.Util.Handle
 
 #if MIN_VERSION_base(4,18,0)
@@ -77,6 +77,7 @@ data HedFormat
 
 identifyHedFormat :: [HedEntry] -> Maybe HedFormat
 identifyHedFormat entries = let
+  hasRootNamed :: B.ByteString -> HedEntry -> Bool
   hasRootNamed x entry = let
     name = B.dropWhile (\c -> c == 0x5C || c == 0x2F) entry.hedName
     in x `B.isPrefixOf` name
@@ -91,10 +92,10 @@ identifyHedFormat entries = let
 hookUpWAD :: Readable -> Folder B.ByteString (Word32, Word32) -> Folder T.Text Readable
 hookUpWAD wad = bimap TE.decodeLatin1
   -- TODO add label to handle
-  $ \(pos, len) -> subHandle id (fromIntegral pos) (Just $ fromIntegral len) wad
+  \(pos, len) -> subHandle id (fromIntegral pos) (Just $ fromIntegral len) wad
 
 hedFolder :: [HedEntry] -> Folder B.ByteString (Word32, Word32)
-hedFolder entries = fromFiles $ let
+hedFolder entries = fromFiles let
   isSlash c = c == 0x5C || c == 0x2F
   splitName = NE.fromList . B.splitWith isSlash . B.dropWhile isSlash
   in do
@@ -125,7 +126,7 @@ parseHDP bs = do
     bs
   folders <- case folderOffset of
     0 -> return []
-    _ -> flip runGetM (BL.drop (fromIntegral folderOffset) bs) $ whileJustM $ do
+    _ -> flip runGetM (BL.drop (fromIntegral folderOffset) bs) $ whileJustM do
       fileCount <- getWord32le
       case fileCount of
         0xffffffff -> return Nothing
@@ -135,8 +136,8 @@ parseHDP bs = do
           return $ Just [HDPFolder{..}]
   files <- case fileOffset of
     0 -> return Map.empty
-    _ -> flip runGetM (BL.drop (fromIntegral fileOffset) bs) $ do
-      fmap Map.fromList $ replicateM (fromIntegral numEntries) $ do
+    _ -> flip runGetM (BL.drop (fromIntegral fileOffset) bs) do
+      fmap Map.fromList $ replicateM (fromIntegral numEntries) do
         pos         <- bytesRead
         sectorIndex <- getWord32le
         dataLength  <- getWord32le
@@ -148,6 +149,7 @@ parseHDP bs = do
 applyHDP :: HDP -> [HedEntry] -> Folder B.ByteString (Word32, Word32)
 applyHDP hdp entries = let
   folderLookup = HM.fromList [ (folder.checksum, folder) | folder <- hdp.folders ]
+  getFolder :: HDPFolder -> [HDPFile]
   getFolder folder = let
     (_, x, xs) = Map.splitLookup folder.hdpOffset hdp.files
     in take (fromIntegral folder.fileCount) $ toList x <> Map.elems xs
@@ -155,7 +157,7 @@ applyHDP hdp entries = let
   -- paths also start with a slash/backslash so we remove it before split
   isSlash c = c == 0x5C || c == 0x2F
   splitName = NE.fromList . B.splitWith isSlash . B.dropWhile isSlash
-  in fromFiles $ do
+  in fromFiles do
     entry <- entries
     let name       = splitName entry.hedName
         folderName = qbKeyCRC $ B8.intercalate "\\" $ NE.init name
@@ -168,11 +170,6 @@ applyHDP hdp entries = let
 
 -- .IMF + .ISF, main audio files (XA, like VGS but different interleaving)
 -- note: SOUNDS/SFX.WAD also contains XA but looks like some differences
-
-splitEvery :: Int64 -> BL.ByteString -> [BL.ByteString]
-splitEvery n bs = if BL.null bs
-  then []
-  else let (x, y) = BL.splitAt n bs in x : splitEvery n y
 
 detectChannels :: BL.ByteString -> Int
 detectChannels = length . takeWhile ("MSVp" `BL.isPrefixOf`) . splitEvery 0x20000
@@ -190,7 +187,7 @@ splitChannels bs = do
 convertChannelToVGS :: (MonadFail m) => BL.ByteString -> m BL.ByteString
 convertChannelToVGS chan = do
   (len, rate) <- flip runGetM (BL.drop 12 chan) $ liftA2 (,) getWord32be getWord32be
-  return $ runPut $ do
+  return $ runPut do
     putByteString $ B8.pack "VgS!"
     putWord32le 2
     let audio = BL.take (fromIntegral len) $ BL.drop 0x40 chan
@@ -245,9 +242,9 @@ getNeoHeader = do
 splitNeoStreams :: NeoHeader -> BL.ByteString -> [(NeoStream, [BL.ByteString])]
 splitNeoStreams hdr bs = let
   blocks = splitEvery (fromIntegral hdr.totalBlockSize) $ BL.drop 0x10000 bs
-  in flip map hdr.streams $ \stream -> let
+  in hdr.streams <&> \stream -> let
     blockTake = fromIntegral stream.channelBlockSize
-    chans = flip map [0 .. stream.channels - 1] $ \i -> let
+    chans = [0 .. stream.channels - 1] <&> \i -> let
       blockDrop = fromIntegral (stream.firstBlockOffset - 0x10000)
         + fromIntegral i * blockTake
       in BL.concat $ map
@@ -256,17 +253,17 @@ splitNeoStreams hdr bs = let
     in (stream, chans)
 
 neoStreamToVGS :: (NeoStream, [BL.ByteString]) -> BL.ByteString
-neoStreamToVGS (stream, chans) = runPut $ do
+neoStreamToVGS (stream, chans) = runPut do
   putByteString "VgS!"
   putWord32le 2
-  forM_ chans $ \chan -> do
+  forM_ chans \chan -> do
     putWord32le $ fromIntegral stream.frequency
     putWord32le $ fromIntegral $ quot (BL.length chan) 0x10
   putByteString $ B.replicate (0x80 - 8 - 8 * length chans) 0
   let go chansLeft = if any BL.null chansLeft
         then return ()
         else do
-          forM_ (zip [0..] chansLeft) $ \(i, chanLeft) -> do
+          forM_ (zip [0..] chansLeft) \(i, chanLeft) -> do
             putWord8 $ BL.head chanLeft
             putWord8 i
             putLazyByteString $ BL.take 14 $ BL.drop 2 chanLeft
@@ -277,5 +274,5 @@ testSplitNeoIMF :: FilePath -> IO ()
 testSplitNeoIMF f = do
   bs <- BL.readFile f
   hdr <- runGetM getNeoHeader bs
-  forM_ (zip [0..] $ splitNeoStreams hdr bs) $ \(i, pair) -> do
+  forM_ (zip [0..] $ splitNeoStreams hdr bs) \(i, pair) -> do
     BL.writeFile (f <> "." <> show (i :: Int) <> ".vgs") $ neoStreamToVGS pair

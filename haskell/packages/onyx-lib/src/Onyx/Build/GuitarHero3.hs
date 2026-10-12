@@ -1,8 +1,8 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
-{-# OPTIONS_GHC -fno-warn-ambiguous-fields #-}
 module Onyx.Build.GuitarHero3 (gh3Rules, hashGH3) where
 
 import           Control.Monad                     (forM_, guard, when)
@@ -13,10 +13,12 @@ import qualified Data.ByteString.Char8             as B8
 import qualified Data.ByteString.Lazy              as BL
 import           Data.Char                         (toUpper)
 import           Data.Conduit.Audio
+import           Data.Conduit.Audio.LAME           (sinkMP3WithHandle)
 import qualified Data.Conduit.Audio.LAME.Binding   as L
 import qualified Data.EventList.Absolute.TimeBody  as ATB
 import qualified Data.EventList.Relative.TimeBody  as RTB
 import           Data.Foldable                     (toList)
+import           Data.Functor                      ((<&>))
 import           Data.Hashable                     (Hashable, hash)
 import qualified Data.Map                          as Map
 import           Data.Maybe                        (catMaybes, fromMaybe)
@@ -51,7 +53,9 @@ import           Onyx.PlayStation.NPData           (gh3CustomMidEdatConfig,
                                                     npdContentID, packNPData)
 import           Onyx.PlayStation.PKG              (makePKG)
 import           Onyx.Project                      hiding (Difficulty)
-import           Onyx.Reductions                   (completeFiveResult)
+import           Onyx.Reductions                   (FretLimit,
+                                                    completeFiveResult,
+                                                    loadFretLimit)
 import           Onyx.Resources                    (getResourcesPath,
                                                     gh3Thumbnail)
 import           Onyx.Sections                     (makeDisplaySection,
@@ -81,7 +85,7 @@ hashGH3 songYaml gh3 = let
 gh3Rules :: BuildInfo -> FilePath -> TargetGH3 FilePath -> QueueLog Rules ()
 gh3Rules buildInfo dir gh3 = do
 
-  let songYaml = biSongYaml buildInfo
+  let songYaml = buildInfo.biSongYaml
 
   (planName, plan) <- case getPlan gh3.common.plan songYaml of
     Nothing   -> fail $ "Couldn't locate a plan for this target: " ++ show gh3
@@ -92,7 +96,7 @@ gh3Rules buildInfo dir gh3 = do
   -- makeShortName applies max of 27 chars which works with GH3 max of 26.
   -- ("<shortname>_song.pak.xen" must fit in STFS's max of 40 chars)
   let hashed = hashGH3 songYaml gh3
-      dlcID = B8.pack $ T.unpack $ case gh3.songID of
+      dlcID = B8.pack $ T.unpack case gh3.songID of
         Nothing          -> makeShortName hashed songYaml
         Just (Left  n  ) -> makeShortName n      songYaml
         Just (Right str) -> str
@@ -111,11 +115,15 @@ gh3Rules buildInfo dir gh3 = do
       pathRhythm  = dir </> "rhythm.mp3"
       pathSong    = dir </> "song.mp3"
       pathPreview = dir </> "preview.mp3"
-      setup lame = liftIO $ do
+      setup lame = liftIO do
         L.check $ L.setBrate lame 128
         L.check $ L.setQuality lame 5
-        L.check $ L.setOutSamplerate lame 44100 -- SanicStudios uses this, seems to work.
-        -- TODO maybe use 48k instead? see rock revolution sync oddities
+        L.check $ L.setOutSamplerate lame 48000
+
+        -- for GH3 FSB, the MP3 actually is supposed to have an Info frame,
+        -- unlike WT/5/WoR ones. though we should verify if ours is right
+        L.check $ L.setBWriteVbrTag lame True
+
       pathPad = dir </> "pad.txt"
       readPad :: Staction Int
       readPad = shk $ read <$> readFile' pathPad
@@ -124,13 +132,13 @@ gh3Rules buildInfo dir gh3 = do
     s <- sourceStereoParts buildInfo gh3Parts gh3.common mid 0 planName plan
       [(gh3.guitar, 1)]
     pad <- readPad
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setup $ padAudio pad $ clampIfSilent s
+    stackIO $ runResourceT $ sinkMP3WithHandle out setup $ padAudio pad $ clampIfSilent s
   pathRhythm %> \out -> do
     mid <- loadOnyxMidi
     s <- sourceStereoParts buildInfo gh3Parts gh3.common mid 0 planName plan
       [(coopPart, 1)]
     pad <- readPad
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setup $ padAudio pad $ clampIfSilent s
+    stackIO $ runResourceT $ sinkMP3WithHandle out setup $ padAudio pad $ clampIfSilent s
   pathSong %> \out -> do
     mid <- loadOnyxMidi
     s <- sourceBacking buildInfo gh3.common mid 0 planName plan
@@ -138,7 +146,7 @@ gh3Rules buildInfo dir gh3 = do
       , (coopPart      , 1)
       ]
     pad <- readPad
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setup $ padAudio pad $ clampIfSilent s
+    stackIO $ runResourceT $ sinkMP3WithHandle out setup $ padAudio pad $ clampIfSilent s
   pathPreview %> \out -> do
     mid <- F.shakeMIDI $ planDir </> "processed.mid"
     -- Pad passed as 0 because we are just applying it to the unpadded audio
@@ -152,7 +160,7 @@ gh3Rules buildInfo dir gh3 = do
           $ Drop Start (fromMS pstart)
           $ Input (planDir </> "everything.wav")
     src <- shk $ buildSource previewExpr
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setup
+    stackIO $ runResourceT $ sinkMP3WithHandle out setup
       $ applySpeedAudio gh3.common src
 
   let pathFsb = dir </> "audio.fsb"
@@ -188,7 +196,7 @@ gh3Rules buildInfo dir gh3 = do
     hasGuitarAudio <- testSize pathGuitar
     hasRhythmAudio <- testSize pathRhythm
     fsbLength <- stackIO $ withBinaryFile pathFsbXen ReadMode hFileSize
-    stackIO $ BL.writeFile out $ runPut $ do
+    stackIO $ BL.writeFile out $ runPut do
       let count = 2 + (if hasGuitarAudio then 1 else 0) + (if hasRhythmAudio then 1 else 0)
       putWord32be count
       putWord32be $ fromIntegral fsbLength
@@ -198,10 +206,11 @@ gh3Rules buildInfo dir gh3 = do
             putWord32be 0
             putWord32be 0
             putWord32be 0
+      -- TODO these indexes may not be right if preview file is empty?
       datEntry "preview" 0
       datEntry "song" 1
       when hasGuitarAudio $ datEntry "guitar" 2
-      when hasRhythmAudio $ datEntry "rhythm" $ if hasGuitarAudio then 3 else 2
+      when hasRhythmAudio $ datEntry "rhythm" if hasGuitarAudio then 3 else 2
 
   let pathDL = dir </> "xbox" </> (dl <> ".pak.xen")
       pathText = dir </> "xbox" </> (dl <> "_text.pak.xen")
@@ -210,7 +219,10 @@ gh3Rules buildInfo dir gh3 = do
         ["f", "g", "i", "s"]
       pathSongPak = dir </> "xbox" </> (B8.unpack dlcID <> "_song.pak.xen")
   pathDL %> \out -> gh3MysteryScript (B8.pack dl) Nothing >>= stackIO . BL.writeFile out
-  pathText %> \out -> do
+  -- being lazy and writing english file for all languages; should swap out some translated strings.
+  -- this used to copy the english file to the other 4 but this broke on Windows?
+  -- when upgrading Windows to GHC 9.6, now concurrent copyFile from one source fails with "file is locked", wtf!
+  (pathText : pathTextLangs) %> \outs -> do
     -- section names would also go in here, but we'll try to use the embedded section name format
     let metadata = getTargetMetadata songYaml $ GH3 gh3
         nodes =
@@ -238,31 +250,31 @@ gh3Rules buildInfo dir gh3 = do
                   , QBStructItemStringW "title" $ targetTitle songYaml (GH3 gh3)
                   , QBStructItemStringW "artist" $ getArtist metadata
                   -- Need to have a year string, even if empty. Otherwise it glitches out and takes other strings' values
-                  , QBStructItemStringW "year" $ case metadata.year of
+                  , QBStructItemStringW "year" case metadata.year of
                     Nothing   -> ""
                     Just year -> T.pack $ ", " <> show year
-                  , QBStructItemQbKeyString9A0000 "artist_text" $ if metadata.cover
+                  , QBStructItemQbKeyString9A0000 "artist_text" if metadata.cover
                     then "artist_text_as_made_famous_by"
                     else "artist_text_by"
                   , QBStructItemInteger810000 "original_artist"
-                    $ if metadata.cover then 0 else 1
+                    if metadata.cover then 0 else 1
                   , QBStructItemQbKey8D0000 "version" "gh3"
                   , QBStructItemInteger810000 "leaderboard" 1
                   , QBStructItemInteger810000 "gem_offset" 0
                   , QBStructItemInteger810000 "input_offset" 0
-                  , QBStructItemQbKey8D0000 "singer" $ case getPart gh3.vocal songYaml >>= (.vocal) of
+                  , QBStructItemQbKey8D0000 "singer" case getPart gh3.vocal songYaml >>= (.vocal) of
                     Nothing -> "none"
                     Just pv -> case pv.gender of
                       Just Female -> "female"
                       Just Male   -> "male"
                       Nothing     -> "male"
-                  , QBStructItemQbKey8D0000 "keyboard" $ case getPart gh3.keys songYaml >>= (.grybo) of
+                  , QBStructItemQbKey8D0000 "keyboard" case getPart gh3.keys songYaml >>= (.grybo) of
                     Nothing -> "false"
                     Just _  -> "true"
                   , QBStructItemInteger810000 "band_playback_volume" 0
                   , QBStructItemInteger810000 "guitar_playback_volume" 0
                   , QBStructItemString830000 "countoff" "HiHat01"
-                  , QBStructItemInteger810000 "rhythm_track" $ case gh3.coop of
+                  , QBStructItemInteger810000 "rhythm_track" case gh3.coop of
                     GH2Bass   -> 0
                     GH2Rhythm -> 1
                   ]
@@ -277,14 +289,13 @@ gh3Rules buildInfo dir gh3 = do
         -- also ps3 appears to have different names. but they probably don't matter anyway
         unk1 = qbKeyCRC $ "1o99lm\\" <> B8.pack dl <> ".qb" -- in dl15_text.pak it's 1945578562. in disc qb.pak.xen it's 0x0b761ea7 "scripts\\guitar\\songlist.qb"
         unk2 = qbKeyCRC $ "7buqvk" <> B8.pack dl -- in dl15_text.pak it's 480172672. in disc qb.pak.xen it's 3114035354 "songlist"
-    stackIO $ BL.writeFile out $ buildPak nodes
-  forM_ pathTextLangs $ \lang -> lang %> \out -> do
-    -- being lazy and copying english file. really we ought to swap out some translated strings
-    shk $ copyFile' pathText out
+    let pak = buildPak nodes
+    stackIO $ forM_ outs \out -> BL.writeFile out pak
   [pathSongPak, pathPad] %> \_ -> do
     mid <- F.shakeMIDI $ planDir </> "processed.mid"
     let midApplied = applyTargetMIDI gh3.common mid
     timing <- basicTiming False midApplied $ getAudioLength buildInfo planName plan
+    fretLimit <- loadFretLimit
     let (gh3Mid, padSeconds) = makeGH3MidQB
           songYaml
           midApplied
@@ -292,6 +303,7 @@ gh3Rules buildInfo dir gh3 = do
           gh3.guitar
           coopPart
           gh3.drums
+          fretLimit
         nodes =
           [ ( Node {nodeFileType = ".qb", nodeOffset = 0, nodeSize = 0, nodeFilenamePakKey = 0, nodeFilenameKey = key1, nodeFilenameCRC = key2, nodeUnknown = 0, nodeFlags = 0, nodeName = Nothing}
             , putQB $ makeMidQB key1 dlcID gh3Mid
@@ -308,7 +320,7 @@ gh3Rules buildInfo dir gh3 = do
     stackIO $ writeFile pathPad $ show padSeconds
 
   let gh3Files = pathFsbXen : pathDatXen : pathDL : pathText : pathSongPak : pathTextLangs
-  phony (dir </> "xbox") $ do
+  phony (dir </> "xbox") do
     shk $ need gh3Files
   dir </> "gh3live" %> \out -> do
     let files = map (\f -> (takeFileName f, f)) gh3Files
@@ -362,9 +374,9 @@ gh3Rules buildInfo dir gh3 = do
   ps3DL      %> makeEDAT pathDL
   ps3Text    %> makeEDAT pathText
   ps3SongPak %> makeEDAT pathSongPak
-  forM_ (zip ps3TextLangs pathTextLangs) $ \(ps3, xen) -> ps3 %> makeEDAT xen
+  forM_ (zip ps3TextLangs pathTextLangs) \(ps3, xen) -> ps3 %> makeEDAT xen
   -- apparently we don't need to add the empty VRAM paks, song works fine without them
-  phony ps3Root $ do
+  phony ps3Root do
     shk $ need $ ps3Fsb : ps3Dat : ps3DL : ps3Text : ps3SongPak : ps3TextLangs
   dir </> "ps3.pkg" %> \out -> do
     shk $ need [ps3Root]
@@ -377,12 +389,12 @@ fromSeconds secs = floor $ secs * 1000
 
 makeGH3Spans :: U.TempoMap -> RTB.T U.Beats Bool -> RTB.T U.Beats gem -> [(Word32, Word32, Word32)]
 makeGH3Spans tmap spans gems = let
-  spans' = ATB.toPairList $ RTB.toAbsoluteEventList 0 $ joinEdgesSimple $ flip fmap spans $ \case
+  spans' = ATB.toPairList $ RTB.toAbsoluteEventList 0 $ joinEdgesSimple $ spans <&> \case
     False -> EdgeOff ()
     True  -> EdgeOn  () ()
   collectedGems = RTB.collectCoincident gems
   fromBeats bts = fromSeconds $ U.applyTempoMap tmap bts
-  in flip fmap spans' $ \(pos, ((), (), len)) -> let
+  in spans' <&> \(pos, ((), (), len)) -> let
     msStart = fromBeats pos
     msEnd   = fromBeats $ pos + len
     count   = fromIntegral $ length $ U.trackTake len $ U.trackDrop pos collectedGems
@@ -407,7 +419,7 @@ makeGH3Timing tmap mmap end = let
     measureEnd = U.unapplyMeasureMap mmap (i + 1, 0)
     len = measureEnd - measureStart
     sig = U.timeSigAt measureStart mmap
-    thisMeasure = U.trackTake len $ RTB.cons 0 Bar $ infiniteBeats
+    thisMeasure = U.trackTake len $ RTB.cons 0 Bar infiniteBeats
     infiniteBeats = RTB.cons (U.timeSigUnit sig) Beat infiniteBeats
     in trackGlue len thisMeasure $ go $ i + 1
   sigs
@@ -430,14 +442,15 @@ makeGH3MidQB
   -> F.PartName
   -> F.PartName
   -> F.PartName
+  -> FretLimit
   -> (GH3MidQB, Int)
-makeGH3MidQB songYaml origSong timing partLead partRhythm partDrummer = let
+makeGH3MidQB songYaml origSong timing partLead partRhythm partDrummer fretLimit = let
 
   -- first, pad input midi if needed
   firstEvent rtb = case RTB.viewL rtb of
     Just ((dt, _), _) -> dt
     Nothing           -> 999
-  firstNoteBeats = foldr min 999 $ do
+  firstNoteBeats = foldr min 999 do
     part <- [partLead, partRhythm]
     let opart = F.getFlexPart part origSong.tracks
     builder <- toList $ getPart part songYaml >>= anyFiveFret
@@ -456,7 +469,7 @@ makeGH3MidQB songYaml origSong timing partLead partRhythm partDrummer = let
     in case getPart fpart songYaml >>= anyFiveFret of
       Nothing -> (mempty, GH3Part emptyTrack emptyTrack emptyTrack emptyTrack)
       Just builder -> let
-        result = completeFiveResult False song.timesigs $ builder FiveTypeGuitar ModeInput
+        result = completeFiveResult fretLimit False song.timesigs $ builder FiveTypeGuitar ModeInput
           { tempo  = song.tempos
           , events = song.tracks.onyxEvents
           , part   = F.getFlexPart fpart song.tracks
@@ -475,7 +488,7 @@ makeGH3MidQB songYaml origSong timing partLead partRhythm partDrummer = let
       -- TODO guitarify' is called by makeGH3TrackNotes but should we remove ext sustains before noOpenNotes?
       $ fromMaybe RTB.empty
       $ Map.lookup diff result.notes
-    starPower = makeGH3Spans song.tempos result.other.fiveOverdrive sht
+    starPower = makeGH3Spans song.tempos result.other.overdrive sht
     in GH3Track
       { gh3Notes       = makeGH3TrackNotes song.tempos timeSigs beats sht
       , gh3StarPower   = starPower
@@ -490,7 +503,7 @@ makeGH3MidQB songYaml origSong timing partLead partRhythm partDrummer = let
     $ ATB.toPairList
     $ RTB.toAbsoluteEventList 0
     $ U.applyTempoTrack song.tempos
-    $ (F.getEventsTrack song.tracks).eventsSections
+    $ (F.getEventsTrack song.tracks).sections
   (leadTrack, leadPart  ) = makeGH3Part partLead
   (_        , rhythmPart) = makeGH3Part partRhythm
   -- Not sure if there's a real way to extend the end of the song past the last note.
@@ -509,14 +522,14 @@ makeGH3MidQB songYaml origSong timing partLead partRhythm partDrummer = let
   makeFaceoff playerSpans
     = map (\(pos, len, _count) -> (pos, len))
     $ makeGH3Spans song.tempos playerSpans
-    $ maybe RTB.empty (.fiveGems)
-    $ Map.lookup Expert leadTrack.fiveDifficulties
+    $ maybe RTB.empty (.gems)
+    $ Map.lookup Expert leadTrack.difficulties
   drumAnims = case getPart partDrummer songYaml >>= (.drums) of
     Nothing -> []
     Just pd -> let
       rbAnims = buildDrumAnimation pd song.tempos $ F.getFlexPart partDrummer song.tracks
       mapping = map swap gh3DrumMapping
-      notes = RTB.mapMaybe (\(tdn, hand) -> lookup (tdn_gem tdn, hand) mapping) $ animationToEliteDrums rbAnims
+      notes = RTB.mapMaybe (\(edn, hand) -> lookup (edn.gem, hand) mapping) $ animationToEliteDrums rbAnims
       in map (\(secs, pitch) -> [floor $ secs * 1000, pitch, 96]) -- third number is probably original midi velocity
         $ ATB.toPairList $ RTB.toAbsoluteEventList 0 $ U.applyTempoTrack song.tempos notes
   in (emptyMidQB
@@ -525,8 +538,8 @@ makeGH3MidQB songYaml origSong timing partLead partRhythm partDrummer = let
     , gh3TimeSignatures  = timeSigs
     , gh3FretBars        = beats
     , gh3Markers         = sections
-    , gh3P1FaceOff       = makeFaceoff leadTrack.fivePlayer1
-    , gh3P2FaceOff       = makeFaceoff leadTrack.fivePlayer2
+    , gh3P1FaceOff       = makeFaceoff leadTrack.player1
+    , gh3P2FaceOff       = makeFaceoff leadTrack.player2
     , gh3BackgroundNotes = (GH3Background [] [] [] [] [] [] [] [])
       { gh3Drums = drumAnims
       }

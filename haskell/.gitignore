@@ -10,3 +10,8 @@ stack*.yaml.lock
 onyx-20*
 onyx-command-line-*
 *.AppImage
+dist-newstyle
+cabal.project.local
+/packages/onyx-js/quickjs-include/
+/.cache/
+/Onyx.app/Contents/_CodeSignature

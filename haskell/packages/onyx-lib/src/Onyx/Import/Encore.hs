@@ -1,8 +1,10 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DeriveFunctor         #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
+{-# LANGUAGE OverloadedLabels      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE RecordWildCards       #-}
@@ -14,6 +16,8 @@ import           Control.Monad.Extra              (forM, guard, mapMaybeM, when)
 import           Control.Monad.IO.Class           (MonadIO)
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Foldable                    (toList)
+import           Data.Function                    ((&))
+import           Data.Functor                     ((<&>))
 import qualified Data.HashMap.Strict              as HM
 import qualified Data.List.NonEmpty               as NE
 import qualified Data.Map                         as Map
@@ -25,11 +29,13 @@ import           Onyx.Encore
 import           Onyx.Import.Base
 import           Onyx.MIDI.Track.Events           (EventsTrack (..))
 import qualified Onyx.MIDI.Track.File             as F
+import           Onyx.MIDI.Track.Mania            (ManiaTrack (..))
 import           Onyx.Project                     hiding (Difficulty)
 import qualified Onyx.Project                     as P
 import           Onyx.StackTrace                  (SendMessage, lg, stackIO)
 import           Onyx.Util.Files                  (fixFileCase)
 import           Onyx.Util.Handle                 (Readable, fileReadable)
+import           Optics                           ((.~))
 import qualified Sound.MIDI.Util                  as U
 import qualified System.Directory                 as Dir
 import           System.FilePath                  (takeExtension, (<.>), (</>))
@@ -43,17 +49,20 @@ importEncore dir level = do
 
   info <- fixFileCase (dir </> "info.json") >>= loadEncoreInfo
 
-  mid <- case level of
-    ImportQuick -> return emptyChart
-    ImportFull  -> fixFileCase info.midi >>= F.loadMIDIReadable @EncoreFile . fileReadable
+  origMidi <- case level of
+    ImportQuick -> return Nothing
+    ImportFull  -> Just . fileReadable <$> fixFileCase info.midi
+  mid <- case origMidi of
+    Nothing -> return emptyChart
+    Just m  -> F.loadMIDIReadable @EncoreFile m
 
   let existingPaths :: [FilePath] -> IO [FilePath]
-      existingPaths paths = flip mapMaybeM paths $ \p -> do
+      existingPaths paths = flip mapMaybeM paths \p -> do
         p' <- fixFileCase p
         e <- Dir.doesFileExist p'
         return $ guard e >> Just p'
       audioFor :: T.Text -> IO (Maybe (Audio t (FilePath, Readable)))
-      audioFor key = mapM existingPaths (HM.lookup key info.stems) >>= return . \case
+      audioFor key = mapM existingPaths (HM.lookup key info.stems) <&> \case
         Just [x]    -> Just $ Input (T.unpack key <.> takeExtension x, fileReadable x)
         Just (x : xs) -> Just $ Mix $ NE.zipWith
           (\i y -> Input ((T.unpack key <> "-" <> show i) <.> takeExtension y, fileReadable y))
@@ -77,7 +86,7 @@ importEncore dir level = do
 
   audios <- do
     let pairs = [audioDrums, audioBass, audioLead, audioGuitar, audioKeys, audioVocals, audioBacking] >>= toList >>= toList
-    fmap HM.fromList $ forM pairs $ \(f, r) -> do
+    fmap HM.fromList $ forM pairs \(f, r) -> do
       chans <- audioChannelsReadable r
       return (T.pack f, AudioFile AudioInfo
         { md5      = Nothing
@@ -100,7 +109,7 @@ importEncore dir level = do
         xs -> Just $ T.intercalate ", " xs
       , subgenre      = Nothing
       , year          = info.release_year >>= readMaybe . T.unpack
-      , fileAlbumArt  = flip fmap art $ \f ->
+      , fileAlbumArt  = art <&> \f ->
         SoftFile ("album" <.> takeExtension f) $ SoftReadable $ fileReadable f
       , trackNumber   = Nothing
       , comments      = []
@@ -123,6 +132,7 @@ importEncore dir level = do
       }
     , global = let Global{..} = def' in Global
       { fileMidi = SoftFile "notes.mid" $ SoftChart $ encoreToOnyxMIDI mid
+      , fileMidiOriginal = SoftFile "original.mid" . SoftReadable <$> origMidi
       , fileSongAnim = Nothing
       , backgroundVideo = Nothing
       , fileBackgroundImage = Nothing
@@ -131,8 +141,8 @@ importEncore dir level = do
     , audio = audios
     , jammit = HM.empty
     , plans = HM.singleton "encore" $ StandardPlan StandardPlanInfo
-      { song        = fmap (fmap $ (\(f, _) -> Named $ T.pack f)) audioBacking
-      , parts       = Parts $ HM.fromList $ do
+      { song        = fmap (\(f, _) -> Named $ T.pack f) <$> audioBacking
+      , parts       = Parts $ HM.fromList do
         let (newLead, newGuitar) = case (audioLead, audioGuitar) of
               -- move lead to guitar if possible
               (Just _, Nothing) -> (Nothing  , audioLead  )
@@ -159,7 +169,7 @@ importEncore dir level = do
     }
 
 encoreToOnyxMIDI :: F.Song (EncoreFile U.Beats) -> F.Song (F.OnyxFile U.Beats)
-encoreToOnyxMIDI = fmap $ \encore -> mempty
+encoreToOnyxMIDI = fmap (\encore -> mempty
   { F.onyxParts    = Map.fromList
     [ (F.PartGuitar, mempty
       { F.onyxPartGuitar = encore.plasticGuitar
@@ -182,18 +192,20 @@ encoreToOnyxMIDI = fmap $ \encore -> mempty
       , F.onyxPartMania = Map.fromList $ encorePart encore.partVocals
       })
     ]
-  , F.onyxEvents   = if RTB.null encore.events.eventsSections
-    then encore.events { eventsSections = convertEncoreSections encore.section }
+  , F.onyxEvents   = if RTB.null encore.events.sections
+    then encore.events & #sections .~ convertEncoreSections encore.section
     else encore.events
   , F.onyxBeat     = encore.beat
-  }
+  }) . checkEnableDynamicsEncore
 
 importPadMania :: P.Difficulty -> EncorePart U.Beats -> Maybe ModeMania
 importPadMania tier part = do
   convertedDiffs <- NE.nonEmpty $ encorePart part
-  return $ ModeMania $ flip fmap convertedDiffs $ \(name, _) -> ManiaChart
+  return $ ModeMania $ convertedDiffs <&> \(name, diff) -> ManiaChart
     { name = name
-    , keys = if name == "expert" then 5 else 4
+    , keys = if name == "expert" || elem 4 [ k | edge <- toList diff.notes, (k, _) <- toList edge ]
+      then 5
+      else 4
     , style = ManiaEncore
     , difficulty = tier
     }
@@ -202,16 +214,16 @@ encorePartData :: HM.HashMap T.Text Int -> F.Song (EncoreFile U.Beats) -> Parts 
 encorePartData diffs mid = let
 
   getTier :: [T.Text] -> Maybe P.Difficulty
-  getTier options = listToMaybe $ do
+  getTier options = listToMaybe do
     o <- options
     case HM.lookup o diffs of
       Just d | d >= 0 -> [Tier $ fromIntegral d + 1] -- 0..6 -> 1..7
       _               -> []
 
   in Parts $ HM.fromList
-    [ (F.PartGuitar, let Part{..} = emptyPart in Part
+    [ (F.PartGuitar, emptyPart
       -- Run It (Epic Games) has no pg/gr difficulties but seems to have guitar, huh?
-      { grybo = do
+      & #grybo .~ do
         tier <- getTier ["pg", "plastic_guitar"]
         Just ModeFive
           { difficulty = tier
@@ -221,13 +233,12 @@ encorePartData diffs mid = let
           , sustainGap = 60
           , detectMutedOpens = True
           }
-      , mania = do
+      & #mania .~ do
         tier <- getTier ["gr", "guitar"]
         importPadMania tier mid.tracks.partGuitar.part
-      , ..
-      })
-    , (F.PartKeys, let Part{..} = emptyPart in Part
-      { grybo = do
+      )
+    , (F.PartKeys, emptyPart
+      & #grybo .~ do
         tier <- getTier ["pk", "plastic_keys"] -- pk not seen but just in case
         Just ModeFive
           { difficulty = tier
@@ -237,13 +248,12 @@ encorePartData diffs mid = let
           , sustainGap = 60
           , detectMutedOpens = True
           }
-      , mania = do
+      & #mania .~ do
         tier <- getTier ["keys"]
         importPadMania tier mid.tracks.partKeys.part
-      , ..
-      })
-    , (F.PartBass, let Part{..} = emptyPart in Part
-      { grybo = do
+      )
+    , (F.PartBass, emptyPart
+      & #grybo .~ do
         tier <- getTier ["pb", "plastic_bass"]
         Just ModeFive
           { difficulty = tier
@@ -253,28 +263,24 @@ encorePartData diffs mid = let
           , sustainGap = 60
           , detectMutedOpens = True
           }
-      , mania = do
+      & #mania .~ do
         tier <- getTier ["ba", "bass"]
         importPadMania tier mid.tracks.partBass.part
-      , ..
-      })
-    , (F.PartDrums, let Part{..} = emptyPart in Part
-      { drums = do
+      )
+    , (F.PartDrums, emptyPart
+      & #drums .~ do
         tier <- getTier ["pd", "plastic_drums"]
-        Just $ let ModeDrums{..} = emptyPartDrums DrumsPro Kicks1x in ModeDrums
-          { difficulty = tier
-          , ..
-          }
-      , mania = do
+        Just $ emptyPartDrums DrumsPro Kicks1x
+          & #difficulty .~ tier
+      & #mania .~ do
         tier <- getTier ["ds", "drums"]
         importPadMania tier mid.tracks.partDrums.part
-      , ..
-      })
-    , (F.PartVocal, let Part{..} = emptyPart in Part
-      { mania = do
+      )
+    , (F.PartVocal, emptyPart
+      & #mania .~ do
         tier <- getTier ["vl", "vocals"]
         importPadMania tier mid.tracks.partVocals
-      , vocal = do
+      & #vocal .~ do
         tier <- getTier ["pv", "pitched_vocals", "pro_vocals"]
         Just ModeVocal
           { difficulty = tier
@@ -283,6 +289,5 @@ encorePartData diffs mid = let
           , key        = Nothing
           , lipsyncRB3 = Nothing
           }
-      , ..
-      })
+      )
     ]

@@ -1,9 +1,9 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE PatternSynonyms       #-}
-{-# OPTIONS_GHC -fno-warn-ambiguous-fields #-}
 module Onyx.Import.StepMania where
 
 import           Control.Applicative                  ((<|>))
@@ -49,7 +49,7 @@ buildSMTempo :: SM -> (U.TempoMap, U.MeasureMap, U.Beats -> (U.Beats, Maybe U.Be
 buildSMTempo sm = let
   -- TODO support negative BPM somehow
   allTempoChanges :: Map.Map U.Beats U.BPS
-  allTempoChanges = Map.fromList $ map (\(b, bpm) -> (realToFrac b, realToFrac bpm / 60)) $ sm_BPMS sm
+  allTempoChanges = Map.fromList $ map (\(b, bpm) -> (realToFrac b, realToFrac bpm / 60)) sm.sm_BPMS
   buildBar :: Int -> [TempoChunk]
   buildBar i = let
     barLength, srcBeatStart, srcBeatEnd :: U.Beats
@@ -66,7 +66,7 @@ buildSMTempo sm = let
         b' = realToFrac b :: U.Beats
         in guard (srcBeatStart <= b' && b' < srcBeatEnd) >> Just (b', realToFrac s)
       )
-      (sm_STOPS sm)
+      sm.sm_STOPS
     makeChunks pos = if pos >= srcBeatEnd
       then []
       else let
@@ -80,7 +80,7 @@ buildSMTempo sm = let
           $ (TempoPlay (chunkEnd - pos) tempo :)
           $ makeChunks chunkEnd
     in makeChunks srcBeatStart
-  numBars = foldr max 1 $ map (length . smn_Notes) $ sm_NOTES sm
+  numBars = foldr max 1 $ map (length . (.smn_Notes)) sm.sm_NOTES
   builtBars = take numBars $ map buildBar [0 ..]
   tempoMap = U.tempoMapFromBPS
     $ foldr ($) RTB.empty
@@ -121,10 +121,10 @@ getManiaTrack smn translate = let
       divisionLength = barLength / fromIntegral (length divisions)
       in map (\line -> Wait 0 line . RTB.delay divisionLength) divisions
       )
-    $ smn_Notes smn
+    $ smn.smn_Notes
   maxKey = foldr max 0 $ fst <$> toList sourceChars
   in ManiaTrack
-    { maniaNotes = blipEdgesRBNice $ foldr RTB.merge RTB.empty $ do
+    { notes = blipEdgesRBNice $ foldr RTB.merge RTB.empty do
       key <- [0 .. maxKey]
       let filtered = RTB.mapMaybe (\(key', c) -> guard (key == key') >> Just c) sourceChars
           go ANil = ANil
@@ -145,7 +145,7 @@ getManiaTrack smn translate = let
                     At t2 _ _ -> case translate t2 of
                       (t2', _) -> Just $ t2' - posStart
       return $ RTB.fromAbsoluteEventList $ go $ RTB.toAbsoluteEventList 0 filtered
-    , maniaOverdrive = RTB.empty
+    , overdrive = RTB.empty
     }
 
 importSM :: (SendMessage m, MonadIO m) => FilePath -> Import m
@@ -156,11 +156,11 @@ importSM src level = do
     ".dwi" -> stackIO (loadSMLines src) >>= fmap convertDWItoSM . readDWI
     _      -> fatal $ "Unrecognized StepMania format extension: " <> src
   -- both of these are encodings for "warps"
-  when (any (\(_, bpm) -> bpm < 0) $ sm_BPMS sm) $ fatal
+  when (any (\(_, bpm) -> bpm < 0) sm.sm_BPMS) $ fatal
     "Song contains negative BPMs, which are not supported yet."
-  when (any (\(_, t) -> t < 0) $ sm_STOPS sm) $ fatal
+  when (any (\(_, t) -> t < 0) sm.sm_STOPS) $ fatal
     "Song contains negative stops, which are not supported yet."
-  let (delayAudio, delayMIDI) = case sm_OFFSET sm of
+  let (delayAudio, delayMIDI) = case sm.sm_OFFSET of
         Nothing -> (id, id)
         Just n -> case compare n 0 of
           -- sign is opposite how FoF delay works, positive offset = midi starts before audio
@@ -174,26 +174,27 @@ importSM src level = do
             ( Pad Start $ CA.Seconds $ realToFrac n
             , id
             )
-      importableSMN smn = elem (smn_ChartType smn) ["dance-single", "pump-single"]
+      importableSMN :: SMNotes -> Bool
+      importableSMN smn = elem smn.smn_ChartType ["dance-single", "pump-single"]
   mid <- case level of
     ImportQuick -> return emptyChart
     ImportFull -> do
       let (tempos, sigs, translate) = buildSMTempo sm
       return $ delayMIDI $ F.Song tempos sigs mempty
         { F.onyxParts = Map.singleton (F.PartName "dance") mempty
-          { F.onyxPartMania = Map.fromList $ do
-            smn <- sm_NOTES sm
+          { F.onyxPartMania = Map.fromList do
+            smn <- sm.sm_NOTES
             guard $ importableSMN smn
-            return (smn_Difficulty smn, getManiaTrack smn translate)
+            return (smn.smn_Difficulty, getManiaTrack smn translate)
           }
         }
 
   let audioOptions = catMaybes
-        [ (\f -> takeDirectory src </> T.unpack f) <$> sm_MUSIC sm
+        [ (\f -> takeDirectory src </> T.unpack f) <$> sm.sm_MUSIC
         , Just $ src -<.> "ogg"
         , Just $ src -<.> "mp3"
         ]
-  audio <- fmap (fromMaybe HM.empty) $ flip firstJustM audioOptions $ \opt -> do
+  audio <- fmap (fromMaybe HM.empty) $ flip firstJustM audioOptions \opt -> do
     p <- fixFileCase opt
     stackIO (doesFileExist p) >>= \case
       False -> return Nothing
@@ -215,23 +216,23 @@ importSM src level = do
       addImageExts f = map (f <.>) imageExts
       bannerOptions = concat
         -- try jacket (square art) first
-        [ filter isImageExt $ (\f -> takeDirectory src </> T.unpack f) <$> toList (sm_JACKET sm)
+        [ filter isImageExt $ (\f -> takeDirectory src </> T.unpack f) <$> toList sm.sm_JACKET
         , addImageExts $ dropExtension src <> "-jacket"
         -- have seen a video in BANNER field, so we verify extensions
-        , filter isImageExt $ (\f -> takeDirectory src </> T.unpack f) <$> toList (sm_BANNER sm)
+        , filter isImageExt $ (\f -> takeDirectory src </> T.unpack f) <$> toList sm.sm_BANNER
         , addImageExts $ dropExtension src
         , addImageExts $ dropExtension src <> "-banner"
         ]
       bgOptions = concat
-        [ filter isImageExt $ (\f -> takeDirectory src </> T.unpack f) <$> toList (sm_BACKGROUND sm)
+        [ filter isImageExt $ (\f -> takeDirectory src </> T.unpack f) <$> toList sm.sm_BACKGROUND
         , addImageExts $ dropExtension src <> "-bg"
         ]
-  banner <- flip firstJustM bannerOptions $ \opt -> do
+  banner <- flip firstJustM bannerOptions \opt -> do
     path' <- fixFileCase opt
     stackIO (doesFileExist path') >>= \case
       True  -> return $ Just $ SoftFile ("banner" <.> takeExtension path') $ SoftReadable $ fileReadable path'
       False -> return Nothing
-  background <- flip firstJustM bgOptions $ \opt -> do
+  background <- flip firstJustM bgOptions \opt -> do
     path' <- fixFileCase opt
     stackIO (doesFileExist path') >>= \case
       True  -> return $ Just $ SoftFile ("background" <.> takeExtension path') $ SoftReadable $ fileReadable path'
@@ -245,7 +246,7 @@ importSM src level = do
       videoOptions = concat
         [ addVideoExts $ dropExtension src
         ]
-  video <- flip firstJustM videoOptions $ \opt -> do
+  video <- flip firstJustM videoOptions \opt -> do
     p <- fixFileCase opt
     stackIO (doesFileExist p) >>= \case
       False -> return Nothing
@@ -263,21 +264,21 @@ importSM src level = do
         then " - " <> st
         else " "   <> st
       combineTitleSub t        st        = t <|> st
-      titleOrig = combineTitleSub (sm_TITLE sm) (sm_SUBTITLE sm)
-      titleTranslit = case (sm_TITLETRANSLIT sm, sm_SUBTITLETRANSLIT sm) of
+      titleOrig = combineTitleSub sm.sm_TITLE sm.sm_SUBTITLE
+      titleTranslit = case (sm.sm_TITLETRANSLIT, sm.sm_SUBTITLETRANSLIT) of
         (Nothing, Nothing) -> Nothing
         _                  -> combineTitleSub
-          (sm_TITLETRANSLIT    sm <|> sm_TITLE    sm)
-          (sm_SUBTITLETRANSLIT sm <|> sm_SUBTITLE sm)
+          (sm.sm_TITLETRANSLIT <|> sm.sm_TITLE)
+          (sm.sm_SUBTITLETRANSLIT <|> sm.sm_SUBTITLE)
       (title, titleJP) = case (titleTranslit, titleOrig) of
         (Nothing, Just jp) -> (Just jp, Nothing)
         pair               -> pair
-      (artist, artistJP) = case (sm_ARTISTTRANSLIT sm, sm_ARTIST sm) of
+      (artist, artistJP) = case (sm.sm_ARTISTTRANSLIT, sm.sm_ARTIST) of
         (Nothing, Just jp) -> (Just jp, Nothing)
         pair               -> pair
 
-  diffs <- maybe (fatal "No .sm importable difficulties found") return $ NE.nonEmpty $ do
-    smn <- sortOn smn_NumericalMeter $ filter importableSMN $ sm_NOTES sm
+  diffs <- maybe (fatal "No .sm importable difficulties found") return $ NE.nonEmpty do
+    smn <- sortOn (.smn_NumericalMeter) $ filter importableSMN sm.sm_NOTES
     let keyCount = case concat smn.smn_Notes of
           line : _ -> T.length line
           []       -> 1
@@ -295,16 +296,16 @@ importSM src level = do
       , titleJP = titleJP
       , artist = artist
       , artistJP = artistJP
-      , genre = sm_GENRE sm
-      , author = case filter (not . T.null) $ nubOrd $ map smn_Author $ sm_NOTES sm of
+      , genre = sm.sm_GENRE
+      , author = case filter (not . T.null) $ nubOrd $ map (.smn_Author) sm.sm_NOTES of
         [] -> Nothing
         xs -> Just $ T.intercalate ", " xs
       , fileAlbumArt = banner
       -- TODO these need to be adjusted for delay padding
-      , previewStart = PreviewSeconds . realToFrac <$> sm_SAMPLESTART sm
+      , previewStart = PreviewSeconds . realToFrac <$> sm.sm_SAMPLESTART
       , previewEnd = do
-        start <- sm_SAMPLESTART sm
-        len <- sm_SAMPLELENGTH sm
+        start <- sm.sm_SAMPLESTART
+        len <- sm.sm_SAMPLELENGTH
         return $ PreviewSeconds $ realToFrac $ start + len
       }
     , jammit = HM.empty
@@ -325,6 +326,7 @@ importSM src level = do
       }
     , global = Global
       { fileMidi = SoftFile "notes.mid" $ SoftChart mid
+      , fileMidiOriginal = Nothing
       , fileSongAnim = Nothing
       , autogenTheme = Nothing
       , animTempo = Left KTempoMedium

@@ -6,12 +6,14 @@ build-type:     Simple
 library
   exposed-modules:
     Onyx.FFMPEG
+    Onyx.MP3
   hs-source-dirs:
     src
   ghc-options: -Wall
   build-depends:
       base
     , conduit-audio
+    , filepath
     , conduit
     , unliftio
     , resourcet
@@ -23,6 +25,7 @@ library
     , split
     , inline-c
     , StateVar
+    , bytestring
   default-language: Haskell2010
   pkgconfig-depends:
       libavutil

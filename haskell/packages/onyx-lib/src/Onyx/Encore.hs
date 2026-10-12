@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DeriveFunctor         #-}
 {-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE DerivingVia           #-}
@@ -76,7 +77,7 @@ stemJSON = Codec
     A.Error _ -> case A.fromJSON v of
       A.Success xs -> return xs
       A.Error err  -> fatal err
-  , codecOut = makeOut $ \case
+  , codecOut = makeOut \case
     [x] -> A.toJSON x
     xs  -> A.toJSON xs
   }
@@ -96,7 +97,7 @@ reqSynonym k1 k2 vc = let
   in result
 
 instance StackJSON (EncoreInfo T.Text) where
-  stackJSON = asObject "EncoreInfo" $ do
+  stackJSON = asObject "EncoreInfo" do
     title              <- (.title)              =. req         "title"              stackJSON
     artist             <- (.artist)             =. req         "artist"             stackJSON
     diff               <- (.diff)               =. req         "diff"               (dict stackJSON)

@@ -1,11 +1,13 @@
 {- |
 BAND BASS
 -}
-{-# LANGUAGE DeriveGeneric      #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE DerivingVia        #-}
-{-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE DerivingVia         #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
 module Onyx.Harmonix.GH2.BandBass where
 
 import           Control.Monad.Codec
@@ -31,9 +33,9 @@ instance TraverseTrack BandBassTrack where
 
 instance ParseTrack BandBassTrack where
   parseTrack = do
-    bassTempo    <- bassTempo    =. command
-    bassIdle     <- bassIdle     =. commandMatch ["idle"]
-    bassPlay     <- bassPlay     =. commandMatch ["play"]
-    bassStrum <- bassStrum =. fatBlips (1/8) (blip 36)
-    bassMystery61 <- bassMystery61 =. blip 61
+    bassTempo     <- (.bassTempo)     =. command
+    bassIdle      <- (.bassIdle)      =. commandMatch ["idle"]
+    bassPlay      <- (.bassPlay)      =. commandMatch ["play"]
+    bassStrum     <- (.bassStrum)     =. fatBlips (1/8) (blip 36)
+    bassMystery61 <- (.bassMystery61) =. blip 61
     return BandBassTrack{..}

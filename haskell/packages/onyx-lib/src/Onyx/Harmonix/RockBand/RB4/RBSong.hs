@@ -2,6 +2,7 @@
 Ported from LibForge
 https://github.com/maxton/LibForge
 -}
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
@@ -31,6 +32,7 @@ import qualified Data.ByteString.Char8               as B8
 import qualified Data.ByteString.Lazy                as BL
 import           Data.Char                           (toLower)
 import qualified Data.EventList.Relative.TimeBody    as RTB
+import           Data.Functor                        ((<&>))
 import           Data.Int
 import           Data.Maybe                          (listToMaybe)
 import           Data.Word
@@ -117,12 +119,12 @@ getEntityResource :: Get EntityResource
 getEntityResource = do
   version <- getInt32le
   -- Maxton's code went up to 0x11, MT: changed to 0x12 for juice.rbsong
-  when (version < 0xC || version > 0x12) $ do
+  when (version < 0xC || version > 0x12) do
     fail $ "Can't handle EntityResource version " <> show version
   inlineLayerNames <- getArray getString
-  when (version >= 0xF) $ do
+  when (version >= 0xF) do
     _unk0 <- getInt32le
-    when (version >= 0x10) $ do
+    when (version >= 0x10) do
       _unk1 <- getInt32le
       return ()
   entity <- getEntity
@@ -151,7 +153,7 @@ getEntity = do
         else do
           _arraySize <- getInt16le
           return 1
-  replicateM_ (fromIntegral numLayers) $ do
+  replicateM_ (fromIntegral numLayers) do
     if version < 8
       then do
         when (version >= 7) $ void getInt16le -- layer_field_28
@@ -160,7 +162,7 @@ getEntity = do
         when (propArrayBaseSize > 0) $ fail "Version < 8 should load objs here"
       else when (version <= 11) $ void getString -- layer_name
   when (version < 8) $ fail "Version < 8 not implemented"
-  layers <- forM [0 .. numLayers - 1] $ \i -> do
+  layers <- forM [0 .. numLayers - 1] \i -> do
     layer <- getEntityLayer i version
     inlineResources <- if version >= 0xC
       then Just <$> loadInlineResources
@@ -180,7 +182,7 @@ loadInlineResources = do
       getInt32le
     else return versionOrig
   count <- getInt32le
-  replicateM (fromIntegral count) $ do
+  replicateM (fromIntegral count) do
     type_ <- getString
     path <- getString
     contents <- case type_ of
@@ -246,7 +248,7 @@ getObject layerVersion = do
           return GameObject{..}
         else do
           numChildren <- getInt32le
-          components <- replicateM (fromIntegral numChildren) $ do
+          components <- replicateM (fromIntegral numChildren) do
             getComponent rev layerVersion
           return GameObject{..}
 
@@ -275,11 +277,11 @@ getPropertyType = do
     8 -> return $ LongValue <$> getInt64le
     9 -> return $ BoolValue . (/= 0) <$> getWord8
     0xB -> return $ SymbolValue <$> getString
-    0xC -> return $ do
+    0xC -> return do
       prefix <- getWord8
       str <- getString
       return $ ResourcePathValue str prefix
-    0x10 -> return $ do
+    0x10 -> return do
       unk_driven_prop_1 <- getInt32le
       unk_driven_prop_2 <- getInt32le
       if unk_driven_prop_2 == 0
@@ -293,7 +295,7 @@ getPropertyType = do
           unknown3 <- getInt32le
           unknown4 <- getInt64le
           return $ DrivenProp unk_driven_prop_1 unk_driven_prop_2 Nothing unknown3 unknown4 Nothing
-    0xA -> return $ do
+    0xA -> return do
       a <- getInt32le
       b <- getInt32le
       c <- getInt32le
@@ -301,7 +303,7 @@ getPropertyType = do
       e <- getInt32le
       f <- getInt32le
       return $ GameObjectIdValue a b c d e f
-    0xD -> return $ do
+    0xD -> return do
       a <- getFloatle
       b <- getFloatle
       c <- getFloatle
@@ -314,7 +316,7 @@ getPropertyType = do
     0xF -> do
       _refCount <- getInt64le
       propertyReaders <- getPropertyReaders
-      return $ fmap StructValue $ forM propertyReaders $ \(name, reader) -> do
+      return $ fmap StructValue $ forM propertyReaders \(name, reader) -> do
         value <- reader
         return $ Property name value
     _ -> if typeID .&. 0x100 == 0x100
@@ -326,7 +328,7 @@ getPropertyType = do
 getPropertyReaders :: Get [(B.ByteString, Get Value)]
 getPropertyReaders = do
   numProps <- getInt32le
-  replicateM (fromIntegral numProps) $ do
+  replicateM (fromIntegral numProps) do
     name <- getString
     reader <- getPropertyType
     return (name, reader)
@@ -334,7 +336,7 @@ getPropertyReaders = do
 getProperties :: Get [Property]
 getProperties = do
   propertyReaders <- getPropertyReaders
-  forM propertyReaders $ \(name, reader) -> do
+  forM propertyReaders \(name, reader) -> do
     value <- reader
     return $ Property name value
 
@@ -351,13 +353,13 @@ getRBSongLipsync res = let
     let visemes = do
           prop <- comp.props
           guard $ prop.name == "visemes"
-          ArrayValue arr <- return $ prop.value
+          ArrayValue arr <- return prop.value
           SymbolValue sym <- arr
           return sym
-        keyframeData = BL.pack $ do
+        keyframeData = BL.pack do
           prop <- comp.props
           guard $ prop.name == "data"
-          ArrayValue arr <- return $ prop.value
+          ArrayValue arr <- return prop.value
           ByteValue b <- arr
           return b
     return (lipsyncName, visemes, keyframeData)
@@ -365,15 +367,15 @@ getRBSongLipsync res = let
     True -> return $ reverse prev
     False -> do
       eventCount <- getWord8
-      keyframeEvents <- replicateM (fromIntegral eventCount) $ do
+      events <- replicateM (fromIntegral eventCount) do
         visemeKey <- fromIntegral <$> getWord8
         visemeWeight <- getWord8
         let visemeGraph = ()
         return VisemeEvent{..}
       parseKeyframes $ Keyframe{..} : prev
-  in forM lipsyncList $ \(lipsyncName, visemes, keyframeData) -> do
+  in forM lipsyncList \(lipsyncName, visemes, keyframeData) -> do
     keyframes <- runGetM (parseKeyframes []) keyframeData
-    return (lipsyncName, emptyLipsync { lipsyncVisemes = visemes, lipsyncKeyframes = keyframes })
+    return (lipsyncName, emptyLipsync { visemes = visemes, keyframes = keyframes })
 
 -- positions in PropAnim are given in BEAT events. see gimmechocolate which has half-note BEATs
 beatTrackTempoMap :: BeatTrack U.Seconds -> U.TempoMap
@@ -384,7 +386,7 @@ beatTrackTempoMap = U.tempoMapFromSecondsBPS . go . RTB.getTimes . beatLines whe
 getRBSongVenue :: BeatTrack U.Seconds -> EntityResource -> Anim Float
 getRBSongVenue beatTrack top = let
   tmap = beatTrackTempoMap beatTrack
-  propAnim = listToMaybe $ do
+  propAnim = listToMaybe do
     (_, Just resources) <- top.entity.layers
     resource <- resources
     RC_PropAnimResource res <- return resource.contents
@@ -455,7 +457,7 @@ getRBSongVenue beatTrack top = let
     , animMystery3   = 0
     , animEnd        = 0
     , animMystery4   = 0
-    , animTracks     = flip map tracks $ \(name, events) -> AnimTrack
+    , animTracks     = tracks <&> \(name, events) -> AnimTrack
       { trackVersion    = 6 -- just setting these as such so eventExtra is always expected to be Nothing
       , trackSubversion = 6
       , trackDomain     = "BandDirector"
@@ -464,7 +466,7 @@ getRBSongVenue beatTrack top = let
       , trackMystery2   = 0
       , trackName2      = ""
       , trackMystery3   = B.replicate 5 0
-      , trackEvents     = flip map events $ \(time, event) -> AnimEvent
+      , trackEvents     = events <&> \(time, event) -> AnimEvent
         { eventExtra = Nothing
         , eventName  = event
         , eventTime  = if time < 0

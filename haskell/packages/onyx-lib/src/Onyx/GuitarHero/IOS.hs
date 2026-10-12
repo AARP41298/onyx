@@ -1,5 +1,8 @@
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TupleSections   #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE TupleSections       #-}
 module Onyx.GuitarHero.IOS where
 
 import qualified Codec.Compression.Zlib.Raw as Raw
@@ -8,6 +11,7 @@ import           Data.Binary.Get
 import qualified Data.ByteString            as B
 import qualified Data.ByteString.Char8      as B8
 import qualified Data.ByteString.Lazy       as BL
+import           Data.Functor               ((<&>))
 import           Data.Word
 import           System.Directory           (createDirectoryIfMissing)
 import           System.FilePath            (dropExtension, takeDirectory,
@@ -56,7 +60,7 @@ getIGAHeader = do
   igaFilenameDirectoryLength <- getWord32le
   igaUnk3 <- getByteString 16
   igaHashes <- replicateM (fromIntegral igaFileCount) getWord32le
-  igaFiles <- replicateM (fromIntegral igaFileCount) $ do
+  igaFiles <- replicateM (fromIntegral igaFileCount) do
     fileOffset <- getWord32le
     fileLength <- getWord32le
     fileUnk <- getWord32le
@@ -69,11 +73,11 @@ loadIGA f = do
   -- TODO handle Get errors
   let header = runGet getIGAHeader $ BL.fromStrict bs
       namesSection
-        = B.take (fromIntegral $ igaFilenameDirectoryLength header)
-        $ B.drop (fromIntegral $ igaFilenameDirectoryOffset header) bs
-      nameOffsets = runGet (replicateM (fromIntegral $ igaFileCount header) getWord32le)
+        = B.take (fromIntegral header.igaFilenameDirectoryLength)
+        $ B.drop (fromIntegral header.igaFilenameDirectoryOffset) bs
+      nameOffsets = runGet (replicateM (fromIntegral header.igaFileCount) getWord32le)
         $ BL.fromStrict namesSection
-      names = flip map nameOffsets $ \offset ->
+      names = nameOffsets <&> \offset ->
         B.takeWhile (/= 0) $ B.drop (fromIntegral offset) namesSection
       sliceFile name (offset, len, compression) = if compression == -1
         then return (name, BL.fromStrict $ B.take (fromIntegral len) $ B.drop (fromIntegral offset) bs)
@@ -106,7 +110,7 @@ loadIGA f = do
                   ]
                 return uncompressed
           in (name,) <$> decodeFrom offset len
-  contents <- zipWithM sliceFile names $ igaFiles header
+  contents <- zipWithM sliceFile names header.igaFiles
   return (header, contents)
 
 extractIGA :: FilePath -> IO [FilePath]
@@ -115,9 +119,9 @@ extractIGA f = do
   let headerTxt = f -<.> "txt"
   writeFile headerTxt $ unlines
     [ show header
-    , show $ zip3 (map fst files) (igaHashes header) (igaFiles header)
+    , show $ zip3 (map fst files) header.igaHashes header.igaFiles
     ]
-  extracted <- forM files $ \(name, contents) -> do
+  extracted <- forM files \(name, contents) -> do
     let out = dropExtension f </> B8.unpack name
     createDirectoryIfMissing True $ takeDirectory out
     BL.writeFile out contents

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -e
+set -u
+
+git submodule update --init
+
+for f in dependencies/libs/*; do
+  (cd "$f" && git clean -fdx .)
+done
+
+git clean -fdx dependencies/root/
+
+find packages -type d -name .stack-work -prune -exec rm -r {} +
+
+./build-dependencies && ./stack-local build && ./copy-resources && ./package

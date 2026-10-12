@@ -1,17 +1,20 @@
+{-# LANGUAGE BlockArguments      #-}
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE NoFieldSelectors    #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE RecordWildCards     #-}
-{-# LANGUAGE TupleSections       #-}
 module Onyx.Neversoft.GH3.MidQB where
 
 import           Control.Monad                    (forM)
 import           Control.Monad.Trans.Writer       (execWriter, tell)
 import           Data.Bits                        (bit, testBit, (.|.))
 import qualified Data.ByteString                  as B
+import qualified Data.ByteString.Char8            as B8
+import           Data.Char                        (toLower)
 import qualified Data.EventList.Absolute.TimeBody as ATB
 import qualified Data.EventList.Relative.TimeBody as RTB
+import           Data.Functor                     ((<&>))
 import qualified Data.HashMap.Strict              as HM
 import           Data.List                        (sort)
 import           Data.List.Extra                  (nubOrd)
@@ -104,7 +107,7 @@ findSection
   -> B.ByteString
   -> (QBArray Word32 QBKey -> StackTraceT m a)
   -> StackTraceT m a
-findSection qb name go = inside ("QB section: " <> show name) $ do
+findSection qb name go = inside ("QB section: " <> show name) do
   let key = qbKeyCRC name
   case [ ary | QBSectionArray k _ ary <- qb, k == key ] of
     [ary] -> go ary
@@ -120,7 +123,7 @@ groupBy3 = go [] where
 listOfPairs :: (Monad m) => QBArray Word32 QBKey -> StackTraceT m [(Word32, Word32)]
 listOfPairs = \case
   QBArrayOfFloatRaw [] -> return []
-  QBArrayOfArray arys -> forM arys $ \case
+  QBArrayOfArray arys -> forM arys \case
     QBArrayOfInteger [x, y] -> return (x, y)
     _                       -> fatal "Expected an array of 2 integers"
   _                   -> fatal "Expected array of arrays"
@@ -128,7 +131,7 @@ listOfPairs = \case
 listOfTriples :: (Monad m) => QBArray Word32 QBKey -> StackTraceT m [(Word32, Word32, Word32)]
 listOfTriples = \case
   QBArrayOfFloatRaw [] -> return []
-  QBArrayOfArray arys -> forM arys $ \case
+  QBArrayOfArray arys -> forM arys \case
     QBArrayOfInteger [x, y, z] -> return (x, y, z)
     _                          -> fatal "Expected an array of 3 integers"
   _                   -> fatal "Expected array of arrays"
@@ -136,7 +139,7 @@ listOfTriples = \case
 parsePart :: (Monad m) => B.ByteString -> [QBSection Word32 QBKey] -> B.ByteString -> StackTraceT m GH3Part
 parsePart dlc qb part = let
   parseTrack diff = do
-    gh3Notes       <- findSection qb (dlc <> "_song_" <> part <> diff) $ \case
+    gh3Notes       <- findSection qb (dlc <> "_song_" <> part <> diff) \case
       QBArrayOfFloatRaw [] -> return []
       QBArrayOfInteger ns  -> groupBy3 ns
       _                    -> fatal "Expected array of integers for notes"
@@ -187,7 +190,7 @@ parseBackground dlc qb sfx inner = do
 parseMarkers :: (Monad m) => QBArray Word32 QBKey -> StackTraceT m [(Word32, Either QBKey T.Text)]
 parseMarkers = \case
   QBArrayOfFloatRaw [] -> return []
-  QBArrayOfStruct marks -> forM marks $ \case
+  QBArrayOfStruct marks -> forM marks \case
     QBStructHeader : items -> let
       time      = [ v | QBStructItemInteger810000     "time"   v <- items ]
       markerKey = [ v | QBStructItemQbKeyString9A0000 "marker" v <- items ]
@@ -214,19 +217,19 @@ parseMidQB dlc qb = do
   gh3P2BossBattle <- findSection qb (dlc <> "_bossbattlep2") listOfPairs -- TODO check
 
   gh3TimeSignatures <- findSection qb (dlc <> "_timesig") listOfTriples
-  gh3FretBars       <- findSection qb (dlc <> "_fretbars") $ \case
+  gh3FretBars       <- findSection qb (dlc <> "_fretbars") \case
     QBArrayOfFloatRaw [] -> return []
     QBArrayOfInteger ns  -> return ns
     _                    -> fatal "Expected array of integers for fretbars"
   gh3Markers        <- findSection qb (dlc <> "_markers") parseMarkers
 
-  gh3BackgroundNotes <- parseBackground dlc qb "_notes" $ \case
+  gh3BackgroundNotes <- parseBackground dlc qb "_notes" \case
     QBArrayOfFloatRaw [] -> return []
-    QBArrayOfArray arys -> forM arys $ \case
+    QBArrayOfArray arys -> forM arys \case
       QBArrayOfInteger xs -> return xs
       _                   -> fatal "Expected array of integers"
     _                   -> fatal "Expected array of arrays"
-  gh3Background      <- parseBackground dlc qb "" $ \case
+  gh3Background      <- parseBackground dlc qb "" \case
     QBArrayOfFloatRaw [] -> return []
     QBArrayOfStruct entries -> mapM parseAnimEvent entries
     _ -> fatal "Expected array of structs for background events"
@@ -234,7 +237,7 @@ parseMidQB dlc qb = do
   return GH3MidQB{..}
 
 makeMidQB :: QBKey -> B.ByteString -> GH3MidQB -> [QBSection Word32 QBKey]
-makeMidQB file dlc GH3MidQB{..} = execWriter $ do
+makeMidQB file dlc GH3MidQB{..} = execWriter do
 
   let makePart str GH3Part{..} = do
         makeDifficulty (str <> "easy"  ) gh3Easy
@@ -273,9 +276,8 @@ makeMidQB file dlc GH3MidQB{..} = execWriter $ do
 
   makeTriples "_timesig" gh3TimeSignatures
   makeSection "_fretbars" $ QBArrayOfInteger gh3FretBars
-  makeSection "_markers" $ QBArrayOfStruct $ do
-    (time, marker) <- gh3Markers
-    return
+  makeSection "_markers" $ QBArrayOfStruct do
+    gh3Markers <&> \(time, marker) ->
       [ QBStructHeader
       , QBStructItemInteger810000 "time" time
       , case marker of
@@ -283,15 +285,14 @@ makeMidQB file dlc GH3MidQB{..} = execWriter $ do
         Right s -> QBStructItemStringW "marker" s
       ]
 
-  makeBackground "_notes" gh3BackgroundNotes $ \str notes -> makeSection str $
+  makeBackground "_notes" gh3BackgroundNotes \str notes -> makeSection str $
     QBArrayOfArray $ map QBArrayOfInteger notes
-  makeBackground "" gh3Background $ \str evts -> makeSection str $ QBArrayOfStruct $ do
-    GH3AnimEvent{..} <- evts
-    return
+  makeBackground "" gh3Background \str evts -> makeSection str $ QBArrayOfStruct do
+    evts <&> \evt ->
       [ QBStructHeader
-      , QBStructItemInteger810000 "time" gh3AnimTime
-      , QBStructItemQbKey8D0000 "scr" gh3AnimScr
-      , QBStructItemStruct8A0000 "params" $ QBStructHeader : gh3AnimParams
+      , QBStructItemInteger810000 "time" evt.gh3AnimTime
+      , QBStructItemQbKey8D0000 "scr" evt.gh3AnimScr
+      , QBStructItemStruct8A0000 "params" $ QBStructHeader : evt.gh3AnimParams
       ]
 
 toSeconds :: Word32 -> U.Seconds
@@ -309,7 +310,8 @@ readGH3TempoMap sigs bars = let
   in U.tempoMapFromBPS $ RTB.fromPairList
     $ zip (0 : map snd temposGaps) (map fst temposGaps)
 
-gh3ToMidi :: SongInfoGH3 -> Bool -> Bool -> HM.HashMap QBKey T.Text -> GH3MidQB -> F.Song (F.OnyxFile U.Beats)
+gh3ToMidi :: SongInfoGH3 -> Bool -> Bool -> HM.HashMap QBKey T.Text -> GH3MidQB
+  -> (F.Song (F.OnyxFile U.Beats), [(T.Text, FilePath)])
 gh3ToMidi songInfo coopTracks coopRhythm bank gh3 = let
   tempos = readGH3TempoMap gh3.gh3TimeSignatures gh3.gh3FretBars
   toBeats :: Word32 -> U.Beats
@@ -333,7 +335,7 @@ gh3ToMidi songInfo coopTracks coopRhythm bank gh3 = let
   sustainTrim :: Word32
   sustainTrim = quot sustainThreshold 2
   getTrack :: GH3Track -> Five.FiveDifficulty U.Beats
-  getTrack trk = emitGuitar5 $ emitTrack hopoThreshold $ fromPairs $ do
+  getTrack trk = emitGuitar5 $ emitTrack hopoThreshold $ fromPairs do
     (time, len, bits) <- trk.gh3Notes
     let pos = toBeats time
         lenTrimmed = if len > sustainThreshold
@@ -350,23 +352,23 @@ gh3ToMidi songInfo coopTracks coopRhythm bank gh3 = let
       ]
   getPart :: GH3Part -> Five.FiveTrack U.Beats
   getPart part = mempty
-    { Five.fiveDifficulties = Map.fromList
+    { Five.difficulties = Map.fromList
       [ (Expert, getTrack part.gh3Expert)
       , (Hard  , getTrack part.gh3Hard  )
       , (Medium, getTrack part.gh3Medium)
       , (Easy  , getTrack part.gh3Easy  )
       ]
-    , Five.fiveOverdrive = makeSpan $ fmap (\(time, len, _notecount) -> (time, len)) part.gh3Expert.gh3StarPower
-    , Five.fivePlayer1 = makeSpan gh3.gh3P1FaceOff
-    , Five.fivePlayer2 = makeSpan gh3.gh3P2FaceOff
+    , Five.overdrive = makeSpan $ fmap (\(time, len, _notecount) -> (time, len)) part.gh3Expert.gh3StarPower
+    , Five.player1 = makeSpan gh3.gh3P1FaceOff
+    , Five.player2 = makeSpan gh3.gh3P2FaceOff
     }
-  makeSpan spans = RTB.fromAbsoluteEventList $ ATB.fromPairList $ sort $ do
+  makeSpan spans = RTB.fromAbsoluteEventList $ ATB.fromPairList $ sort do
     (time, len) <- spans
     [(toBeats time, True), (toBeats $ time + len, False)]
-  trackLead = getPart $ if coopTracks then gh3.gh3CoopGuitar else gh3.gh3Guitar
-  trackCoop = getPart $ if coopTracks then gh3.gh3CoopRhythm else gh3.gh3Rhythm
+  trackLead = getPart if coopTracks then gh3.gh3CoopGuitar else gh3.gh3Guitar
+  trackCoop = getPart if coopTracks then gh3.gh3CoopRhythm else gh3.gh3Rhythm
   events = mempty
-    { eventsSections = fromPairs $ do
+    { sections = fromPairs do
       (t, marker) <- gh3.gh3Markers
       let str = case marker of
             Right s -> s
@@ -376,6 +378,10 @@ gh3ToMidi songInfo coopTracks coopRhythm bank gh3 = let
       return (toBeats t, simpleSection str)
     }
   drums = gh3DrumsToElite toBeats gh3.gh3BackgroundNotes.gh3Drums
+  countin = gh3DrumsToCountin toBeats gh3.gh3BackgroundNotes.gh3Drums
+  usedCountinAudio = case songInfo.gh3Countoff >>= \c -> lookup (B8.map toLower c) gh3CountinMapping of
+    Nothing   -> []
+    Just path -> [("count", path)]
   fixed = mempty
     { F.onyxParts = Map.fromList
       [ ( F.PartGuitar
@@ -389,16 +395,17 @@ gh3ToMidi songInfo coopTracks coopRhythm bank gh3 = let
         )
       ]
     , F.onyxEvents = events
+    , F.onyxSamples = Map.singleton "countin" countin
     }
-  in F.Song
+  in (F.Song
     { F.tempos = tempos
-    , F.timesigs = U.measureMapFromTimeSigs U.Truncate $ RTB.fromAbsoluteEventList $ ATB.fromPairList $ do
+    , F.timesigs = U.measureMapFromTimeSigs U.Truncate $ RTB.fromAbsoluteEventList $ ATB.fromPairList do
       (time, num, den) <- gh3.gh3TimeSignatures
       let unit = 4 / fromIntegral den
           len = fromIntegral num * unit
       return (toBeats time, U.TimeSig len unit)
     , F.tracks = fixed
-    }
+    }, usedCountinAudio)
 
 gh3DrumMapping :: [(Word32, (EliteGem (), D.Hand))]
 gh3DrumMapping =
@@ -428,25 +435,51 @@ gh3DrumMapping =
 gh3DrumsToElite :: (Word32 -> U.Beats) -> [[Word32]] -> EliteDrumTrack U.Beats
 gh3DrumsToElite toBeats notes = let
   fromPairs ps = RTB.fromAbsoluteEventList $ ATB.fromPairList $ sort ps
-  allGemPairs = flip mapMaybe notes $ \case
-    time : pitch : _ -> flip fmap (lookup pitch gh3DrumMapping)
-      $ \(gem, hand) -> (toBeats time, hand <$ gem)
+  allGemPairs = flip mapMaybe notes \case
+    time : pitch : _ -> lookup pitch gh3DrumMapping
+      <&> \(gem, hand) -> (toBeats time, hand <$ gem)
     _                -> Nothing
-  hands = RTB.collectCoincident $ fromPairs $ flip filter allGemPairs $ \case
+  hands = RTB.collectCoincident $ fromPairs $ flip filter allGemPairs \case
     (_time, Kick _) -> False
     _               -> True
   in mempty
-    { tdSticking = RTB.empty -- TODO
-    , tdDifficulties = Map.singleton Expert mempty
+    { sticking = RTB.empty -- TODO
+    , difficulties = Map.singleton Expert mempty
       -- TODO use makeEliteDifficulty so hihats are indifferent
-      { tdGems
+      { gems
         = blipEdgesRBNice
         $ fmap (\fgem -> (D.VelocityNormal, (fgem, TBDefault), Nothing))
         $ RTB.flatten $ fmap nubOrd $ RTB.collectCoincident $ fromPairs allGemPairs
-      , tdFlam = flip RTB.mapMaybe hands $ \case
+      , flam = flip RTB.mapMaybe hands \case
         [x, y] | x == y -> Just ()
         _               -> Nothing
       }
+    }
+
+-- countoff audio process:
+-- * song metadata sets "countoff" to e.g. "hihat01" (case can differ)
+-- * qb.pak.xen has a qb with struct "Countoff_SFX_HiHat01_Hard_container"
+-- * this references "HiHatClosed01" (also random pitch/volume adjustments)
+-- * global_sfx.pak.xen has the "HihatClosed01" xma wav
+gh3CountinMapping :: [(B.ByteString, FilePath)]
+gh3CountinMapping =
+  [ ("hihat01"      , "gh3/hihatclosed01.wav"  )
+  , ("hihat02"      , "gh3/hihatopen02.wav"    ) -- maybe we should lower the volume of this one
+  , ("hihat03"      , "gh3/hihatpedal02.wav"   )
+  , ("sticks_tiny"  , "gh3/stickclicksmall.wav")
+  , ("sticks_normal", "gh3/stickclickmed.wav"  )
+  , ("sticks_huge"  , "gh3/stickclicklarge.wav")
+  ]
+
+gh3DrumsToCountin :: (Word32 -> U.Beats) -> [[Word32]] -> F.SamplesTrack U.Beats
+gh3DrumsToCountin toBeats notes = let
+  fromPairs ps = RTB.fromAbsoluteEventList $ ATB.fromPairList $ sort ps
+  allCountinPairs = flip mapMaybe notes \case
+    time : 70 : _ -> Just (toBeats time, F.simpleTrigger "count")
+    _             -> Nothing
+  in F.SamplesTrack
+    { F.sampleTriggers = fromPairs allCountinPairs
+    , F.sampleNotes    = RTB.empty
     }
 
 makeGH3TrackNotes
@@ -481,7 +514,7 @@ makeGH3TrackNotes tmap newSigs newFretbars notes = let
     lenMS = case len of
       Nothing      -> 1
       Just sustain -> toMilli (pos + sustain) - posMS + sustainTrim
-    bits = foldr (.|.) 0 $ flip map gems $ \(gem, force) -> let
+    bits = foldr (.|.) 0 $ gems <&> \(gem, force) -> let
       force' = force && null (drop 1 gems) -- can't force chords (though gh3LegalHOPOs should force strum)
       in (if force' then bit 5 else 0) .|. case gem of
         Five.Green  -> bit 0

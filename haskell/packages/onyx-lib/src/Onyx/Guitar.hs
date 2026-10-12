@@ -1,10 +1,12 @@
-{-# LANGUAGE DeriveFoldable      #-}
-{-# LANGUAGE DeriveFunctor       #-}
-{-# LANGUAGE DeriveTraversable   #-}
-{-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE NoFieldSelectors    #-}
-{-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE TupleSections       #-}
+{-# LANGUAGE BlockArguments        #-}
+{-# LANGUAGE DeriveFoldable        #-}
+{-# LANGUAGE DeriveFunctor         #-}
+{-# LANGUAGE DeriveTraversable     #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE LambdaCase            #-}
+{-# LANGUAGE NoFieldSelectors      #-}
+{-# LANGUAGE OverloadedRecordDot   #-}
+{-# LANGUAGE TupleSections         #-}
 module Onyx.Guitar where
 
 import           Control.Applicative              ((<|>))
@@ -36,14 +38,14 @@ computeFiveFretSHT algo hopoThreshold fd
 computeFiveFretNotes :: FiveDifficulty U.Beats -> RTB.T U.Beats (Maybe G5.Color, Maybe U.Beats)
 computeFiveFretNotes fd
   = fmap (\(isOpen, (mcol, len)) -> (guard (not isOpen) >> mcol, len))
-  $ applyStatus1 False fd.fiveOpen
-  $ edgeBlips_ minSustainLengthRB fd.fiveGems
+  $ applyStatus1 False fd.open
+  $ edgeBlips_ minSustainLengthRB fd.gems
 
 computeSixFretSHT :: HOPOsAlgorithm -> U.Beats -> SixDifficulty U.Beats -> RTB.T U.Beats ((Maybe Fret, StrumHOPOTap), Maybe U.Beats)
 computeSixFretSHT algo hopoThreshold sd
   = applyForces (getForces6 sd)
   $ strumHOPOTap algo hopoThreshold
-  $ edgeBlips_ minSustainLengthRB sd.sixGems
+  $ edgeBlips_ minSustainLengthRB sd.gems
 
 data HOPOsAlgorithm
   = HOPOsRBGuitar
@@ -122,17 +124,17 @@ strumHOPOTap algo threshold rtb = let
 
 getForces5 :: (NNC.C t) => FiveDifficulty t -> RTB.T t (StrumHOPOTap, Bool)
 getForces5 fd = RTB.merge
-  ((Strum ,) <$> fd.fiveForceStrum)
+  ((Strum ,) <$> fd.forceStrum)
   $ RTB.merge
-    ((HOPO ,) <$> fd.fiveForceHOPO)
-    ((Tap ,) <$> fd.fiveTap)
+    ((HOPO ,) <$> fd.forceHOPO)
+    ((Tap ,) <$> fd.tap)
 
 getForces6 :: (NNC.C t) => SixDifficulty t -> RTB.T t (StrumHOPOTap, Bool)
-getForces6 fd = RTB.merge
-  ((Strum ,) <$> sixForceStrum fd)
+getForces6 sd = RTB.merge
+  ((Strum ,) <$> sd.forceStrum)
   $ RTB.merge
-    ((HOPO ,) <$> sixForceHOPO fd)
-    ((Tap ,) <$> sixTap fd)
+    ((HOPO ,) <$> sd.forceHOPO)
+    ((Tap ,) <$> sd.tap)
 
 -- | Modifies the default strum or HOPO value depending on force events.
 applyForces :: (NNC.C t, Ord color, Ord len) => RTB.T t (StrumHOPOTap, Bool) -> RTB.T t ((color, StrumHOPOTap), len) -> RTB.T t ((color, StrumHOPOTap), len)
@@ -302,7 +304,7 @@ mutedOpensToRBStyle = go True where
   isOpenStrum = \case
     [((Nothing, Strum), _)] -> True
     _                       -> False
-  moveToFret fret = map $ \((_, sht), len) -> ((fret, sht), len)
+  moveToFret fret = map \((_, sht), len) -> ((fret, sht), len)
 
 data FretGroup
   = FretGroupLow -- notes that will be moved up
@@ -336,8 +338,8 @@ noOpenNotesNewAlgorithm input = let
                 then concat
                   [ opens
                   , greens
-                  , map (map $ \((_, sht), len) -> ((Just G5.Yellow, sht), len)) reds
-                  , map (map $ \((_, sht), len) -> ((Just G5.Red, sht), len)) yellows
+                  , map (map \((_, sht), len) -> ((Just G5.Yellow, sht), len)) reds
+                  , map (map \((_, sht), len) -> ((Just G5.Red, sht), len)) yellows
                   , blues
                   , fixWrapping fix6
                   ]
@@ -349,7 +351,7 @@ noOpenNotesNewAlgorithm input = let
       _ -> noWrap
 
   -- initial markings: mark open as Low, single orange as High, chords as High
-  initState = map $ \xs -> case xs of
+  initState = map \xs -> case xs of
     [((Nothing       , _), _)] -> (xs, Just FretGroupLow )
     [((Just G5.Orange, _), _)] -> (xs, Just FretGroupHigh)
     (_ : _ : _               ) -> (xs, Just FretGroupHigh)
@@ -375,7 +377,7 @@ noOpenNotesNewAlgorithm input = let
     [] -> []
 
   -- pass 3: remove Low marking from open notes
-  pass3 = map $ \case
+  pass3 = map \case
     (open@[((Nothing, _), _)], Just FretGroupLow) -> (open, Nothing)
     x                                             -> x
 
@@ -406,9 +408,9 @@ noOpenNotesNewAlgorithm input = let
     _ -> head1 : pass4' tail1
 
   -- pass 5: remaining notes all High
-  pass5 = map $ \(gems, mark) -> (gems, fromMaybe FretGroupHigh mark)
+  pass5 = map \(gems, mark) -> (gems, fromMaybe FretGroupHigh mark)
 
-  applyGroups = map $ \(gems, mark) -> let
+  applyGroups = map \(gems, mark) -> let
     delta = case mark of
       FretGroupLow  -> 1
       FretGroupHigh -> 0
@@ -472,7 +474,7 @@ noOpenNotesOldAlgorithm = let
     = Wait dt [((Just Yellow, sht), len)] $ fallbackFlip rest
   fallbackFlip rest = rest
 
-  openGreen = fmap $ map $ \((mc, sht), len) -> ((fromMaybe Green mc, sht), len)
+  openGreen = fmap $ map \((mc, sht), len) -> ((fromMaybe Green mc, sht), len)
   in openGreen . rev . fixForward . rev . fixForward
 
 -- | For GH3, turns taps into HOPOs, and then turns repeated HOPOs into strums
@@ -499,7 +501,7 @@ gh3LegalHOPOs = RTB.flatten . go . RTB.collectCoincident . noTaps where
 
 -- | Turns all tap notes into HOPO notes.
 noTaps :: RTB.T t ((color, StrumHOPOTap), len) -> RTB.T t ((color, StrumHOPOTap), len)
-noTaps = fmap $ first $ second $ \case Tap -> HOPO; sh -> sh
+noTaps = fmap $ first $ second \case Tap -> HOPO; sh -> sh
 
 cleanEdges :: (NNC.C t, Ord a) => RTB.T t (Bool, a) -> RTB.T t (Bool, a)
 cleanEdges = go . RTB.normalize where
@@ -544,15 +546,15 @@ emitGuitar5PS = emitGuitar5General False
 
 emitGuitar5General :: Bool -> RTB.T U.Beats ((Maybe G5.Color, StrumHOPOTap), Maybe U.Beats) -> FiveDifficulty U.Beats
 emitGuitar5General enhancedOpens notes = FiveDifficulty
-  { fiveForceStrum = makeForce Strum
-  , fiveForceHOPO = makeForce HOPO
-  , fiveTap = makeForce Tap
-  , fiveOpen = if enhancedOpens
+  { forceStrum = makeForce Strum
+  , forceHOPO = makeForce HOPO
+  , tap = makeForce Tap
+  , open = if enhancedOpens
     then RTB.empty
-    else U.trackJoin $ flip RTB.mapMaybe notes $ \case
+    else U.trackJoin $ flip RTB.mapMaybe notes \case
       ((Nothing, _), _) -> Just boolBlip
       _                 -> Nothing
-  , fiveGems = blipEdgesRB_ $ if enhancedOpens
+  , gems = blipEdgesRB_ if enhancedOpens
     then (\((mc, _), len) -> (mc, len)) <$> notes
     else (\((mc, _), len) -> (mc <|> Just Green, len)) <$> noOpenExtSustains standardBlipThreshold standardSustainGap notes
   } where
@@ -564,10 +566,10 @@ emitGuitar5General enhancedOpens notes = FiveDifficulty
 -- | Writes every note with an explicit HOPO/strum force.
 emitGuitar6 :: RTB.T U.Beats ((Maybe Fret, StrumHOPOTap), Maybe U.Beats) -> SixDifficulty U.Beats
 emitGuitar6 notes = SixDifficulty
-  { sixForceStrum = makeForce Strum
-  , sixForceHOPO = makeForce HOPO
-  , sixTap = makeForce Tap
-  , sixGems = blipEdgesRB_ $ fmap (\((mc, _), len) -> (mc, len)) notes
+  { forceStrum = makeForce Strum
+  , forceHOPO = makeForce HOPO
+  , tap = makeForce Tap
+  , gems = blipEdgesRB_ $ fmap (\((mc, _), len) -> (mc, len)) notes
   } where
     shts = fmap (snd . fst) $ RTB.flatten $ fmap (take 1) $ RTB.collectCoincident notes
     shtEdges = fixTapOffCH $ cleanEdges $ U.trackJoin $ fmap (\sht -> fmap (, sht) boolBlip) shts

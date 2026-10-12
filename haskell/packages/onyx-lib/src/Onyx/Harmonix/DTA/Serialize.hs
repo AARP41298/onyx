@@ -1,8 +1,11 @@
-{-# LANGUAGE CPP               #-}
-{-# LANGUAGE DefaultSignatures #-}
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes        #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE CPP                 #-}
+{-# LANGUAGE DefaultSignatures   #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RankNTypes          #-}
 module Onyx.Harmonix.DTA.Serialize where
 
 import           Control.Monad
@@ -29,7 +32,7 @@ type ChunkCodec  m a = ValueCodec m (Chunk T.Text) a
 
 single :: (Monad m) => ChunkCodec m a -> ChunksCodec m a
 single cdc = Codec
-  { codecOut = makeOut $ \x -> [makeValue' cdc x]
+  { codecOut = makeOut \x -> [makeValue' cdc x]
   , codecIn = lift ask >>= \case
     [x] -> inside "single chunk" $ parseFrom x $ codecIn cdc
     _   -> expected "a single chunk"
@@ -54,7 +57,7 @@ chunksList cf = Codec
   { codecOut = makeOut $ map $ makeValue' cf
   , codecIn = do
     chunks <- lift ask
-    forM (zip [0..] chunks) $ \(i, chunk) ->
+    forM (zip [0..] chunks) \(i, chunk) ->
       inside ("list element " ++ show (i :: Int)) $ parseFrom chunk $ codecIn cf
   }
 
@@ -63,7 +66,7 @@ instance (StackChunk a) => StackChunks [a] where
 
 chunksDTA :: (Monad m) => ChunksCodec m (DTA T.Text)
 chunksDTA = Codec
-  { codecOut  = makeOut $ treeChunks . topTree
+  { codecOut  = makeOut (.topTree.treeChunks)
   , codecIn = DTA 0 . Tree 0 <$> lift ask
   }
 
@@ -92,7 +95,7 @@ instance StackChunks Float
 
 instance StackChunk Bool where
   stackChunk = Codec
-    { codecOut = makeOut $ \b -> Int $ if b then 1 else 0
+    { codecOut = makeOut \b -> Int if b then 1 else 0
     , codecIn = lift ask >>= \case
       Int 1                                                 -> return True
       Int 0                                                 -> return False
@@ -130,14 +133,17 @@ instance StackChunk T.Text where
   stackChunk = chunkString
 instance StackChunks T.Text
 
-chunksMaybe :: (Monad m) => ChunksCodec m a -> ChunksCodec m (Maybe a)
+chunksMaybe :: (SendMessage m) => ChunksCodec m a -> ChunksCodec m (Maybe a)
 chunksMaybe cf = Codec
-  { codecOut = makeOut $ \case
+  { codecOut = makeOut \case
     Nothing -> []
     Just x  -> makeValue' cf x
   , codecIn = lift ask >>= \case
-    [] -> return Nothing
-    _  -> Just <$> codecIn cf
+    []         -> return Nothing
+    [Braces _] -> do
+      warn "Ignoring a call to an unrecognized function (DTA curly braces)"
+      return Nothing
+    _          -> Just <$> codecIn cf
   }
 
 instance (StackChunks a) => StackChunks (Maybe a) where
@@ -148,9 +154,9 @@ newtype DictList k a = DictList { fromDictList :: [(k, a)] }
 
 chunksDictList :: (Monad m, Eq k) => ChunkCodec m k -> ChunksCodec m a -> ChunksCodec m (DictList k a)
 chunksDictList ck cv = Codec
-  { codecOut = makeOut $ \mp ->
-    [ Parens $ Tree 0 $ makeValue' ck k : makeValue' cv v | (k, v) <- fromDictList mp ]
-  , codecIn = lift ask >>= \chunks -> fmap DictList $ forM chunks $ \case
+  { codecOut = makeOut \mp ->
+    [ Parens $ Tree 0 $ makeValue' ck k : makeValue' cv v | (k, v) <- mp.fromDictList ]
+  , codecIn = lift ask >>= \chunks -> fmap DictList $ forM chunks \case
     Parens (Tree _ (k : chunks')) -> do
       k' <- inside "parsing dict key" $ parseFrom k $ codecIn ck
       v' <- inside ("dict key " ++ show k) $ parseFrom chunks' $ codecIn cv
@@ -164,7 +170,7 @@ instance (Eq k, StackChunk k, StackChunks a) => StackChunks (DictList k a) where
 chunksDict :: (Monad m, Eq k, Hashable k) => ChunkCodec m k -> ChunksCodec m a -> ChunksCodec m (HM.HashMap k a)
 chunksDict ck cv = Codec
   { codecOut = fmapArg $ void . codecOut dl . DictList . HM.toList
-  , codecIn = HM.fromList . fromDictList <$> codecIn dl
+  , codecIn = HM.fromList . (.fromDictList) <$> codecIn dl
   } where dl = chunksDictList ck cv
 
 instance (Eq k, Hashable k, StackChunk k, StackChunks a) => StackChunks (HM.HashMap k a) where
@@ -175,7 +181,7 @@ chunksParens = single . chunkParens
 
 chunkParens :: (Monad m) => ChunksCodec m a -> ChunkCodec m a
 chunkParens cf = Codec
-  { codecOut = makeOut $ \x -> Parens $ Tree 0 $ makeValue' cf x
+  { codecOut = makeOut \x -> Parens $ Tree 0 $ makeValue' cf x
   , codecIn = lift ask >>= \case
     Parens (Tree _ chunks) -> parseFrom chunks $ codecIn cf
     _                      -> expected "a set of parentheses"
@@ -183,7 +189,7 @@ chunkParens cf = Codec
 
 chunksPair :: (Monad m) => ChunkCodec m a -> ChunkCodec m b -> ChunksCodec m (a, b)
 chunksPair xf yf = Codec
-  { codecOut = makeOut $ \(x, y) -> [makeValue' xf x, makeValue' yf y]
+  { codecOut = makeOut \(x, y) -> [makeValue' xf x, makeValue' yf y]
   , codecIn = lift ask >>= \case
     [x, y] -> liftA2 (,)
       (inside "first item of a pair"  $ parseFrom x $ codecIn xf)
@@ -193,7 +199,7 @@ chunksPair xf yf = Codec
 
 chunksKeyRest :: (Monad m) => ChunkCodec m a -> ChunksCodec m b -> ChunksCodec m (a, b)
 chunksKeyRest xf yf = Codec
-  { codecOut = makeOut $ \(x, y) -> makeValue' xf x : makeValue' yf y
+  { codecOut = makeOut \(x, y) -> makeValue' xf x : makeValue' yf y
   , codecIn = lift ask >>= \case
     x : y -> liftA2 (,)
       (inside "first item of a pair"  $ parseFrom x $ codecIn xf)
@@ -212,9 +218,9 @@ instance (StackChunk a, StackChunk b) => StackChunk (Either a b) where
 
 asAssoc :: (Monad m) => T.Text -> ObjectCodec m [Chunk T.Text] a -> ChunksCodec m a
 asAssoc err codec = Codec
-  { codecIn = inside ("parsing " ++ T.unpack err) $ do
+  { codecIn = inside ("parsing " ++ T.unpack err) do
     obj <- codecIn cdc
-    let f = withReaderT (const $ HM.fromList $ fromDictList obj) . mapReaderT (`evalStateT` HS.empty)
+    let f = withReaderT (const $ HM.fromList obj.fromDictList) . mapReaderT (`evalStateT` HS.empty)
     mapStackTraceT f $ codecIn codec
   , codecOut = fmapArg $ void . codecOut cdc . DictList . makeObject codec
   } where cdc = chunksDictList chunkSym identityCodec

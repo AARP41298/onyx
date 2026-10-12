@@ -1,7 +1,11 @@
 {-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
-{-# LANGUAGE BangPatterns      #-}
-{-# LANGUAGE DeriveFunctor     #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE BangPatterns        #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE DeriveFunctor       #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
 module Onyx.MIDI.Script.Base
 ( Options(..)
 , ShowFormat(..)
@@ -18,6 +22,7 @@ import           Control.Arrow                         (first, second)
 import           Control.Monad                         (guard)
 import           Data.Char                             (toLower)
 import           Data.Fixed                            (Milli)
+import           Data.Functor                          ((<&>))
 import           Data.List                             (intercalate, sort,
                                                         sortBy)
 import           Data.Maybe                            (catMaybes, fromMaybe,
@@ -103,7 +108,7 @@ toStandardMIDI (F.Cons F.Parallel (F.Ticks res) trks) = let
       "Tracks without names (0 is tempo track): " ++ show unnamedIndexes
 toStandardMIDI (F.Cons F.Mixed (F.Ticks res) [trk]) = let
   trk' = RTB.mapTime (\tks -> fromIntegral tks / fromIntegral res) trk
-  (tempos, noTempos) = flip RTB.partition trk' $ \e -> case e of
+  (tempos, noTempos) = flip RTB.partition trk' \case
     E.MetaEvent M.SetTempo{} -> True
     E.MetaEvent M.TimeSig{}  -> True
     _                        -> False
@@ -112,18 +117,18 @@ toStandardMIDI _ = Left "Unsupported MIDI format: must be ticks-based, and must 
 
 fromStandardMIDI :: Options -> StandardMIDI (E.T T.Text) -> (F.T T.Text, Maybe String)
 fromStandardMIDI opts sm = let
-  withNames = flip map (namedTracks sm) $ \(s, rtb) ->
+  withNames = sm.namedTracks <&> \(s, rtb) ->
     RTB.cons 0 (E.MetaEvent (M.TrackName s)) rtb
-  allBeats = tempoTrack sm : withNames
+  allBeats = sm.tempoTrack : withNames
   denoms = flip concatMap allBeats $
     map (denominator . NN.toNumber . fst) . RTB.toPairList
   minRes = foldr lcm 1 denoms
-  res = fromMaybe minRes $ resolution opts
+  res = fromMaybe minRes opts.resolution
   resWarn = if gcd res minRes == minRes
     then Nothing
     else Just $
       "Chosen resolution (" ++ show res ++ ") results in rounding; accurate resolution must be a multiple of " ++ show minRes
-  allTicks = flip map allBeats $
+  allTicks = allBeats <&>
     RTB.discretize . RTB.mapTime (\dt -> dt * fromIntegral res)
   in (F.Cons F.Parallel (F.Ticks $ fromIntegral res) allTicks, resWarn)
 
@@ -167,7 +172,7 @@ showFraction rat = let
   (num, denom) = (numerator part, denominator part)
   in if part == 0
     then show (whole :: Integer)
-    else concat $ case quotRem 100 denom of
+    else concat case quotRem 100 denom of
       (q, 0) -> let -- show decimal if 2 or less places
         hundredths = case show $ num * q of
           [d]      -> ['0', d]
@@ -199,30 +204,30 @@ showAsSeconds tmps bts = let
 
 showStandardMIDI :: Options -> StandardMIDI (E.T T.Text) -> String
 showStandardMIDI opts m = let
-  msrLengths = makeMeasures $ tempoTrack m
+  msrLengths = makeMeasures m.tempoTrack
   msrStarts = scanl (+) 0 msrLengths
-  lastEventPosn = foldr max 0 $ flip map stdTracks $ \(_, t) -> if null t
+  lastEventPosn = foldr max 0 $ stdTracks <&> \(_, t) -> if null t
     then 0
     else last $ map fst t
   msrMap :: Map.Map NN.Rational Int
   msrMap = Map.fromDistinctAscList $
     zip (takeWhile (<= lastEventPosn) msrStarts) [0..]
-  tmps = RTB.mapMaybe getTempo $ tempoTrack m
-  toEventOrNotes trk = if matchNoteOff opts
+  tmps = RTB.mapMaybe getTempo m.tempoTrack
+  toEventOrNotes trk = if opts.matchNoteOff
     then matchEvents trk
     else fmap Event trk
   showStdTrack t = "{\n" ++ concatMap showLine t ++ "}"
   showLine (pos, evts) = let
-    posStr = case showFormat opts of
+    posStr = case opts.showFormat of
       ShowBeats    -> showFraction pos
       ShowMeasures -> showAsMeasure msrMap pos
       ShowSeconds  -> showAsSeconds tmps pos
     oneLine stuff = concat ["  ", posStr, ": ", stuff, ";\n"]
-    in if separateLines opts
+    in if opts.separateLines
       then concatMap (oneLine . showEventOrNote) evts
       else oneLine $ intercalate ", " (map showEventOrNote evts)
-  sortedTracks = sortBy (comparing fst) $ namedTracks m
-  allTracks = ("tempo", tempoTrack m) : named
+  sortedTracks = sortBy (comparing fst) m.namedTracks
+  allTracks = ("tempo", m.tempoTrack) : named
   stdTracks = map (second $ standardTrack . toEventOrNotes) allTracks
   named = map (first show) sortedTracks
   in concatMap (\(n, t) -> n ++ " ch 0 " ++ showStdTrack t ++ "\n\n") stdTracks
@@ -284,7 +289,7 @@ showEventOrNote (Note c p v len) = let
     ]
 
 showEvent :: E.T T.Text -> String
-showEvent evt = unwords $ case evt of
+showEvent evt = unwords case evt of
   E.MetaEvent meta -> case meta of
     M.SequenceNum i         -> ["seqnum", show i]
     M.TextEvent s           -> ["text", show s]

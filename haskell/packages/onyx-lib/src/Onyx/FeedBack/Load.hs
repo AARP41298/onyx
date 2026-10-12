@@ -1,10 +1,12 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DeriveFoldable        #-}
 {-# LANGUAGE DeriveFunctor         #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
+{-# LANGUAGE OverloadedLabels      #-}
+{-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE RecordWildCards       #-}
-{-# LANGUAGE TupleSections         #-}
 module Onyx.FeedBack.Load where
 
 import           Control.Monad                    (guard, void)
@@ -18,6 +20,8 @@ import           Data.Either                      (isLeft)
 import qualified Data.EventList.Absolute.TimeBody as ATB
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Fixed                       (Fixed (..), Milli)
+import           Data.Function                    ((&))
+import           Data.Functor                     ((<&>))
 import qualified Data.HashMap.Strict              as HM
 import           Data.List.Extra                  (nubOrd, partition, sort)
 import qualified Data.Map                         as Map
@@ -44,6 +48,7 @@ import           Onyx.StackTrace                  (SendMessage, StackTraceT,
 import           Onyx.Util.Handle                 (Readable, handleToByteString,
                                                    useHandle)
 import           Onyx.Util.Text.Decode            (decodeGeneral)
+import           Optics                           ((.~))
 import qualified Sound.MIDI.File                  as F
 import qualified Sound.MIDI.File.Event            as E
 import qualified Sound.MIDI.File.Event.Meta       as Meta
@@ -56,7 +61,7 @@ atomStr (Int  i) = T.pack $ show i
 atomStr (Real r) = T.pack $ show (realToFrac r :: Milli)
 
 parseSong :: (Monad m) => RawLines -> StackTraceT m (HM.HashMap T.Text Atom)
-parseSong lns = fmap HM.fromList $ forM lns $ \(k, vs) -> do
+parseSong lns = fmap HM.fromList $ forM lns \(k, vs) -> do
   let key = atomStr k
       val = case vs of
         [atom] -> atom
@@ -70,7 +75,7 @@ readTicks i = if i < 0
 
 parseTrack :: (Monad m) => RawLines -> StackTraceT m (RTB.T Ticks (Event Ticks))
 parseTrack lns = do
-  parsed <- forM lns $ \(k, vs) -> do
+  parsed <- forM lns \(k, vs) -> do
     time <- case k of
       Int i -> readTicks i
       Str s -> fatal $ "Track event has non-number timestamp: " <> show s
@@ -101,14 +106,14 @@ parseChart :: (Monad m) => [RawSection] -> StackTraceT m (Chart Ticks)
 parseChart sects = do
   let (songs, notSongs) = partition (("Song" ==) . fst) sects
   song <- mconcat <$> mapM (parseSong . snd) songs
-  trks <- fmap HM.fromList $ forM notSongs $ \(name, lns) -> do
-    inside (".chart track [" <> T.unpack name <> "]") $ do
+  trks <- fmap HM.fromList $ forM notSongs \(name, lns) -> do
+    inside (".chart track [" <> T.unpack name <> "]") do
       trk <- parseTrack lns
       return (name, trk)
   return $ Chart song trks
 
 chartResolution :: Chart t -> Integer
-chartResolution chart = case HM.lookup "Resolution" $ chartSong chart of
+chartResolution chart = case HM.lookup "Resolution" chart.chartSong of
   Just (Int n) -> n
   _            -> 192
 
@@ -118,12 +123,12 @@ chartToBeats chart = let
   in fmap (\tks -> fromIntegral tks / res) chart
 
 loadChartFile :: (MonadIO m) => FilePath -> StackTraceT m (Chart Ticks)
-loadChartFile fp = inside ("Loading .chart file: " <> fp) $ do
+loadChartFile fp = inside ("Loading .chart file: " <> fp) do
   str <- stackIO $ decodeGeneral <$> B.readFile fp
   scanStack str >>= parseStack >>= parseChart
 
 loadChartReadable :: (MonadIO m) => Readable -> StackTraceT m (Chart Ticks)
-loadChartReadable r = inside "Loading .chart file" $ do
+loadChartReadable r = inside "Loading .chart file" do
   str <- stackIO $ decodeGeneral . BL.toStrict <$> useHandle r handleToByteString
   scanStack str >>= parseStack >>= parseChart
 
@@ -133,7 +138,7 @@ getTempos
   . RTB.mapMaybe (\case BPM bpm -> Just (realToFrac bpm / 60 :: U.BPS); _ -> Nothing)
   . fromMaybe RTB.empty
   . HM.lookup "SyncTrack"
-  . chartTracks
+  . (.chartTracks)
 
 getSignatures :: Chart U.Beats -> U.MeasureMap
 getSignatures
@@ -147,7 +152,7 @@ getSignatures
     )
   . fromMaybe RTB.empty
   . HM.lookup "SyncTrack"
-  . chartTracks
+  . (.chartTracks)
 
 chartToIni :: Chart t -> FoF.Song
 chartToIni chart = def
@@ -162,7 +167,7 @@ chartToIni chart = def
     (0, 0) -> Nothing
     _      -> Just previewStart
   , FoF.previewEndTime = guard (previewEnd /= 0) >> Just previewEnd
-  } where song = chartSong chart
+  } where song = chart.chartSong
           atomStr' x = case atomStr x of
             "" -> Nothing
             s  -> Just s
@@ -185,7 +190,7 @@ traverseWithAbsTime f
 applyChartSwitch :: (NNC.C t, Ord a) => RTB.T t t -> RTB.T t a -> RTB.T t (Bool, a)
 applyChartSwitch switch rtb = let
   (zero, nonzero) = RTB.partition (== NNC.zero) switch
-  nonzero' = U.trackJoin $ flip fmap nonzero $ \len -> RTB.fromPairList
+  nonzero' = U.trackJoin $ nonzero <&> \len -> RTB.fromPairList
     [ (NNC.zero, ((), True ))
     , (len     , ((), False))
     ]
@@ -220,7 +225,7 @@ data TrackEvent t a
 emitTrack :: (NNC.C t, Ord a) => t -> RTB.T t (TrackEvent t a) -> RTB.T t ((a, StrumHOPOTap), Maybe t)
 emitTrack hopoThreshold trk = let
   -- we call nub for each note group in case of two copies of a note (seen in the wild)
-  gnotes = RTB.flatten $ fmap nubOrd $ RTB.collectCoincident $ flip RTB.mapMaybe trk $ \case
+  gnotes = RTB.flatten $ fmap nubOrd $ RTB.collectCoincident $ flip RTB.mapMaybe trk \case
     TrackNote x len -> Just (x, guard (len /= NNC.zero) >> Just len)
     _               -> Nothing
   gh = G.strumHOPOTap G.HOPOsGH3 hopoThreshold gnotes
@@ -230,16 +235,16 @@ emitTrack hopoThreshold trk = let
   flipSH Strum = HOPO
   flipSH HOPO  = Strum
   flipSH Tap   = Tap
-  in flip fmap applied $ \(forced, (tap, ((color, sht), len))) ->
+  in applied <&> \(forced, (tap, ((color, sht), len))) ->
     ((color, if tap then Tap else if forced then flipSH sht else sht), len)
 
 chartToMIDI :: (SendMessage m) => Chart U.Beats -> StackTraceT m (Song (FixedFile U.Beats))
 chartToMIDI chart = Song (getTempos chart) (getSignatures chart) <$> do
-  let insideTrack name fn = inside (".chart track [" <> T.unpack name <> "]") $ do
-        fn $ fromMaybe RTB.empty $ HM.lookup name $ chartTracks chart
+  let insideTrack name fn = inside (".chart track [" <> T.unpack name <> "]") do
+        fn $ fromMaybe RTB.empty $ HM.lookup name chart.chartTracks
       res = fromIntegral $ chartResolution chart
-      insideEvents trk f = flip traverseWithAbsTime trk $ \t x -> do
-        inside ("ticks: " <> show (round $ t * res :: Integer)) $ do
+      insideEvents trk f = flip traverseWithAbsTime trk \t x -> do
+        inside ("ticks: " <> show (round $ t * res :: Integer)) do
           f x
       hopoThreshold = 65/192 -- default threshold according to moonscraper
       eachEvent evt parseNote = case evt of
@@ -274,10 +279,10 @@ chartToMIDI chart = Song (getTempos chart) (getSignatures chart) <$> do
           _               -> Wait dt x $ go b rest
       lengthToBools t = RTB.fromPairList [(0, True), (t, False)]
       parseGRYBO label = do
-        diffs <- fmap Map.fromList $ forM [Easy, Medium, Hard, Expert] $ \diff -> do
-          parsed <- insideTrack (T.pack (show diff) <> label) $ \trk -> do
-            fmap RTB.catMaybes $ insideEvents trk $ \evt -> do
-              eachEvent evt $ \n len -> case n of
+        diffs <- fmap Map.fromList $ forM [Easy, Medium, Hard, Expert] \diff -> do
+          parsed <- insideTrack (T.pack (show diff) <> label) \trk -> do
+            fmap RTB.catMaybes $ insideEvents trk \evt -> do
+              eachEvent evt \n len -> case n of
                 0 -> return $ Just $ TrackNote (Just Green ) len
                 1 -> return $ Just $ TrackNote (Just Red   ) len
                 2 -> return $ Just $ TrackNote (Just Yellow) len
@@ -292,30 +297,30 @@ chartToMIDI chart = Song (getTempos chart) (getSignatures chart) <$> do
           return (diff, parsed)
         let expert = fixBackToBackSolos $ fromMaybe RTB.empty $ Map.lookup Expert diffs
         return mempty
-          { fiveOverdrive = U.trackJoin $ flip fmap expert
-            $ \case TrackOD t -> lengthToBools t; _ -> RTB.empty
-          , fiveSolo = flip RTB.mapMaybe expert
-            $ \case TrackSolo b -> Just b; _ -> Nothing
-          , fivePlayer1 = U.trackJoin $ flip fmap expert
-            $ \case TrackP1 t -> lengthToBools t; _ -> RTB.empty
-          , fivePlayer2 = U.trackJoin $ flip fmap expert
-            $ \case TrackP2 t -> lengthToBools t; _ -> RTB.empty
-          , fiveDifficulties
+          { overdrive = U.trackJoin $ expert <&>
+            \case TrackOD t -> lengthToBools t; _ -> RTB.empty
+          , solo = flip RTB.mapMaybe expert
+            \case TrackSolo b -> Just b; _ -> Nothing
+          , player1 = U.trackJoin $ expert <&>
+            \case TrackP1 t -> lengthToBools t; _ -> RTB.empty
+          , player2 = U.trackJoin $ expert <&>
+            \case TrackP2 t -> lengthToBools t; _ -> RTB.empty
+          , difficulties
             = G.emitGuitar5
             -- we used to remove open extended sustains here but now we support those in CH MIDI format
             . emitTrack hopoThreshold
             <$> diffs
           -- these aren't currently supported by CH (only drum lanes) but could be in the future
-          , fiveTremolo = fmap (\b -> guard b >> Just LaneExpert) $ U.trackJoin $ flip fmap expert
-            $ \case TrackSingleLane t -> lengthToBools t; _ -> RTB.empty
-          , fiveTrill = fmap (\b -> guard b >> Just LaneExpert) $ U.trackJoin $ flip fmap expert
-            $ \case TrackDoubleLane t -> lengthToBools t; _ -> RTB.empty
+          , tremolo = fmap (\b -> guard b >> Just LaneExpert) $ U.trackJoin $ expert <&>
+            \case TrackSingleLane t -> lengthToBools t; _ -> RTB.empty
+          , trill = fmap (\b -> guard b >> Just LaneExpert) $ U.trackJoin $ expert <&>
+            \case TrackDoubleLane t -> lengthToBools t; _ -> RTB.empty
           }
       parseGHL label = do
-        diffs <- fmap Map.fromList $ forM [Easy, Medium, Hard, Expert] $ \diff -> do
-          parsed <- insideTrack (T.pack (show diff) <> label) $ \trk -> do
-            fmap RTB.catMaybes $ insideEvents trk $ \evt -> do
-              eachEvent evt $ \n len -> case n of
+        diffs <- fmap Map.fromList $ forM [Easy, Medium, Hard, Expert] \diff -> do
+          parsed <- insideTrack (T.pack (show diff) <> label) \trk -> do
+            fmap RTB.catMaybes $ insideEvents trk \evt -> do
+              eachEvent evt \n len -> case n of
                 0 -> return $ Just $ TrackNote (Just White1) len
                 1 -> return $ Just $ TrackNote (Just White2) len
                 2 -> return $ Just $ TrackNote (Just White3) len
@@ -330,18 +335,17 @@ chartToMIDI chart = Song (getTempos chart) (getSignatures chart) <$> do
                   return Nothing
           return (diff, parsed)
         let expert = fixBackToBackSolos $ fromMaybe RTB.empty $ Map.lookup Expert diffs
-        return (mempty :: SixTrack U.Beats)
-          { sixOverdrive = U.trackJoin $ flip fmap expert
-            $ \case TrackOD t -> lengthToBools t; _ -> RTB.empty
-          , sixSolo = flip RTB.mapMaybe expert
-            $ \case TrackSolo b -> Just b; _ -> Nothing
-          , sixDifficulties = G.emitGuitar6 . emitTrack hopoThreshold <$> diffs
-          }
+        return $ (mempty :: SixTrack U.Beats)
+          & #overdrive .~ U.trackJoin do
+            (\case TrackOD t -> lengthToBools t; _ -> RTB.empty) <$> expert
+          & #solo .~ RTB.mapMaybe (\case TrackSolo b -> Just b; _ -> Nothing) expert
+          & #difficulties .~ do
+            G.emitGuitar6 . emitTrack hopoThreshold <$> diffs
       parseDrums label = do
-        diffs <- fmap Map.fromList $ forM [Easy, Medium, Hard, Expert] $ \diff -> do
-          parsed <- insideTrack (T.pack (show diff) <> label) $ \trk -> do
-            fmap RTB.catMaybes $ insideEvents trk $ \evt -> do
-              eachEvent evt $ \n len -> case n of
+        diffs <- fmap Map.fromList $ forM [Easy, Medium, Hard, Expert] \diff -> do
+          parsed <- insideTrack (T.pack (show diff) <> label) \trk -> do
+            fmap RTB.catMaybes $ insideEvents trk \evt -> do
+              eachEvent evt \n len -> case n of
 
                 -- first we assign green/orange assuming this is a 4-lane chart.
                 -- then later if there are any orange notes, flip it so the lower numbers are orange and higher are green
@@ -378,7 +382,7 @@ chartToMIDI chart = Song (getTempos chart) (getSignatures chart) <$> do
                   warn $ "Unrecognized note type: N " <> show n <> " " <> show len
                   return Nothing
           let flipped5 = if any (\case TrackNote D.Orange _ -> True; _ -> False) parsed
-                then flip fmap parsed $ \case
+                then parsed <&> \case
                   TrackNote D.Orange           len -> TrackNote (D.Pro D.Green ()) len
                   TrackNote (D.Pro D.Green ()) len -> TrackNote D.Orange           len
                   TrackAccent D.Orange             -> TrackAccent (D.Pro D.Green ())
@@ -390,35 +394,35 @@ chartToMIDI chart = Song (getTempos chart) (getSignatures chart) <$> do
           return (diff, flipped5)
         let expert = fixBackToBackSolos $ fromMaybe RTB.empty $ Map.lookup Expert diffs
         return (mempty :: D.DrumTrack U.Beats)
-          { D.drumOverdrive = U.trackJoin $ flip fmap expert
-            $ \case TrackOD t -> lengthToBools t; _ -> RTB.empty
-          , D.drumActivation = U.trackJoin $ flip fmap expert
-            $ \case TrackActivation t -> lengthToBools t; _ -> RTB.empty
-          , D.drumSolo = flip RTB.mapMaybe expert
-            $ \case TrackSolo b -> Just b; _ -> Nothing
-          , D.drumPlayer1 = U.trackJoin $ flip fmap expert
-            $ \case TrackP1 t -> lengthToBools t; _ -> RTB.empty
-          , D.drumPlayer2 = U.trackJoin $ flip fmap expert
-            $ \case TrackP2 t -> lengthToBools t; _ -> RTB.empty
+          { D.overdrive = U.trackJoin $ expert <&>
+            \case TrackOD t -> lengthToBools t; _ -> RTB.empty
+          , D.activation = U.trackJoin $ expert <&>
+            \case TrackActivation t -> lengthToBools t; _ -> RTB.empty
+          , D.solo = flip RTB.mapMaybe expert
+            \case TrackSolo b -> Just b; _ -> Nothing
+          , D.player1 = U.trackJoin $ expert <&>
+            \case TrackP1 t -> lengthToBools t; _ -> RTB.empty
+          , D.player2 = U.trackJoin $ expert <&>
+            \case TrackP2 t -> lengthToBools t; _ -> RTB.empty
           -- doesn't check kick accent (DrumTrack doesn't support yet)
-          , D.drumKick2x = void $ RTB.filter (\case TrackKick2x -> True; _ -> False) expert
-          , D.drumDifficulties = flip fmap diffs $ \parsed -> D.DrumDifficulty
-            { drumMix         = RTB.empty
-            , drumPSModifiers = RTB.empty
-            , drumGems        = RTB.flatten $ flip fmap (RTB.collectCoincident parsed) $ \instant -> let
+          , D.kick2x = void $ RTB.filter (\case TrackKick2x -> True; _ -> False) expert
+          , D.difficulties = diffs <&> \parsed -> D.DrumDifficulty
+            { mix         = RTB.empty
+            , psModifiers = RTB.empty
+            , gems        = RTB.flatten $ RTB.collectCoincident parsed <&> \instant -> let
               notes   = [ n | TrackNote   n _ <- instant ]
               ghosts  = [ n | TrackGhost  n   <- instant ]
               accents = [ n | TrackAccent n   <- instant ]
-              in flip map notes $ \note -> let
+              in notes <&> \note -> let
                 vel | elem note ghosts  = D.VelocityGhost
                     | elem note accents = D.VelocityAccent
                     | otherwise         = D.VelocityNormal
                 in (note, vel)
             }
           -- TODO this doesn't handle cymbal markers on E/M/H since .mid can't separate them by difficulty
-          , D.drumToms = if any (\case TrackCymbal _ -> True; _ -> False) expert
+          , D.toms = if any (\case TrackCymbal _ -> True; _ -> False) expert
             then let
-              tomInstants = RTB.flatten $ flip fmap (RTB.collectCoincident expert) $ \evts -> let
+              tomInstants = RTB.flatten $ RTB.collectCoincident expert <&> \evts -> let
                 -- emit tom markers for each YBG note that doesn't have a cymbal marker
                 ybg = [ c | TrackNote (D.Pro c ()) _ <- evts ]
                 cymbals = [ c | TrackCymbal c <- evts ]
@@ -426,11 +430,11 @@ chartToMIDI chart = Song (getTempos chart) (getSignatures chart) <$> do
               in U.trackJoin $ fmap (\c -> Wait 0 (c, D.Tom) $ Wait (1/32) (c, D.Cymbal) RNil) tomInstants
             else RTB.empty -- probably not pro authored
           -- ignoring lanes on hard for now
-          , D.drumSingleRoll = fmap (\b -> guard b >> Just LaneExpert) $ U.trackJoin $ flip fmap expert
-            $ \case TrackSingleLane t -> lengthToBools t; _ -> RTB.empty
-          , D.drumDoubleRoll = fmap (\b -> guard b >> Just LaneExpert) $ U.trackJoin $ flip fmap expert
-            $ \case TrackDoubleLane t -> lengthToBools t; _ -> RTB.empty
-          , D.drumEnableDynamics = RTB.singleton 0 () -- so dynamics don't get removed by import process
+          , D.singleRoll = fmap (\b -> guard b >> Just LaneExpert) $ U.trackJoin $ expert <&>
+            \case TrackSingleLane t -> lengthToBools t; _ -> RTB.empty
+          , D.doubleRoll = fmap (\b -> guard b >> Just LaneExpert) $ U.trackJoin $ expert <&>
+            \case TrackDoubleLane t -> lengthToBools t; _ -> RTB.empty
+          , D.enableDynamics = RTB.singleton 0 () -- so dynamics don't get removed by import process
           }
   fixedPartGuitar       <- parseGRYBO "Single" -- ExpertSingle etc.
   fixedPartGuitarGHL    <- parseGHL "GHLGuitar" -- ExpertGHLGuitar etc.
@@ -440,23 +444,23 @@ chartToMIDI chart = Song (getTempos chart) (getSignatures chart) <$> do
   fixedPartRhythm       <- parseGRYBO "DoubleRhythm" -- ExpertDoubleRhythm etc.
   fixedPartGuitarCoop   <- parseGRYBO "DoubleGuitar" -- ExpertDoubleGuitar etc.
   fixedPartDrums        <- parseDrums "Drums" -- ExpertDrums etc.
-  fixedEvents           <- insideTrack "Events" $ \trk -> return mempty
-    { eventsSections = fmap simpleSection $ flip RTB.mapMaybe trk $ \case
+  fixedEvents           <- insideTrack "Events" \trk -> return mempty
+    { sections = fmap simpleSection $ flip RTB.mapMaybe trk \case
       Event t -> T.stripPrefix "section " t
       _       -> Nothing
     -- newly supported in CH 1.1 public test build. but maybe this will cause
     -- issues if people don't put activation (S 64) on non-drums instruments?
-    , eventsCoda = flip RTB.mapMaybe trk $ \case
+    , coda = flip RTB.mapMaybe trk \case
       Event "coda" -> Just ()
       _            -> Nothing
     }
   -- CH-format lyrics
-  fixedPartVocals <- insideTrack "Events" $ \trk -> let
-    lyrics = flip RTB.mapMaybe trk $ \case
-      Event t -> flip fmap (T.stripPrefix "lyric " t) $ T.replace "’" "'" . T.strip
+  fixedPartVocals <- insideTrack "Events" \trk -> let
+    lyrics = flip RTB.mapMaybe trk \case
+      Event t -> T.stripPrefix "lyric " t <&> T.replace "’" "'" . T.strip
       -- TODO probably more char fixes, also maybe it should be moved to song compile time
       _       -> Nothing
-    phrases = flip RTB.mapMaybe trk $ \case
+    phrases = flip RTB.mapMaybe trk \case
       Event "phrase_start" -> Just True
       Event "phrase_end"   -> Just False
       _                    -> Nothing
@@ -466,8 +470,8 @@ chartToMIDI chart = Song (getTempos chart) (getSignatures chart) <$> do
     endPhrases True  RNil                        = Wait (0.5 :: U.Beats) False RNil
     endPhrases False RNil                        = RNil
     in return mempty
-      { vocalLyrics = lyrics
-      , vocalPhrase1 = endPhrases False $ RTB.normalize $ RTB.merge (fmap Left phrases) (fmap Right lyrics)
+      { lyrics = lyrics
+      , phrase1 = endPhrases False $ RTB.normalize $ RTB.merge (fmap Left phrases) (fmap Right lyrics)
       }
   let fixedPartDrums2x      = mempty
       fixedPartRealDrumsPS  = mempty

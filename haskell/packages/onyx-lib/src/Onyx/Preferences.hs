@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments      #-}
 {-# LANGUAGE DeriveAnyClass      #-}
 {-# LANGUAGE DeriveGeneric       #-}
 {-# LANGUAGE LambdaCase          #-}
@@ -13,6 +14,7 @@ import           Control.Monad.IO.Class
 import qualified Data.Aeson             as A
 import           Data.Default.Class
 import           Data.Hashable          (Hashable (..))
+import qualified Data.Text              as T
 import           GHC.Conc               (getNumProcessors, setNumCapabilities)
 import           GHC.Generics           (Generic (..))
 import           Onyx.Codec.Common
@@ -24,7 +26,8 @@ import           System.FilePath        (takeDirectory, (</>))
 import           System.Info            (os)
 
 data Preferences = Preferences
-  { prefMagma         :: MagmaSetting
+  { prefLanguageCode  :: Maybe T.Text
+  , prefMagma         :: MagmaSetting
   , prefBlackVenue    :: Bool
   , prefLabel2x       :: Bool
   , prefTrimXbox      :: Bool
@@ -48,7 +51,7 @@ data Preferences = Preferences
   , prefArtistSort    :: Bool -- in gh2/gh3, sort by artist then title
   , prefThreads       :: Maybe Int
   , prefDetectMuted   :: Bool
-  , prefLegalTempos   :: Bool -- for RB3/RB2 export, try to modfiy tempos to be in Magma-legal range
+  , prefLegalTempos   :: Bool -- for RB3/RB2 export, try to modify tempos to be in Magma-legal range
   , prefEliteLayout   :: [EliteDrumLayoutHint]
   , prefPreviewFPS    :: Int
   , prefCHDownmix     :: Bool
@@ -57,10 +60,12 @@ data Preferences = Preferences
   , prefPackEncoding  :: Maybe RBEncoding -- should quick convert packs enforce a single encoding
   , prefWaveform      :: Bool -- display audio waveform in None or Venue preview backgrounds
   , prefLeftyFlip     :: Bool
+  , prefReduceFrets   :: Bool -- should auto 5-fret reductions use only 3 frets on Easy and 4 frets on Medium
   }
 
 instance StackJSON Preferences where
-  stackJSON = asObject "Preferences" $ do
+  stackJSON = asObject "Preferences" do
+    prefLanguageCode  <- (.prefLanguageCode ) =. opt  Nothing          "language-code"   stackJSON
     prefMagma         <- (.prefMagma        ) =. fill MagmaRequire     "magma"           stackJSON
     prefBlackVenue    <- (.prefBlackVenue   ) =. fill False            "black-venue"     stackJSON
     prefLabel2x       <- (.prefLabel2x      ) =. fill True             "label-2x"        stackJSON
@@ -94,6 +99,7 @@ instance StackJSON Preferences where
     prefPackEncoding  <- (.prefPackEncoding ) =. fill (Just Latin1)    "pack-encoding"   stackJSON
     prefWaveform      <- (.prefWaveform     ) =. opt  True             "waveform"        stackJSON
     prefLeftyFlip     <- (.prefLeftyFlip    ) =. opt  False            "lefty-flip"      stackJSON
+    prefReduceFrets   <- (.prefReduceFrets  ) =. opt  False            "reduce-frets"    stackJSON
     return Preferences{..}
 
 instance Default Preferences where
@@ -107,11 +113,11 @@ readPreferences = do
     True  -> loadYaml cfg
 
 savePreferences :: (MonadIO m) => Preferences -> m ()
-savePreferences prefs = liftIO $ do
+savePreferences prefs = liftIO do
   cfg <- Dir.getXdgDirectory Dir.XdgConfig "onyx.yml"
   let configFolder = takeDirectory cfg
   exists <- Dir.doesDirectoryExist configFolder
-  unless exists $ do
+  unless exists do
     -- From getXdgDirectory docs, https://github.com/haskell/directory/blob/f6b288bd96/System/Directory.hs#L1209
     --   Note: The directory may not actually exist, in which case you would need
     --   to create it with file mode @700@ (i.e. only accessible by the owner).
@@ -133,7 +139,7 @@ data MagmaSetting
   deriving (Eq, Ord, Show, Enum, Bounded, Generic, Hashable)
 
 instance StackJSON MagmaSetting where
-  stackJSON = enumCodecFull "a Magma setting from {require, try, disable}" $ \case
+  stackJSON = enumCodecFull "a Magma setting from {require, try, disable}" \case
     MagmaRequire -> is "require" |?> is (A.Bool True)
     MagmaTry     -> is "try"
     MagmaDisable -> is "disable" |?> is (A.Bool False)
@@ -141,7 +147,7 @@ instance StackJSON MagmaSetting where
 applyThreads :: Preferences -> IO ()
 applyThreads prefs = do
   procs <- getNumProcessors
-  setNumCapabilities $ case prefs.prefThreads of
+  setNumCapabilities case prefs.prefThreads of
     Nothing -> procs
     Just n  -> min n procs
 
@@ -153,7 +159,7 @@ data EliteDrumLayoutHint
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 instance StackJSON EliteDrumLayoutHint where
-  stackJSON = enumCodec "an elite drums layout hint" $ \case
+  stackJSON = enumCodec "an elite drums layout hint" \case
     EDLeftCrossHand  -> "cross-hand"
     EDLeftOpenHand   -> "open-hand"
     EDRightFarCrash  -> "far-crash"
@@ -165,7 +171,7 @@ data CHAudioFormat
   deriving (Eq, Enum, Bounded)
 
 instance StackJSON CHAudioFormat where
-  stackJSON = enumCodec "a CH audio format" $ \case
+  stackJSON = enumCodec "a CH audio format" \case
     CHAudioOggVorbis -> "ogg"
     CHAudioOpus      -> "opus"
 
@@ -175,14 +181,14 @@ data RBEncoding
   deriving (Eq, Ord, Show, Enum, Bounded, Generic, Hashable)
 
 instance StackJSON RBEncoding where
-  stackJSON = enumCodec "an RB dta encoding" $ \case
+  stackJSON = enumCodec "an RB dta encoding" \case
     Latin1 -> "latin1"
     UTF8   -> "utf8"
 
 getDefaultPS3Dir :: (SendMessage m, MonadIO m) => StackTraceT m (Maybe FilePath)
 getDefaultPS3Dir = do
   prefs <- readPreferences
-  let checkPath p = stackIO $ do
+  let checkPath p = stackIO do
         p' <- fixFileCase p
         b <- Dir.doesDirectoryExist p'
         return $ guard b >> Just p'

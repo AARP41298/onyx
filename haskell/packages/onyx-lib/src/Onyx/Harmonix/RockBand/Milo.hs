@@ -1,8 +1,12 @@
 {-
 Thanks to PyMilo, LibForge, and MiloMod for information on these structures.
 -}
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE BlockArguments        #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE LambdaCase            #-}
+{-# LANGUAGE NoFieldSelectors      #-}
+{-# LANGUAGE OverloadedRecordDot   #-}
+{-# LANGUAGE OverloadedStrings     #-}
 module Onyx.Harmonix.RockBand.Milo
 ( module Onyx.Harmonix.RockBand.Milo.Compression
 , module Onyx.Harmonix.RockBand.Milo.Dir
@@ -15,7 +19,7 @@ module Onyx.Harmonix.RockBand.Milo
 , miloToFolder
 ) where
 
-import           Control.Monad                           (forM_)
+import           Control.Monad                           (forM, forM_)
 import           Control.Monad.IO.Class
 import           Data.Bifunctor                          (bimap)
 import           Data.Binary.Get                         (runGetOrFail)
@@ -52,10 +56,24 @@ loadMilo fin = do
   inside ("Parsing milo file: " <> fin) $ runGetM parseMiloFile dec
 
 miloToFolder :: MiloDir -> (B.ByteString, Folder B.ByteString BL.ByteString)
-miloToFolder dir = (miloName dir, Folder
-  { folderFiles      = zip (map snd $ miloEntryNames dir) (miloFiles dir)
-  , folderSubfolders = map miloToFolder $ miloSubdirs dir
-  })
+miloToFolder dir = (dir.name, miloDirFolder dir)
+
+miloDirFolder :: MiloDir -> Folder B.ByteString BL.ByteString
+miloDirFolder dir = Folder
+  { folderFiles      = zip (map snd dir.entryNames) $ map (.data_) dir.files
+  , folderSubfolders = concat
+    [ map miloToFolder $ miloSubdirs dir
+    -- an entry's inlined dir goes in a folder beside the entry's own file,
+    -- named after it, since the entry name is already taken by that file
+    , [ (name <> inlineDirSuffix, miloDirFolder inline)
+      | ((_, name), entry) <- zip dir.entryNames dir.files
+      , Just inline <- [entry.inlineDir]
+      ]
+    ]
+  }
+
+inlineDirSuffix :: B.ByteString
+inlineDirSuffix = "_inline_dir"
 
 -- | Decompresses a milo and tries to parse the directory structure inside.
 -- Extracts either the parsed structure and its files, or the raw split pieces.
@@ -67,7 +85,7 @@ unpackMilo fin dout = do
   stackIO $ BL.writeFile (dout </> "decompressed.bin") dec
   case runGetOrFail parseMiloFile dec of
     Left (_, pos, err) -> do
-      stackIO $ forM_ (zip [0..] $ breakMilo $ BL.toStrict dec) $ \(i, piece) -> do
+      stackIO $ forM_ (zip [0..] $ breakMilo $ BL.toStrict dec) \(i, piece) -> do
         B.writeFile (dout </> pieceName i) piece
       inside "Parsing .milo structure" $ inside ("position " <> show pos) $ warn err
       lg "Couldn't parse milo structure; split into simple pieces."
@@ -76,9 +94,17 @@ unpackMilo fin dout = do
           folder' = bimap TE.decodeLatin1 (makeHandle "" . byteStringSimpleHandle) folder
       stackIO $ saveHandleFolder folder' $ dout </> B8.unpack topname
       let removeFiles dir = dir
-            { miloSubdirs = map removeFiles $ miloSubdirs dir
-            , miloFiles = map (const "(file contents)") $ miloFiles dir
+            { objectDir = dir.objectDir
+              { subdirs = map removeFilesSubdir dir.objectDir.subdirs
+              }
+            , files = do
+              entry <- dir.files
+              return entry
+                { data_ = "(file contents)"
+                , inlineDir = fmap removeFiles entry.inlineDir
+                }
             }
+          removeFilesSubdir sd = sd { dir = fmap removeFiles sd.dir }
       stackIO $ writeFile (dout </> "parsed.txt") $ show $ removeFiles topdir
       lg "Recognized and extracted milo contents."
 
@@ -86,7 +112,7 @@ unpackMilo fin dout = do
 packMilo :: (MonadIO m, SendMessage m) => FilePath -> FilePath -> StackTraceT m ()
 packMilo din fout = do
   bs <- stackIO (Dir.doesFileExist $ din </> "piece000.bin") >>= \case
-    True -> stackIO $ do
+    True -> stackIO do
       -- glue raw pieces together
       let findPieces n = Dir.doesFileExist (din </> pieceName n) >>= \case
             True  -> findPieces $ n + 1
@@ -100,14 +126,23 @@ packMilo din fout = do
         Left (_, pos, err) -> inside "Re-parsing milo decompressed.bin"
           $ inside ("position " <> show pos) $ fatal err
         Right (_, _, topdir) -> do
-          let reload parent milodir = do
-                let thisout = parent </> B8.unpack (miloName milodir)
-                newFiles <- mapM (BL.readFile . (thisout </>) . B8.unpack . snd)
-                  $ miloEntryNames milodir
-                newDirs <- mapM (reload thisout) $ miloSubdirs milodir
+          let reload parent milodir
+                = reloadIn (parent </> B8.unpack milodir.name) milodir
+              reloadIn thisout milodir = do
+                newFiles <- forM (zip milodir.entryNames milodir.files)
+                  \((_, name), entry) -> do
+                    newData <- BL.readFile $ thisout </> B8.unpack name
+                    newInline <- forM entry.inlineDir $ reloadIn
+                      $ thisout </> B8.unpack (name <> inlineDirSuffix)
+                    return entry { data_ = newData, inlineDir = newInline }
+                newSubdirs <- forM milodir.objectDir.subdirs \sd -> do
+                  newDir <- mapM (reload thisout) sd.dir
+                  return sd { dir = newDir }
                 return milodir
-                  { miloFiles = newFiles
-                  , miloSubdirs = newDirs
+                  { files = newFiles
+                  , objectDir = milodir.objectDir
+                    { subdirs = newSubdirs
+                    }
                   }
           topdir' <- stackIO $ reload din topdir
           return $ makeMiloFile topdir'

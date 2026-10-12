@@ -3,6 +3,7 @@ Ported from
 https://github.com/LagoLunatic/wwrando/blob/46f14efd873c6ebde1782576070a87bc22ca5b69/wwlib/gcm.py
 -}
 {-# LANGUAGE BangPatterns          #-}
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
@@ -19,7 +20,6 @@ import qualified Data.ByteString      as B
 import qualified Data.ByteString.Lazy as BL
 import           Data.List.NonEmpty   (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty   as NE
-import qualified Data.Vector          as V
 import           Data.Word
 import           Onyx.Util.Binary     (runGetM)
 import           Onyx.Util.Handle
@@ -43,7 +43,7 @@ data File = File
   } deriving (Show)
 
 loadGCM :: Readable -> IO (Folder B.ByteString Readable)
-loadGCM gcm = useHandle gcm $ \h -> do
+loadGCM gcm = useHandle gcm \h -> do
 
   let read_u32 off = do
         hSeek h AbsoluteSeek off
@@ -65,7 +65,7 @@ loadGCM gcm = useHandle gcm $ \h -> do
   -- read_filesystem
   num_file_entries <- read_u32 $ fromIntegral fst_offset + 8
   let fnt_offset = fst_offset + num_file_entries * 0xC
-  entries <- forM [0 .. num_file_entries - 1] $ \file_index -> do
+  entries <- forM [0 .. num_file_entries - 1] \file_index -> do
     let file_entry_offset = fst_offset + file_index * 0xC
     -- FileEntry.read
     is_dir_and_name_offset <- read_u32 $ fromIntegral file_entry_offset
@@ -79,7 +79,7 @@ loadGCM gcm = useHandle gcm $ \h -> do
       0 -> return ""
       _ -> read_str_until_null_character $ fromIntegral $ fnt_offset + name_offset
 
-    return $ if is_dir
+    return if is_dir
       then let
         parent_fst_index = file_data_offset_or_parent_fst_index
         next_fst_index = file_size_or_next_fst_index
@@ -89,25 +89,28 @@ loadGCM gcm = useHandle gcm $ \h -> do
         file_size = file_size_or_next_fst_index
         in FileEntry File{..}
 
-  let entryArray = V.fromList entries
-      makeFile path off size = (path, subHandle (<> (" : " <> show path)) off (Just size) gcm)
-      -- TODO for files, there may be another indicator as to which directory they're in
-      -- (not just last directory seen). order seems to be weird in .nkit.iso files
-      makeFiles currentParents = \case
-        [] -> []
-        DirEntry dir : rest -> let
-          getNewParents d = case d.file_index of
-            0 -> []
-            _ -> case entryArray V.!? fromIntegral d.parent_fst_index of
-              Just (DirEntry parent) -> getNewParents parent <> [d.name]
-              _                      -> ["broken-path"]
-          in makeFiles (getNewParents dir) rest
-        FileEntry file : rest -> let
-          newFile = makeFile
-            (NE.prependList currentParents $ pure file.name)
-            (fromIntegral file.file_data_offset)
-            (fromIntegral file.file_size)
-          in newFile : makeFiles currentParents rest
+  let makeFile path off size = (path, subHandle (<> (" : " <> show path)) off (Just size) gcm)
+      -- A directory's next_fst_index is one past the index of its last
+      -- descendant. So an entry belongs to the innermost open directory whose
+      -- range still contains it; entries after a subfolder's range go back to
+      -- the parent (e.g. files sorted after "CVS" are not inside CVS).
+      -- The stack holds (next_fst_index, name) for open directories, innermost first.
+      makeFiles _ [] = []
+      makeFiles openDirs (entry : rest) = let
+        index = case entry of
+          DirEntry  dir  -> dir.file_index
+          FileEntry file -> file.file_index
+        openDirs' = dropWhile (\(end, _) -> index >= end) openDirs
+        in case entry of
+          DirEntry dir -> if dir.file_index == 0
+            then makeFiles openDirs' rest -- root
+            else makeFiles ((dir.next_fst_index, dir.name) : openDirs') rest
+          FileEntry file -> let
+            newFile = makeFile
+              (NE.prependList (reverse $ map snd openDirs') $ pure file.name)
+              (fromIntegral file.file_data_offset)
+              (fromIntegral file.file_size)
+            in newFile : makeFiles openDirs' rest
       normalFiles = makeFiles [] entries
 
   -- read_system_data
@@ -122,12 +125,12 @@ loadGCM gcm = useHandle gcm $ \h -> do
       apploader_img = makeFile ("sys" :| ["apploader.img"]) 0x2440 (fromIntegral apploader_full_size)
 
   dol_offset <- read_u32 0x420
-  dol_sizes_text <- forM [0..6] $ \i -> do -- Text sections
+  dol_sizes_text <- forM [0..6] \i -> do -- Text sections
     section_offset <- read_u32 $ fromIntegral dol_offset + 0x00 + i*4
     section_size <- read_u32 $ fromIntegral dol_offset + 0x90 + i*4
     let section_end_offset = section_offset + section_size
     return section_end_offset
-  dol_sizes_data <- forM [0..10] $ \i -> do -- Data sections
+  dol_sizes_data <- forM [0..10] \i -> do -- Data sections
     section_offset <- read_u32 $ fromIntegral dol_offset + 0x1C + i*4
     section_size <- read_u32 $ fromIntegral dol_offset + 0xAC + i*4
     let section_end_offset = section_offset + section_size

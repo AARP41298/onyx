@@ -1,8 +1,11 @@
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms   #-}
-{-# LANGUAGE RecordWildCards   #-}
-{-# LANGUAGE ViewPatterns      #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE PatternSynonyms     #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE ViewPatterns        #-}
 module Onyx.DDR.DWI where
 
 import           Control.Monad                    (forM, guard)
@@ -10,6 +13,7 @@ import           Data.Char                        (isSpace)
 import qualified Data.EventList.Absolute.TimeBody as ATB
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Foldable                    (toList)
+import           Data.Functor                     ((<&>))
 import qualified Data.Map                         as Map
 import           Data.Maybe                       (catMaybes, fromMaybe,
                                                    listToMaybe, mapMaybe)
@@ -60,7 +64,7 @@ readDWI lns = do
   dwi_FREEZE      <- getSMNumberPairs lns "FREEZE"
   dwi_GAP         <- getSMNumber lns "GAP"
   dwi_SAMPLESTART <- getSMNumber lns "SAMPLESTART"
-  dwi_Notes       <- fmap catMaybes $ forM lns $ \(dwin_Mode, contents) -> do
+  dwi_Notes       <- fmap catMaybes $ forM lns \(dwin_Mode, contents) -> do
     if elem dwin_Mode ["SINGLE", "DOUBLE", "COUPLE", "SOLO"]
       then case contents of
         dwin_Difficulty : nm : dwin_Notes : rest -> do
@@ -100,7 +104,7 @@ convertDWItoSM DWI{..} = SM
     = toList ((\bpm -> (0, bpm)) <$> dwi_BPM) -- initial bpm
     <> map (\(sixteenths, bpm) -> (sixteenths / 4, bpm)) dwi_CHANGEBPM -- changes are given in 16th note positions?
   , sm_STOPS            = map (\(sixteenths, ms) -> (sixteenths / 4, ms / 1000)) dwi_FREEZE
-  , sm_NOTES            = flip mapMaybe dwi_Notes $ \DWINotes{..} -> do
+  , sm_NOTES            = flip mapMaybe dwi_Notes \DWINotes{..} -> do
     guard $ dwin_Mode == "SINGLE" -- TODO add DOUBLE/COUPLE/SOLO
     diff <- case dwin_Difficulty of
       "BEGINNER" -> Just "Beginner"
@@ -150,11 +154,12 @@ getDWINotes top = go 24 (T.filter (not . isSpace) top) "" where
 -- Results are already RTB.collectCoincident-ed
 getDWIArrows :: (NNC.C t) => RTB.T t DWINote -> RTB.T t [(Arrow, Char)]
 getDWIArrows = RTB.filter (not . null) . go Set.empty where
+  go :: Set.Set Arrow -> RTB.T t DWINote -> RTB.T t [(Arrow, Char)]
   go _    RNil                = RNil
   go held (Wait dt note rest) = let
-    arrows = charArrows $ dwi_Note note
-    holds = maybe [] charArrows $ dwi_Hold note
-    this = flip map arrows $ \arrow -> if elem arrow holds
+    arrows = charArrows note.dwi_Note
+    holds = maybe [] charArrows note.dwi_Hold
+    this = arrows <&> \arrow -> if elem arrow holds
       then (arrow, '2') -- start hold
       else if Set.member arrow held
         then (arrow, '3') -- end hold
@@ -190,7 +195,7 @@ notesDWItoSM dwi = let
     in do
       t <- [0, division .. 191]
       let instant = fromMaybe [] $ Map.lookup t barMap
-      return $ T.pack $ do
+      return $ T.pack do
         arrow <- [ArrowL, ArrowD, ArrowU, ArrowR]
         return $ fromMaybe '0' $ lookup arrow instant
   in makeBars arrows

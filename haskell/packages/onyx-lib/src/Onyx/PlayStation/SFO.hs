@@ -1,12 +1,11 @@
 {-
 PARAM.SFO format
 -}
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE RecordWildCards       #-}
 {-# LANGUAGE StrictData            #-}
 module Onyx.PlayStation.SFO where
 
@@ -35,13 +34,13 @@ data SFO = SFO
 
 readSFO :: (MonadFail m) => BL.ByteString -> m SFO
 readSFO bs = do
-  (version, keysStart, dataStart, numEntries) <- flip runGetM bs $ do
+  (version, keysStart, dataStart, numEntries) <- flip runGetM bs do
     magic <- getByteString 4
     unless (magic == "\0PSF") $ fail $ "Unrecognized magic identifier in .SFO: " <> show magic
     (,,,) <$> getWord32le <*> getWord32le <*> getWord32le <*> getWord32le
   let toText = TE.decodeUtf8With lenientDecode . BL.toStrict
-  entries <- flip runGetM (BL.drop 0x14 bs) $ do
-    replicateM (fromIntegral numEntries) $ do
+  entries <- flip runGetM (BL.drop 0x14 bs) do
+    replicateM (fromIntegral numEntries) do
       keyOffset  <- getWord16le
       dataFormat <- getWord16be
       usedBytes  <- getWord32le

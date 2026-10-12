@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DeriveFoldable        #-}
 {-# LANGUAGE DeriveFunctor         #-}
 {-# LANGUAGE DeriveTraversable     #-}
@@ -5,6 +6,7 @@
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiWayIf            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
+{-# LANGUAGE OverloadedLabels      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE PatternSynonyms       #-}
@@ -12,7 +14,6 @@
 {-# LANGUAGE StrictData            #-}
 {-# LANGUAGE TupleSections         #-}
 {-# LANGUAGE ViewPatterns          #-}
-{-# OPTIONS_GHC -fno-warn-ambiguous-fields #-}
 module Onyx.Import.GuitarHero2 where
 
 import           Control.Arrow                    (second)
@@ -27,6 +28,8 @@ import qualified Data.ByteString.Lazy             as BL
 import           Data.Default.Class               (def)
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Foldable                    (toList)
+import           Data.Function                    ((&))
+import           Data.Functor                     ((<&>))
 import qualified Data.HashMap.Strict              as HM
 import           Data.Int
 import           Data.List.Extra                  (firstJust, (\\))
@@ -37,8 +40,9 @@ import           Data.Maybe                       (catMaybes, fromMaybe, isJust)
 import qualified Data.Text                        as T
 import           Data.Text.Encoding               (decodeLatin1)
 import           Onyx.Audio                       (Audio (..))
-import           Onyx.Audio.VGS                   (splitOutVGSChannels,
-                                                   vgsChannelCount)
+import           Onyx.Audio.VGS                   (VGS (..), VGSHeader (..),
+                                                   decryptReadVGS,
+                                                   splitOutVGSChannels)
 import           Onyx.Harmonix.Ark
 import           Onyx.Harmonix.Ark.GH2            (GH2DXExtra (..),
                                                    readSongListGH2,
@@ -63,6 +67,7 @@ import           Onyx.Sections                    (fromGH2Section,
                                                    simpleSection)
 import           Onyx.StackTrace
 import           Onyx.Util.Handle
+import           Optics                           (set, (.~))
 import qualified Sound.MIDI.Util                  as U
 import           System.FilePath                  ((<.>))
 import           Text.Read                        (readMaybe)
@@ -77,11 +82,6 @@ getSongList gen = do
     []        -> fatal "Couldn't find songs.dtb"
   D.decodeDecryptDTB dtb >>= readSongListGH2
 
-getImports :: [(T.Text, SongPackage)] -> [(T.Text, (ImportMode, SongPackage))]
-getImports = concatMap $ \(t, pkg) -> case songCoop pkg of
-  Nothing -> [(t, (ImportSolo, pkg))]
-  Just _  -> [(t, (ImportSolo, pkg)), (t, (ImportCoop, pkg))]
-
 data ImportMode = ImportSolo | ImportCoop
   deriving (Eq)
 
@@ -89,36 +89,40 @@ importGH2 :: (SendMessage m, MonadResource m) => FilePath -> Folder T.Text Reada
 importGH2 displayPath gen = do
   (hdr, arks) <- stackIO $ loadGEN gen
   folder <- loadArkFolder hdr arks
-  map (\(_, (mode, pkg)) -> importGH2Song mode pkg displayPath folder) . getImports <$> getSongList gen
+  getSongList gen <&> concatMap \(_, pkg) ->
+    importGH2Song ImportSolo pkg.song pkg displayPath folder
+    : case pkg.songCoop of
+      Nothing   -> []
+      Just coop -> [importGH2Song ImportCoop coop pkg displayPath folder]
 
 importGH2MIDI :: ImportMode -> Song -> F.Song (GH2File U.Beats) -> F.Song (F.OnyxFile U.Beats)
-importGH2MIDI mode songChunk (F.Song tmap mmap gh2) = F.Song tmap mmap $ let
+importGH2MIDI mode songChunk (F.Song tmap mmap gh2) = F.Song tmap mmap let
   convertPart :: PartTrack U.Beats -> RB.FiveTrack U.Beats
   convertPart part = RB.FiveTrack
-    { RB.fiveDifficulties = flip fmap (partDifficulties part) $ \diff -> mempty
-      { RB.fiveGems       = fmap (fmap Just) $ partGems diff
+    { RB.difficulties = part.partDifficulties <&> \diff -> mempty
+      { RB.gems       = fmap (fmap Just) diff.partGems
       -- stuff that we may have written for future gh2dx support
-      , RB.fiveForceHOPO  = partForceHOPO  diff
-      , RB.fiveForceStrum = partForceStrum diff
-      , RB.fiveTap        = partForceTap   diff
+      , RB.forceHOPO  = diff.partForceHOPO
+      , RB.forceStrum = diff.partForceStrum
+      , RB.tap        = diff.partForceTap
       }
-    , RB.fiveMood         = RTB.empty -- TODO
-    , RB.fiveHandMap      = flip fmap (partHandMap part) $ \case
+    , RB.mood         = RTB.empty -- TODO
+    , RB.handMap      = part.partHandMap <&> \case
       HandMap_Default   -> RB.HandMap_Default
       HandMap_DropD2    -> RB.HandMap_DropD2
       HandMap_Solo      -> RB.HandMap_Solo
       HandMap_NoChords  -> RB.HandMap_NoChords
       HandMap_AllChords -> RB.HandMap_AllChords
-    , RB.fiveStrumMap     = flip fmap (partStrumMap part) $ \case
+    , RB.strumMap     = part.partStrumMap <&> \case
       StrumMap_SlapBass -> RB.StrumMap_SlapBass
-    , RB.fiveFretPosition = partFretPosition part
-    , RB.fiveTremolo      = RTB.empty
-    , RB.fiveTrill        = RTB.empty
-    , RB.fiveOverdrive    = maybe RTB.empty partStarPower $ Map.lookup Expert $ partDifficulties part
-    , RB.fiveBRE          = RTB.empty
-    , RB.fiveSolo         = importSolo $ partSoloEdge part
-    , RB.fivePlayer1      = maybe RTB.empty partPlayer1 $ Map.lookup Expert $ partDifficulties part
-    , RB.fivePlayer2      = maybe RTB.empty partPlayer2 $ Map.lookup Expert $ partDifficulties part
+    , RB.fretPosition = part.partFretPosition
+    , RB.tremolo      = RTB.empty
+    , RB.trill        = RTB.empty
+    , RB.overdrive    = maybe RTB.empty (.partStarPower) $ Map.lookup Expert part.partDifficulties
+    , RB.bre          = RTB.empty
+    , RB.solo         = importSolo part.partSoloEdge
+    , RB.player1      = maybe RTB.empty (.partPlayer1) $ Map.lookup Expert part.partDifficulties
+    , RB.player2      = maybe RTB.empty (.partPlayer2) $ Map.lookup Expert part.partDifficulties
     }
   -- import from gh2dx "on/off" solo format
   importSolo :: RTB.T t () -> RTB.T t Bool
@@ -128,64 +132,64 @@ importGH2MIDI mode songChunk (F.Song tmap mmap gh2) = F.Song tmap mmap $ let
     go _    RNil             = RNil
   in F.fixedToOnyx mempty
     { F.fixedEvents = mempty
-      { RB.eventsMusicStart = void $ RTB.filter (== MusicStart) $ eventsOther $ gh2Events gh2
-      , RB.eventsMusicEnd   = RTB.empty
-      , RB.eventsEnd        = void $ RTB.filter (== End) $ eventsOther $ gh2Events gh2
-      , RB.eventsCoda       = RTB.empty
-      , RB.eventsCodaResume = RTB.empty
-      , RB.eventsCrowd      = RTB.empty -- TODO
-      , RB.eventsCrowdClap  = RTB.empty -- TODO
-      , RB.eventsSections   = (\s -> simpleSection $ fromGH2Section s) <$> eventsSections (gh2Events gh2)
-      , RB.eventsBacking    = triggersBacking $ gh2Triggers gh2
+      { RB.musicStart = void $ RTB.filter (== MusicStart) gh2.gh2Events.eventsOther
+      , RB.musicEnd   = RTB.empty
+      , RB.end        = void $ RTB.filter (== End) gh2.gh2Events.eventsOther
+      , RB.coda       = RTB.empty
+      , RB.codaResume = RTB.empty
+      , RB.crowd      = RTB.empty -- TODO
+      , RB.crowdClap  = RTB.empty -- TODO
+      , RB.sections   = (\s -> simpleSection $ fromGH2Section s) <$> gh2.gh2Events.eventsSections
+      , RB.backing    = gh2.gh2Triggers.triggersBacking
       }
-    , F.fixedPartGuitar = convertPart $ case mode of
-      ImportSolo -> gh2PartGuitar gh2
-      ImportCoop -> if nullPart $ gh2PartGuitarCoop gh2
-        then gh2PartGuitar gh2
-        else gh2PartGuitarCoop gh2
-    , F.fixedPartBass = if isJust $ lookup "bass" $ D.fromDictList $ tracks songChunk
-      then convertPart $ gh2PartBass gh2
+    , F.fixedPartGuitar = convertPart case mode of
+      ImportSolo -> gh2.gh2PartGuitar
+      ImportCoop -> if nullPart gh2.gh2PartGuitarCoop
+        then gh2.gh2PartGuitar
+        else gh2.gh2PartGuitarCoop
+    , F.fixedPartBass = if isJust $ lookup "bass" songChunk.tracks.fromDictList
+      then convertPart gh2.gh2PartBass
       else mempty
-    , F.fixedPartRhythm = if isJust $ lookup "rhythm" $ D.fromDictList $ tracks songChunk
-      then convertPart $ gh2PartRhythm gh2
+    , F.fixedPartRhythm = if isJust $ lookup "rhythm" songChunk.tracks.fromDictList
+      then convertPart gh2.gh2PartRhythm
       else mempty
-    , F.fixedPartDrums = if isJust $ lookup "drum" $ D.fromDictList $ tracks songChunk
+    , F.fixedPartDrums = if isJust $ lookup "drum" songChunk.tracks.fromDictList
       then let
-        drums = gh2PartDrum gh2
-        expert = fromMaybe mempty $ Map.lookup Expert $ gh2drumDifficulties drums
+        drums = gh2.gh2PartDrum
+        expert = fromMaybe mempty $ Map.lookup Expert drums.gh2drumDifficulties
         in Drums.DrumTrack
-          { drumDifficulties = flip fmap (gh2drumDifficulties drums) $ \diff -> Drums.DrumDifficulty
-            { Drums.drumMix = RTB.empty
-            , Drums.drumPSModifiers = RTB.empty
-            , Drums.drumGems = (, Drums.VelocityNormal) <$> gh2drumGems diff
+          { difficulties = drums.gh2drumDifficulties <&> \diff -> Drums.DrumDifficulty
+            { Drums.mix = RTB.empty
+            , Drums.psModifiers = RTB.empty
+            , Drums.gems = (, Drums.VelocityNormal) <$> diff.gh2drumGems
             }
-          , drumMood           = RTB.empty -- TODO import from band drummer
-          , drumToms           = RTB.empty
-          , drumSingleRoll     = RTB.empty
-          , drumDoubleRoll     = RTB.empty
-          , drumOverdrive      = gh2drumStarPower expert
-          , drumActivation     = RTB.empty
-          , drumSolo           = importSolo $ gh2drumSoloEdge drums
-          , drumPlayer1        = gh2drumPlayer1 expert
-          , drumPlayer2        = gh2drumPlayer2 expert
-          , drumKick2x         = RTB.empty
-          , drumAnimation      = RTB.empty -- TODO import from band drummer
-          , drumEnableDynamics = RTB.empty
+          , mood           = RTB.empty -- TODO import from band drummer
+          , toms           = RTB.empty
+          , singleRoll     = RTB.empty
+          , doubleRoll     = RTB.empty
+          , overdrive      = expert.gh2drumStarPower
+          , activation     = RTB.empty
+          , solo           = importSolo drums.gh2drumSoloEdge
+          , player1        = expert.gh2drumPlayer1
+          , player2        = expert.gh2drumPlayer2
+          , kick2x         = RTB.empty
+          , animation      = RTB.empty -- TODO import from band drummer
+          , enableDynamics = RTB.empty
           }
       else mempty
     }
 
-gh2SongYaml :: ImportMode -> SongPackage -> Maybe GH2DXExtra -> Song -> F.Song (F.OnyxFile U.Beats) -> SongYaml SoftFile
-gh2SongYaml mode pkg extra songChunk onyxMidi = SongYaml
+gh2SongYaml :: ImportMode -> SongPackage -> Maybe GH2DXExtra -> Song -> Readable -> F.Song (F.OnyxFile U.Beats) -> SongYaml SoftFile
+gh2SongYaml mode pkg extra songChunk origMidi onyxMidi = SongYaml
   { metadata = def'
-    { title  = Just $ name pkg <> case mode of
+    { title  = Just $ pkg.name <> case mode of
       ImportSolo -> ""
       ImportCoop -> " (Co-op)"
-    , artist = Just $ artist pkg
-    , cover = caption pkg /= Just "performed_by"
+    , artist = Just pkg.artist
+    , cover = pkg.caption /= Just "performed_by"
     , fileAlbumArt = Nothing
-    , previewStart = Just $ PreviewSeconds $ fromIntegral (fst $ preview pkg) / 1000
-    , previewEnd = Just $ PreviewSeconds $ fromIntegral (snd $ preview pkg) / 1000
+    , previewStart = Just $ PreviewSeconds $ fromIntegral (fst pkg.preview) / 1000
+    , previewEnd = Just $ PreviewSeconds $ fromIntegral (snd pkg.preview) / 1000
     , album = extra >>= (.songalbum)
     , author = extra >>= (.author)
     , year = extra >>= (.songyear) >>= readMaybe . T.unpack
@@ -194,6 +198,7 @@ gh2SongYaml mode pkg extra songChunk onyxMidi = SongYaml
     }
   , global = def'
     { fileMidi            = SoftFile "notes.mid" $ SoftChart onyxMidi
+    , fileMidiOriginal    = Just $ SoftFile "original.mid" $ SoftReadable origMidi
     , fileSongAnim        = Nothing
     , backgroundVideo     = Nothing
     , fileBackgroundImage = Nothing
@@ -204,42 +209,38 @@ gh2SongYaml mode pkg extra songChunk onyxMidi = SongYaml
   , targets = HM.empty -- TODO add gh2 target
   , parts = Parts $ HM.fromList $ catMaybes
     [ do
-      guard $ maybe False (not . null) $ lookup "guitar" $ D.fromDictList $ tracks songChunk
+      guard $ maybe False (not . null) $ lookup "guitar" songChunk.tracks.fromDictList
       return (F.PartGuitar, emptyPart
-        { grybo = Just (def :: ModeFive)
-          { hopoThreshold = maybe 170 fromIntegral $ hopoThreshold songChunk
-          , difficulty = Tier $ min 1 $ maybe 1 fromIntegral $ extra >>= (.songguitarrank)
-          }
+        { grybo = Just $ def
+          & do set #hopoThreshold $ maybe 170 fromIntegral songChunk.hopoThreshold
+          & do set #difficulty    $ Tier $ min 1 $ maybe 1 fromIntegral $ extra >>= (.songguitarrank)
         })
     , do
-      guard $ maybe False (not . null) $ lookup "bass" $ D.fromDictList $ tracks songChunk
+      guard $ maybe False (not . null) $ lookup "bass" songChunk.tracks.fromDictList
       return (F.PartBass, emptyPart
-        { grybo = Just (def :: ModeFive)
-          { hopoThreshold = maybe 170 fromIntegral $ hopoThreshold songChunk
-          , difficulty = Tier $ min 1 $ maybe 1 fromIntegral $ extra >>= (.songbassrank)
-          }
+        { grybo = Just $ def
+          & do set #hopoThreshold $ maybe 170 fromIntegral songChunk.hopoThreshold
+          & do set #difficulty    $ Tier $ min 1 $ maybe 1 fromIntegral $ extra >>= (.songbassrank)
         })
     , do
-      guard $ maybe False (not . null) $ lookup "rhythm" $ D.fromDictList $ tracks songChunk
+      guard $ maybe False (not . null) $ lookup "rhythm" songChunk.tracks.fromDictList
       return (F.PartName "rhythm", emptyPart
-        { grybo = Just (def :: ModeFive)
-          { hopoThreshold = maybe 170 fromIntegral $ hopoThreshold songChunk
-          , difficulty = Tier $ min 1 $ maybe 1 fromIntegral $ extra >>= (.songrhythmrank)
-          }
+        { grybo = Just $ def
+          & do set #hopoThreshold $ maybe 170 fromIntegral songChunk.hopoThreshold
+          & do set #difficulty    $ Tier $ min 1 $ maybe 1 fromIntegral $ extra >>= (.songrhythmrank)
         })
     , do
-      guard $ maybe False (not . null) $ lookup "drum" $ D.fromDictList $ tracks songChunk
-      return (F.PartDrums, emptyPart
-        { drums = Just (emptyPartDrums Drums4 Kicks1x :: ModeDrums SoftFile)
-          { difficulty = Tier $ min 1 $ maybe 1 fromIntegral $ extra >>= (.songdrumrank)
-          -- TODO should probably save kicks 1x/2x so we can reimport here
-          }
-        })
+      guard $ maybe False (not . null) $ lookup "drum" songChunk.tracks.fromDictList
+      -- TODO should probably save kicks 1x/2x so we can reimport here
+      return (F.PartDrums, emptyPart & #drums .~ Just do
+        emptyPartDrums Drums4 Kicks1x & #difficulty .~ do
+          Tier $ min 1 $ maybe 1 fromIntegral $ extra >>= (.songdrumrank)
+        )
     ]
   }
 
-importGH2Song :: (SendMessage m, MonadResource m) => ImportMode -> SongPackage -> FilePath -> Folder B.ByteString Readable -> Import m
-importGH2Song mode pkg displayPath folder level = do
+importGH2Song :: (SendMessage m, MonadResource m) => ImportMode -> Song -> SongPackage -> FilePath -> Folder B.ByteString Readable -> Import m
+importGH2Song mode songChunk pkg displayPath folder level = do
   let encLatin1 = B8.pack . T.unpack
       split s = case splitPath s of
         Nothing -> fatal $ "Internal error, couldn't parse path: " <> show s
@@ -247,29 +248,24 @@ importGH2Song mode pkg displayPath folder level = do
       need p = case findFile p folder of
         Just r  -> return r
         Nothing -> fatal $ "Required file not found: " <> B8.unpack (B8.intercalate "/" $ toList p)
-  songChunk <- case mode of
-    ImportSolo -> return $ song pkg
-    ImportCoop -> case songCoop pkg of
-      Nothing -> fatal "Tried to import coop version from a song that doesn't have one"
-      Just coop -> return coop
-  when (level == ImportFull) $ do
-    lg $ "Importing GH2 song [" <> T.unpack (songName songChunk) <> "] from: " <> displayPath
-  midi <- split (midiFile songChunk) >>= need . fmap encLatin1
+  when (level == ImportFull) do
+    lg $ "Importing GH2 song [" <> T.unpack songChunk.songName <> "] from: " <> displayPath
+  midi <- split songChunk.midiFile >>= need . fmap encLatin1
   onyxMidi <- case level of
     ImportFull  -> importGH2MIDI mode songChunk <$> F.loadMIDIReadable midi
     ImportQuick -> return emptyChart
   (audio, plans) <- do
-    pathVGS  <- fmap (fmap encLatin1) $ split $ songName songChunk <> ".vgs"
-    pathMogg <- fmap (fmap encLatin1) $ split $ songName songChunk <> ".mogg"
+    pathVGS  <- fmap (fmap encLatin1) $ split $ songChunk.songName <> ".vgs"
+    pathMogg <- fmap (fmap encLatin1) $ split $ songChunk.songName <> ".mogg"
     case (findFile pathVGS folder, findFile pathMogg folder) of
-      (Just vgs, _) -> do
-        numChannels <- stackIO $ vgsChannelCount vgs
-        namedChans <- stackIO $ forConcurrently [0 .. numChannels - 1] $ \i -> do
+      (Just vgsData, _) -> do
+        vgs <- stackIO $ decryptReadVGS vgsData
+        namedChans <- stackIO $ forConcurrently [0 .. length vgs.header.channels - 1] \i -> do
           bs <- case level of
             ImportFull  -> splitOutVGSChannels [i] vgs
             ImportQuick -> return BL.empty
           return ("vgs-" <> show i, bs)
-        let audio = HM.fromList $ do
+        let audio = HM.fromList do
               (name, bs) <- namedChans
               return $ (T.pack name ,) $ AudioFile AudioInfo
                 { md5 = Nothing
@@ -279,27 +275,27 @@ importGH2Song mode pkg displayPath folder level = do
                 , rate = Nothing
                 , channels = 1
                 }
-            plans = HM.singleton "vgs" $ let
-              guitarChans = map fromIntegral $ fromMaybe [] $ lookup "guitar" $ D.fromDictList $ tracks songChunk
-              bassChans = map fromIntegral $ fromMaybe [] $ lookup "bass" $ D.fromDictList $ tracks songChunk
-              rhythmChans = map fromIntegral $ fromMaybe [] $ lookup "rhythm" $ D.fromDictList $ tracks songChunk
-              songChans = zipWith const [0..] (pans songChunk)
+            plans = HM.singleton "vgs" let
+              guitarChans = map fromIntegral $ fromMaybe [] $ lookup "guitar" songChunk.tracks.fromDictList
+              bassChans   = map fromIntegral $ fromMaybe [] $ lookup "bass"   songChunk.tracks.fromDictList
+              rhythmChans = map fromIntegral $ fromMaybe [] $ lookup "rhythm" songChunk.tracks.fromDictList
+              songChans = zipWith const [0..] songChunk.pans
                 \\ (guitarChans ++ bassChans ++ rhythmChans)
               mixChans v cs = do
-                presentChannels <- NE.nonEmpty $ do
+                presentChannels <- NE.nonEmpty do
                   c <- cs
                   -- in some custom isos, vgs can have fewer channels than claimed by dta
                   case drop c namedChans of
                     (name, _) : _ -> [(c, T.pack name)]
                     []            -> []
-                Just $ case presentChannels of
+                Just case presentChannels of
                   (c, name) :| [] -> PansVols
-                    (map realToFrac [pans songChunk !! c])
-                    (map realToFrac [(vols songChunk !! c) + v])
+                    (map realToFrac [songChunk.pans !! c])
+                    (map realToFrac [(songChunk.vols !! c) + v])
                     (Input $ Named name)
                   _ -> PansVols
-                    (map realToFrac [ pans songChunk !! c | (c, _) <- toList presentChannels ])
-                    (map realToFrac [ (vols songChunk !! c) + v | (c, _) <- toList presentChannels ])
+                    (map realToFrac [ songChunk.pans !! c | (c, _) <- toList presentChannels ])
+                    (map realToFrac [ (songChunk.vols !! c) + v | (c, _) <- toList presentChannels ])
                     (Merge $ fmap (Input . Named . snd) presentChannels)
               in StandardPlan StandardPlanInfo
                 { song = mixChans 0 songChans
@@ -321,8 +317,8 @@ importGH2Song mode pkg displayPath folder level = do
           ImportQuick -> HM.empty
           ImportFull  -> HM.singleton "mogg" $ MoggPlan $ getGH2MoggPlan mogg songChunk
         in return (audio, plans)
-      (Nothing, Nothing) -> fail $ "Couldn't find .vgs or .mogg audio for " <> show (songName songChunk)
-  return (gh2SongYaml mode pkg Nothing songChunk onyxMidi)
+      (Nothing, Nothing) -> fail $ "Couldn't find .vgs or .mogg audio for " <> show songChunk.songName
+  return (gh2SongYaml mode pkg Nothing songChunk midi onyxMidi)
     { audio = audio
     , plans = plans
     }
@@ -330,7 +326,7 @@ importGH2Song mode pkg displayPath folder level = do
 getGH2MoggPlan :: Readable -> Song -> MoggPlanInfo SoftFile
 getGH2MoggPlan mogg songChunk = let
   instChans :: [(T.Text, [Int])]
-  instChans = map (second $ map fromIntegral) $ D.fromDictList $ tracks songChunk
+  instChans = map (second $ map fromIntegral) songChunk.tracks.fromDictList
   in MoggPlanInfo
     { fileMOGG = Just $ SoftFile "audio.mogg" $ SoftReadable mogg
     , moggMD5 = Nothing
@@ -340,12 +336,12 @@ getGH2MoggPlan mogg songChunk = let
       , [ (F.PartName "rhythm", PartSingle ns) | ns <- toList $ lookup "rhythm" instChans ]
       ]
     , crowd = []
-    , pans = map realToFrac $ pans songChunk
+    , pans = map realToFrac songChunk.pans
     , vols = do
       let i `channelFor` part = maybe False (elem i) $ lookup part instChans
-      (i, vol) <- zip [0..] $ vols songChunk
+      (i, vol) <- zip [0..] songChunk.vols
       -- again, made up these volume adjustments so things sound ok in RB context
-      return $ realToFrac $ if
+      return $ realToFrac if
         | i `channelFor` "guitar" -> vol - 0.5
         | i `channelFor` "bass"   -> vol - 3
         | i `channelFor` "rhythm" -> vol - 1.5
@@ -365,8 +361,8 @@ importGH2DLC src folder = do
     Just bs -> do
       dta <- D.readDTA_latin1 $ BL.toStrict bs
       readSongListGH2Extra dta
-  flip concatMapM packSongs $ \(_top, pkg, extra) -> do
-    let base = T.unpack $ songName $ song pkg
+  flip concatMapM packSongs \(_top, pkg, extra) -> do
+    let base = T.unpack pkg.song.songName
         split s = case splitPath $ T.pack s of
           Nothing -> fatal $ "Internal error, couldn't parse path: " <> show s
           Just p  -> return p
@@ -375,30 +371,25 @@ importGH2DLC src folder = do
           Nothing -> fatal $ "Required file not found: " <> T.unpack (T.intercalate "/" $ toList p)
     moggPath <- split $ base <.> "mogg"
     mogg <- need moggPath
-    art <- case T.splitOn "/" $ songName $ song pkg of
+    art <- case T.splitOn "/" pkg.song.songName of
       [x, y, z] -> do
         let artPath = x :| [y, "gen", z <> ".bmp_xbox"]
         return $ fmap (SoftFile "cover.png_xbox" . SoftReadable) $ findFileCI artPath folder
       _ -> do
         warn "Couldn't recognize song path format to search for album art"
         return Nothing
-    let modes = case songCoop pkg of
-          Nothing -> [ImportSolo]
-          Just _  -> [ImportSolo, ImportCoop]
-    forM modes $ \mode -> do
-      return $ \level -> do
-        songChunk <- case mode of
-          ImportSolo -> return $ song pkg
-          ImportCoop -> case songCoop pkg of
-            Nothing -> fatal "Tried to import coop version from a song that doesn't have one"
-            Just coop -> return coop
-        when (level == ImportFull) $ do
-          lg $ "Importing GH2 DLC song [" <> T.unpack (songName songChunk) <> "] from: " <> src
-        midi <- split (T.unpack $ midiFile songChunk) >>= need
+    let modes = (ImportSolo, pkg.song) : case pkg.songCoop of
+          Nothing   -> []
+          Just coop -> [(ImportCoop, coop)]
+    forM modes \(mode, songChunk) -> do
+      return \level -> do
+        when (level == ImportFull) do
+          lg $ "Importing GH2 DLC song [" <> T.unpack songChunk.songName <> "] from: " <> src
+        midi <- split (T.unpack songChunk.midiFile) >>= need
         onyxMidi <- case level of
           ImportFull  -> importGH2MIDI mode songChunk <$> F.loadMIDIReadable midi
           ImportQuick -> return emptyChart
-        let yaml = gh2SongYaml mode pkg (Just extra) songChunk onyxMidi
+        let yaml = gh2SongYaml mode pkg (Just extra) songChunk midi onyxMidi
         return yaml
           { plans = HM.singleton "mogg" $ MoggPlan $ getGH2MoggPlan mogg songChunk
           , metadata = yaml.metadata
@@ -425,15 +416,16 @@ loadSetlist gen = do
   let isKeyMatch k = \case
         D.Parens (D.Tree _ (D.Sym k' : rest)) | k == k' -> Just rest
         _                                               -> Nothing
-      findKey k = firstJust (isKeyMatch k) . D.treeChunks
+      findKey :: B.ByteString -> D.Tree B.ByteString -> Maybe [D.Chunk B.ByteString]
+      findKey k = firstJust (isKeyMatch k) . (.treeChunks)
       parseTier (D.Parens (D.Tree _ (D.Sym x : xs))) = return (x, [song | D.Sym song <- xs])
       parseTier _                              = fatal "Couldn't extract info from a tier in campaign.dtb"
       parseBonusSong (D.Parens (D.Tree _ [D.Sym x, isKeyMatch "price" -> Just [D.Int n]])) = return (x, n)
       parseBonusSong _ = fatal "Couldn't extract info from a bonus song in store.dtb"
-  campaign <- case findKey "order" $ D.topTree dtbCampaign of
+  campaign <- case findKey "order" dtbCampaign.topTree of
     Nothing    -> fatal "Couldn't find 'order' in campaign.dtb"
     Just order -> mapM parseTier order
-  bonus <- case findKey "song" $ D.topTree dtbBonus of
+  bonus <- case findKey "song" dtbBonus.topTree of
     Nothing    -> fatal "Couldn't find bonus songs in store.dtb"
     Just songs -> mapM parseBonusSong songs
   return Setlist{..}
@@ -443,7 +435,7 @@ loadSetlistFull gen = do
   setlist <- loadSetlist gen
   dir <- stackIO $ crawlFolder gen
   songs <- HM.fromList <$> getSongList dir
-  forM setlist $ \k -> case HM.lookup (decodeLatin1 k) songs of
+  forM setlist \k -> case HM.lookup (decodeLatin1 k) songs of
     Just pkg -> return (k, pkg)
     Nothing  -> fatal $ "Couldn't locate setlist song " <> show k
 

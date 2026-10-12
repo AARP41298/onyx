@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments    #-}
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Onyx.Reaper.Extract where
@@ -49,12 +50,12 @@ getTiming e = case getProject e of
       evts = filter (isNamed "PT") $ getChildren env
       readDouble :: T.Text -> Double
       readDouble = read . T.unpack -- TODO handle read failure
-      in fmap ATB.fromPairList $ forM evts $ \pt -> do
+      in fmap ATB.fromPairList $ forM evts \pt -> do
         (secs, bpm) <- case args pt of
           secsArg : bpmArg : _ -> return (realToFrac $ readDouble secsArg, realToFrac (readDouble bpmArg) / 60)
           _ -> fatal "getTiming: couldn't parse a PT event"
         let tsig = case args pt of
-              _ : _ : _ : tsigArg : _ -> Just $ let
+              _ : _ : _ : tsigArg : _ -> Just let
                 (d, n) = quotRem (read $ T.unpack tsigArg :: Integer) 0x10000 -- TODO handle read failure
                 unit = 4 / realToFrac d
                 in U.TimeSig (realToFrac n * unit) unit
@@ -79,7 +80,7 @@ timingToMaps timing = let
   in (tmap, mmap)
 
 parseEvent :: (SendMessage m) => Element -> StackTraceT m (Maybe (Integer, Maybe (E.T B.ByteString)))
-parseEvent elt@(Element etype eparams blk) = inside ("RPP line: " <> show elt) $ do
+parseEvent elt@(Element etype eparams blk) = inside ("RPP line: " <> show elt) do
   let unhex s = case readHex $ T.unpack s of
         [(n, "")] -> Just n
         _         -> Nothing
@@ -98,7 +99,7 @@ parseEvent elt@(Element etype eparams blk) = inside ("RPP line: " <> show elt) $
               warn "Couldn't read hex bytes from E event"
               return $ Just (tks', Nothing)
             Just bytes' -> case Message.maybeFromByteString $ BL.pack bytes' of
-              Report.Cons _ (Right (Message.Channel c)) -> return $ case c of
+              Report.Cons _ (Right (Message.Channel c)) -> return case c of
                 C.Cons _ (C.Mode Mode.AllNotesOff) -> Nothing
                 _ -> Just (tks', Just $ E.MIDIEvent c)
               -- don't think we need to support sysex messages here
@@ -113,8 +114,9 @@ parseEvent elt@(Element etype eparams blk) = inside ("RPP line: " <> show elt) $
           Just tks' -> case blk of
             Nothing -> warn "X event has no indented block" >> return Nothing
             Just xdata -> do
-              let bytes = B.concat $ map (B64.decodeLenient . TE.encodeUtf8)
-                    [ b64 | Element b64 [] Nothing <- xdata ]
+              let bytes = B.concat do
+                    Element b64 [] Nothing <- xdata
+                    return $ B64.decodeLenient $ TE.encodeUtf8 b64
                   text = B.drop 2 bytes
               mevt <- case B.unpack bytes of
                 0xFF : 0x01 : _ -> return $ Just $ E.MetaEvent $ Meta.TextEvent      text
@@ -133,12 +135,12 @@ getTracks :: (SendMessage m) => Element -> StackTraceT m [RTB.T U.Beats (E.T B.B
 getTracks proj = let
   children = getProject proj
   trks = filter (isNamed "TRACK") children
-  in fmap (filter $ not . RTB.null) $ forM trks $ \trk -> let
+  in fmap (filter $ not . RTB.null) $ forM trks \trk -> let
     -- TODO track mute
     items = filter (isNamed "ITEM") $ getChildren trk
-    in fmap (foldr RTB.merge RTB.empty . concat) $ forM items $ \item -> do
+    in fmap (foldr RTB.merge RTB.empty . concat) $ forM items \item -> do
       -- TODO item mute, item position
-      forM (getChildren item) $ \src -> do
+      forM (getChildren item) \src -> do
         if not $ isNamed "SOURCE" src && take 1 (args src) == ["MIDI"]
           then return RTB.empty
           else let

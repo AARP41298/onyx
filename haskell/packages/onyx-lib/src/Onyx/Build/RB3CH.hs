@@ -2,11 +2,16 @@
 Shared logic used by the build processes for RB3 and CH targets.
 (This should be refactored/split at some point...)
 -}
-{-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE RankNTypes          #-}
-{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE BlockArguments        #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE LambdaCase            #-}
+{-# LANGUAGE NamedFieldPuns        #-}
+{-# LANGUAGE NoFieldSelectors      #-}
+{-# LANGUAGE OverloadedLabels      #-}
+{-# LANGUAGE OverloadedRecordDot   #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE RankNTypes            #-}
+{-# LANGUAGE RecordWildCards       #-}
 module Onyx.Build.RB3CH
 ( processRBPad, processRB, processPS, processTiming
 , findProblems
@@ -23,6 +28,8 @@ import           Control.Monad.Trans.Writer.Strict (execWriter, tell)
 import qualified Data.EventList.Absolute.TimeBody  as ATB
 import qualified Data.EventList.Relative.TimeBody  as RTB
 import           Data.Foldable                     (toList)
+import           Data.Function                     ((&))
+import           Data.Functor                      ((<&>))
 import           Data.List.Extra                   (nubOrd)
 import qualified Data.Map                          as Map
 import           Data.Maybe                        (fromMaybe, isNothing)
@@ -54,6 +61,7 @@ import           Onyx.Project
 import           Onyx.Reductions
 import           Onyx.Sections                     (makeDisplaySection)
 import           Onyx.StackTrace
+import           Optics                            (mapped, (%), (%~), (.~))
 import qualified Sound.MIDI.Util                   as U
 
 data SharedTarget f
@@ -73,7 +81,7 @@ processRBPad (a, b) c d e f = do
   -- TODO we probably should run fixBrokenUnisons before autoreductions
   legal <- if a.legalTempos then magmaLegalTemposFile mid else return mid
   (mid', pad) <- fixNotelessOD legal >>= fixBrokenUnisons >>= magmaPad . fixBeatTrack'
-  return (proKeysODOnlyExpert mid', psDifficultyRB3 diffs, vc, pad)
+  return (proKeysODOnlyExpert mid', diffs.psDifficultyRB3, vc, pad)
 
 processRB
   :: (SendMessage m, MonadIO m)
@@ -88,7 +96,7 @@ processRB (a, b) c d e f = do
   -- TODO we probably should run fixBrokenUnisons before autoreductions
   legal <- if a.legalTempos then magmaLegalTemposFile mid else return mid
   mid' <- fmap fixBeatTrack' $ fixNotelessOD legal >>= fixBrokenUnisons
-  return (proKeysODOnlyExpert mid', psDifficultyRB3 diffs, vc)
+  return (proKeysODOnlyExpert mid', diffs.psDifficultyRB3, vc)
 
 processPS
   :: (SendMessage m, MonadIO m)
@@ -104,23 +112,17 @@ processPS a b c d e = do
 
 proKeysODOnlyExpert :: F.Song (F.FixedFile U.Beats) -> F.Song (F.FixedFile U.Beats)
 proKeysODOnlyExpert s = s
-  { F.tracks = s.tracks
-    { F.fixedPartRealKeysH = s.tracks.fixedPartRealKeysH { pkOverdrive = RTB.empty }
-    , F.fixedPartRealKeysM = s.tracks.fixedPartRealKeysM { pkOverdrive = RTB.empty }
-    , F.fixedPartRealKeysE = s.tracks.fixedPartRealKeysE { pkOverdrive = RTB.empty }
-    }
-  }
+  & #tracks % #fixedPartRealKeysH % #overdrive .~ RTB.empty
+  & #tracks % #fixedPartRealKeysM % #overdrive .~ RTB.empty
+  & #tracks % #fixedPartRealKeysE % #overdrive .~ RTB.empty
 
 -- For Phase Shift, put pro keys overdrive on the lower difficulty tracks so they show up.
 proKeysODAllDifficulties :: F.Song (F.FixedFile U.Beats) -> F.Song (F.FixedFile U.Beats)
 proKeysODAllDifficulties s = s
-  { F.tracks = s.tracks
-    { F.fixedPartRealKeysH = s.tracks.fixedPartRealKeysH { pkOverdrive = od }
-    , F.fixedPartRealKeysM = s.tracks.fixedPartRealKeysM { pkOverdrive = od }
-    , F.fixedPartRealKeysE = s.tracks.fixedPartRealKeysE { pkOverdrive = od }
-    }
-  } where
-    od = s.tracks.fixedPartRealKeysX.pkOverdrive
+  & #tracks % #fixedPartRealKeysH % #overdrive .~ od
+  & #tracks % #fixedPartRealKeysM % #overdrive .~ od
+  & #tracks % #fixedPartRealKeysE % #overdrive .~ od
+  where od = s.tracks.fixedPartRealKeysX.overdrive
 
 -- | Magma gets mad if you put an event like [idle_realtime] before 2 beats in.
 -- But lots of Harmonix charts do this...
@@ -152,9 +154,9 @@ processTiming input getAudioLength = do
     { F.tracks = input.tracks
       { F.onyxBeat = timingBeat
       , F.onyxEvents = input.tracks.onyxEvents
-        { eventsEnd        = RTB.singleton timingEnd        ()
-        , eventsMusicStart = RTB.singleton timingMusicStart ()
-        , eventsMusicEnd   = RTB.singleton timingMusicEnd   ()
+        { end        = RTB.singleton timingEnd        ()
+        , musicStart = RTB.singleton timingMusicStart ()
+        , musicEnd   = RTB.singleton timingMusicEnd   ()
         }
       }
     }
@@ -170,7 +172,7 @@ basicTiming shouldLog input@(F.Song tempos mmap trks) getAudioLength = do
   let showPosn = showPosition mmap
       logMaybe = if shouldLog then lg else const $ return ()
   -- If there's no @[end]@, put it after all MIDI events and audio files.
-  timingEnd <- case RTB.viewL $ eventsEnd $ F.getEventsTrack trks of
+  timingEnd <- case RTB.viewL (F.getEventsTrack trks).end of
     Just ((t, _), _) -> return t
     Nothing -> do
       audLen <- U.unapplyTempoMap tempos <$> getAudioLength
@@ -199,7 +201,7 @@ basicTiming shouldLog input@(F.Song tempos mmap trks) getAudioLength = do
   -- If [music_start] is before 2 beats,
   -- Magma will add auto [idle] events there in instrument tracks, and then error...
   let musicStartMin = 2 :: U.Beats
-  timingMusicStart <- case RTB.viewL $ eventsMusicStart $ F.getEventsTrack trks of
+  timingMusicStart <- case RTB.viewL (F.getEventsTrack trks).musicStart of
     Just ((t, _), _) -> if t < musicStartMin
       then do
         warn $ "[music_start] is too early. Moving to " ++ showPosn musicStartMin
@@ -208,7 +210,7 @@ basicTiming shouldLog input@(F.Song tempos mmap trks) getAudioLength = do
     Nothing -> do
       logMaybe $ "[music_start] is missing. Placing at " ++ showPosn musicStartMin
       return musicStartMin
-  timingMusicEnd <- case RTB.viewL $ eventsMusicEnd $ F.getEventsTrack trks of
+  timingMusicEnd <- case RTB.viewL (F.getEventsTrack trks).musicEnd of
     Just ((t, _), _) -> return t
     Nothing -> do
       logMaybe $ unwords
@@ -222,7 +224,7 @@ basicTiming shouldLog input@(F.Song tempos mmap trks) getAudioLength = do
 
 makeMoods' :: (NNC.C t) => t -> t -> RTB.T t (LongNote s a) -> RTB.T t Mood
 makeMoods' buffer gap rtb = let
-  edges = RTB.collectCoincident $ U.trackJoin $ flip fmap rtb $ \case
+  edges = RTB.collectCoincident $ U.trackJoin $ rtb <&> \case
     Blip{}    -> Wait NNC.zero True  $ Wait buffer False RNil
     NoteOn{}  -> Wait NNC.zero True  RNil
     NoteOff{} -> Wait buffer   False RNil
@@ -247,7 +249,7 @@ makeMoods' buffer gap rtb = let
 
 makeMoods :: U.TempoMap -> BasicTiming -> RTB.T U.Beats (LongNote s a) -> RTB.T U.Beats Mood
 makeMoods tmap timing
-  = U.trackTake (timingEnd timing)
+  = U.trackTake timing.timingEnd
   . U.unapplyTempoTrack tmap
   . makeMoods' (0.4 :: U.Seconds) 2
   . U.applyTempoTrack tmap
@@ -275,49 +277,46 @@ buildDrums drumsPart target (F.Song tempos mmap trks) timing songYaml = do
       drumResult = bd drumTarget modeInput
       src = drumResultToTrack drumResult
 
-      sections = trks.onyxEvents.eventsSections
+      sections = trks.onyxEvents.sections
 
-      drumEachDiff f dt = dt { drumDifficulties = fmap f dt.drumDifficulties }
+      drumsRemoveBRE :: DrumTrack U.Beats -> DrumTrack U.Beats
       drumsRemoveBRE = case removeBRE target trks.onyxEvents of
         Just BRERemover{..}
-          -> drumEachDiff (\dd -> dd { drumGems = breRemoveBlips dd.drumGems })
-          . (\dt -> dt
-            { drumSingleRoll = breRemoveLanes dt.drumSingleRoll
-            , drumDoubleRoll = breRemoveLanes dt.drumDoubleRoll
-            })
+          -> do #difficulties % mapped % #gems %~ breRemoveBlips
+          .  do #singleRoll %~ breRemoveLanes
+          .  do #doubleRoll %~ breRemoveLanes
         Nothing -> id
 
-      addMoods dt = dt
-        { drumMood = noEarlyMood $ if RTB.null dt.drumMood
-          then makeMoods tempos timing $ Blip () () <$ dt.drumAnimation
-          else dt.drumMood
-        }
+      addMoods :: DrumTrack U.Beats -> DrumTrack U.Beats
+      addMoods dt = dt & #mood .~ do
+        noEarlyMood if RTB.null dt.mood
+          then makeMoods tempos timing $ Blip () () <$ dt.animation
+          else dt.mood
 
       hasDynamics :: DrumTrack U.Beats -> Bool
-      hasDynamics dt = flip any dt.drumDifficulties $ \dd ->
-        flip any dd.drumGems $ \(_gem, vel) ->
+      hasDynamics dt = flip any dt.difficulties \dd ->
+        flip any dd.gems \(_gem, vel) ->
           vel /= VelocityNormal
       enableDynamics dt = dt
         -- this will use the no-brackets version, so Magma is ok with it
-        { drumEnableDynamics = if hasDynamics dt then RTB.singleton 0 () else RTB.empty
+        { enableDynamics = if hasDynamics dt then RTB.singleton 0 () else RTB.empty
         }
 
       -- For better compatibility (Moonscraper, YARG) and a nicer looking MIDI output,
       -- we use the five_lane_drums format, which has RYBOG in order
       -- instead of RYBGO.
+      flipGreenOrange :: DrumTrack U.Beats -> DrumTrack U.Beats
       flipGreenOrange = case (target, drumResult.settings.mode) of
-        (SharedTargetPS{}, Drums5) -> drumEachDiff $ \dd -> dd
-          { drumGems = flip fmap dd.drumGems $ \(gem, vel) -> let
-            gem' = case gem of
-              Drums.Pro Drums.Green () -> Drums.Orange
-              Drums.Orange             -> Drums.Pro Drums.Green ()
-              _                        -> gem
-            in (gem', vel)
-          }
+        (SharedTargetPS{}, Drums5) -> #difficulties % mapped % #gems % mapped %~ \(gem, vel) -> let
+          gem' = case gem of
+            Drums.Pro Drums.Green () -> Drums.Orange
+            Drums.Orange             -> Drums.Pro Drums.Green ()
+            _                        -> gem
+          in (gem', vel)
         _ -> id
 
       mainResult
-        = (\dt -> dt { drumPlayer1 = RTB.empty, drumPlayer2 = RTB.empty })
+        = (\dt -> dt & #player1 .~ RTB.empty & #player2 .~ RTB.empty)
         $ flipGreenOrange
         $ drumsRemoveBRE
         $ addMoods
@@ -337,8 +336,8 @@ data BRERemover t = BRERemover
 -- TODO make this more resilient, probably based on the "chop" functions
 -- so it can correctly handle stuff beyond just removing notes
 removeBRE :: (NNC.C t) => SharedTarget f -> EventsTrack t -> Maybe (BRERemover t)
-removeBRE SharedTargetRB{} evts = case (eventsCoda evts, eventsCodaResume evts) of
-  (Wait t1 () _, Wait t2 () _) -> Just $ let
+removeBRE SharedTargetRB{} evts = case (evts.coda, evts.codaResume) of
+  (Wait t1 () _, Wait t2 () _) -> Just let
     blips xs = trackGlue t2 (U.trackTake t1 xs) (U.trackDrop t2 xs)
     in BRERemover
       { breRemoveBlips = blips
@@ -360,30 +359,30 @@ addFiveMoods
   -> BasicTiming
   -> FiveTrack U.Beats
   -> FiveTrack U.Beats
-addFiveMoods tempos timing ft = ft
-  { fiveMood = noEarlyMood $ if RTB.null ft.fiveMood
-    then makeMoods tempos timing $ let
-      expert = fromMaybe mempty $ Map.lookup Expert ft.fiveDifficulties
-      in splitEdges $ (\(_, len) -> ((), (), len)) <$> edgeBlips_ minSustainLengthRB expert.fiveGems
-    else ft.fiveMood
-  }
+addFiveMoods tempos timing ft = ft & #mood .~ do
+  noEarlyMood if RTB.null ft.mood
+    then makeMoods tempos timing let
+      expert = fromMaybe mempty $ Map.lookup Expert ft.difficulties
+      in splitEdges $ (\(_, len) -> ((), (), len)) <$> edgeBlips_ minSustainLengthRB expert.gems
+    else ft.mood
 
 buildFive
   :: F.PartName
   -> SharedTarget f
   -> F.Song (F.OnyxFile U.Beats)
   -> BasicTiming
+  -> FretLimit
   -> Bool
   -> SongYaml f
   -> Maybe (FiveTrack U.Beats)
-buildFive fivePart target (F.Song tempos mmap trks) timing toKeys songYaml = case getPart fivePart songYaml >>= anyFiveFret of
+buildFive fivePart target (F.Song tempos mmap trks) timing fretLimit toKeys songYaml = case getPart fivePart songYaml >>= anyFiveFret of
   Nothing -> Nothing
-  Just getFive -> Just $ let
+  Just getFive -> Just let
     gtrType = case (target, toKeys) of
       (_               , True ) -> FiveTypeKeys
       (SharedTargetRB{}, False) -> FiveTypeGuitar
       (SharedTargetPS{}, False) -> FiveTypeGuitarExt
-    result = completeFiveResult toKeys mmap $ getFive gtrType ModeInput
+    result = completeFiveResult fretLimit toKeys mmap $ getFive gtrType ModeInput
       { tempo  = tempos
       , events = trks.onyxEvents
       , part   = F.getFlexPart fivePart trks
@@ -397,66 +396,56 @@ buildFive fivePart target (F.Song tempos mmap trks) timing toKeys songYaml = cas
       . noOpenNotes result.settings.detectMutedOpens
       . noTaps
       . (if toKeys then id else noExtendedSustains' standardBlipThreshold gap)
-      . maybe id (\x -> breRemoveBlips x) breRemover -- note: lambda needed for GHC 9+ (if DeepSubsumption not on) due to forall weirdness
+      . maybe id (\BRERemover{breRemoveBlips} -> breRemoveBlips) breRemover
+      -- note: can't just do above with "maybe id (.breRemoveBlips) breRemover" due to forall weirdness
     makeDifficultyPS = emitGuitar5
     finalSteps
       = (if result.settings.fixFreeform then F.fixFreeformFive else id)
       . addFiveMoods tempos timing
     in finalSteps FiveTrack
-      { fiveDifficulties = fmap
+      { difficulties = fmap
         (case target of SharedTargetRB{} -> makeDifficultyRB3; SharedTargetPS{} -> makeDifficultyPS)
         result.notes
-      , fiveMood = result.other.fiveMood
-      , fiveHandMap = result.other.fiveHandMap
-      , fiveStrumMap = result.other.fiveStrumMap
-      , fiveFretPosition = if result.settings.smoothFrets
+      , mood = result.other.mood
+      , handMap = result.other.handMap
+      , strumMap = result.other.strumMap
+      , fretPosition = if result.settings.smoothFrets
         then U.unapplyTempoTrack tempos
           $ smoothFretPosition
           $ U.applyTempoTrack tempos
-          $ result.other.fiveFretPosition
-        else result.other.fiveFretPosition
-      , fiveTremolo = maybe id breRemoveLanes breRemover result.other.fiveTremolo
-      , fiveTrill = maybe id breRemoveLanes breRemover result.other.fiveTrill
-      , fiveOverdrive = result.other.fiveOverdrive
-      , fiveBRE = result.other.fiveBRE
-      , fiveSolo = result.other.fiveSolo
-      , fivePlayer1 = RTB.empty
-      , fivePlayer2 = RTB.empty
+          $ result.other.fretPosition
+        else result.other.fretPosition
+      , tremolo = maybe id (.breRemoveLanes) breRemover result.other.tremolo
+      , trill = maybe id (.breRemoveLanes) breRemover result.other.trill
+      , overdrive = result.other.overdrive
+      , bre = result.other.bre
+      , solo = result.other.solo
+      , player1 = RTB.empty
+      , player2 = RTB.empty
       }
 
 deleteBRE :: F.Song (F.OnyxFile U.Beats) -> F.Song (F.OnyxFile U.Beats)
 deleteBRE song = song
-  { F.tracks = song.tracks
-    { F.onyxEvents = song.tracks.onyxEvents
-      { eventsCoda       = RTB.empty
-      , eventsCodaResume = RTB.empty
-      }
-    , F.onyxParts = flip fmap song.tracks.onyxParts $ \opart -> opart
-      { F.onyxPartDrums        = deleteNormal opart.onyxPartDrums
-      , F.onyxPartDrums2x      = deleteNormal opart.onyxPartDrums2x
-      , F.onyxPartRealDrumsPS  = deleteNormal opart.onyxPartRealDrumsPS
-      , F.onyxPartEliteDrums   = deleteElite  opart.onyxPartEliteDrums
-      , F.onyxPartGuitar       = opart.onyxPartGuitar       { RBFive.fiveBRE = RTB.empty }
-      , F.onyxPartKeys         = opart.onyxPartKeys         { RBFive.fiveBRE = RTB.empty }
-      , F.onyxPartGuitarExt    = opart.onyxPartGuitarExt    { RBFive.fiveBRE = RTB.empty }
-      , F.onyxPartRealGuitar   = opart.onyxPartRealGuitar   { pgBRE = RTB.empty }
-      , F.onyxPartRealGuitar22 = opart.onyxPartRealGuitar22 { pgBRE = RTB.empty }
-      , F.onyxPartRealKeysE    = opart.onyxPartRealKeysE    { pkBRE = RTB.empty }
-      , F.onyxPartRealKeysM    = opart.onyxPartRealKeysM    { pkBRE = RTB.empty }
-      , F.onyxPartRealKeysH    = opart.onyxPartRealKeysH    { pkBRE = RTB.empty }
-      , F.onyxPartRealKeysX    = opart.onyxPartRealKeysX    { pkBRE = RTB.empty }
-      }
-    }
-  } where
-    applyCoda = case song.tracks.onyxEvents.eventsCoda of
+  & #tracks % #onyxEvents % #coda       .~ RTB.empty
+  & #tracks % #onyxEvents % #codaResume .~ RTB.empty
+  & #tracks % #onyxParts  % mapped %~ \opart -> opart
+    & #onyxPartDrums        % #activation %~ applyCoda
+    & #onyxPartDrums2x      % #activation %~ applyCoda
+    & #onyxPartRealDrumsPS  % #activation %~ applyCoda
+    & #onyxPartEliteDrums   % #activation %~ applyCoda
+    & #onyxPartGuitar       % #bre .~ RTB.empty
+    & #onyxPartKeys         % #bre .~ RTB.empty
+    & #onyxPartGuitarExt    % #bre .~ RTB.empty
+    & #onyxPartRealGuitar   % #bre .~ RTB.empty
+    & #onyxPartRealGuitar22 % #bre .~ RTB.empty
+    & #onyxPartRealKeysE    % #bre .~ RTB.empty
+    & #onyxPartRealKeysM    % #bre .~ RTB.empty
+    & #onyxPartRealKeysH    % #bre .~ RTB.empty
+    & #onyxPartRealKeysX    % #bre .~ RTB.empty
+  where
+    applyCoda = case song.tracks.onyxEvents.coda of
       Wait t _ _ -> U.trackTake t
       RNil       -> id
-    deleteNormal drums = drums
-      { drumActivation = applyCoda drums.drumActivation
-      }
-    deleteElite fd = fd
-      { ED.tdActivation = applyCoda fd.tdActivation
-      }
 
 processMIDI
   :: (SendMessage m, MonadIO m)
@@ -466,11 +455,12 @@ processMIDI
   -> Drums.Audio
   -> StackTraceT m U.Seconds -- ^ Gets the length of the longest audio file, if necessary.
   -> StackTraceT m (F.Song (F.FixedFile U.Beats), DifficultyPS, Maybe VocalCount) -- ^ output midi, filtered difficulties, vocal count
-processMIDI target songYaml origInput mixMode getAudioLength = inside "Processing MIDI for RB3/PS" $ do
+processMIDI target songYaml origInput mixMode getAudioLength = inside "Processing MIDI for RB3/PS" do
   let input@(F.Song tempos mmap trks) = case target of
-        SharedTargetPS ps | not $ ps.bigRockEnding -> deleteBRE origInput
-        _                                          -> origInput
+        SharedTargetPS ps | not ps.bigRockEnding -> deleteBRE origInput
+        _                                        -> origInput
   timing@BasicTiming{..} <- basicTiming True input getAudioLength
+  fretLimit <- loadFretLimit
   let targetPS = case target of
         SharedTargetPS ps    -> ps
         SharedTargetRB rb3 _ -> TargetPS
@@ -489,34 +479,32 @@ processMIDI target songYaml origInput mixMode getAudioLength = inside "Processin
       originalRanks = difficultyPS targetPS songYaml
 
       eventsInput = trks.onyxEvents
-      (crowd, crowdClap) = if RTB.null (eventsCrowd eventsInput) && RTB.null (eventsCrowdClap eventsInput)
+      (crowd, crowdClap) = if RTB.null eventsInput.crowd && RTB.null eventsInput.crowdClap
         then
           ( RTB.singleton timingMusicStart CrowdRealtime
           , RTB.singleton timingMusicStart False
           )
-        else (eventsCrowd eventsInput, eventsCrowdClap eventsInput)
+        else (eventsInput.crowd, eventsInput.crowdClap)
       eventsTrack = mempty
-        { eventsMusicStart = RTB.singleton timingMusicStart ()
-        , eventsMusicEnd   = RTB.singleton timingMusicEnd ()
-        , eventsEnd        = RTB.singleton timingEnd ()
-        , eventsCoda       = eventsCoda eventsInput
-        , eventsCrowd      = crowd
-        , eventsCrowdClap  = crowdClap
-        , eventsSections   = eventsSections eventsInput
-        , eventsBacking    = if RTB.null (eventsBacking eventsInput) && not (nullDrums drumsTrack)
+        { musicStart = RTB.singleton timingMusicStart ()
+        , musicEnd   = RTB.singleton timingMusicEnd ()
+        , end        = RTB.singleton timingEnd ()
+        , coda       = eventsInput.coda
+        , crowd      = crowd
+        , crowdClap  = crowdClap
+        , sections   = eventsInput.sections
+        , backing    = if RTB.null eventsInput.backing && not (nullDrums drumsTrack)
           then let
-            makeBacking evts = nubOrd $ flip map evts $ \(gem, _vel) -> case gem of
+            makeBacking evts = nubOrd $ evts <&> \(gem, _vel) -> case gem of
               Drums.Kick               -> BackingKick
               Drums.Red                -> BackingSnare
               Drums.Pro _ Drums.Cymbal -> BackingHihat
               Drums.Pro _ Drums.Tom    -> BackingKick
               Drums.Orange             -> BackingHihat
             in RTB.flatten $ fmap makeBacking $ RTB.collectCoincident $ computePro (Just Expert) drumsTrack
-          else eventsBacking eventsInput
+          else eventsInput.backing
         }
-      eventsTrackPS = eventsTrack
-        { eventsSections = makeDisplaySection <$> eventsSections eventsTrack
-        }
+      eventsTrackPS = eventsTrack & #sections % mapped %~ makeDisplaySection
       drumsPart = case target of
         SharedTargetRB rb3 _ -> rb3.drums
         SharedTargetPS ps    -> ps.drums
@@ -524,13 +512,13 @@ processMIDI target songYaml origInput mixMode getAudioLength = inside "Processin
         Nothing        -> (mempty, Nothing)
         Just (dt, mtd) -> let
           -- remove nonstandardized parts of true drums spec
-          mtd' = flip fmap mtd $ \td -> td
-            { ED.tdSticking     = RTB.empty
-            , ED.tdChipOverride = RTB.empty
-            , ED.tdFooting      = RTB.empty
+          mtd' = mtd <&> \td -> td
+            { ED.sticking     = RTB.empty
+            , ED.chipOverride = RTB.empty
+            , ED.footing      = RTB.empty
             }
           in (setDrumMix mixMode dt, mtd')
-      makeGRYBOTrack toKeys fpart = fromMaybe mempty $ buildFive fpart target input timing toKeys songYaml
+      makeGRYBOTrack toKeys fpart = fromMaybe mempty $ buildFive fpart target input timing fretLimit toKeys songYaml
 
       guitarPart = case target of
         SharedTargetRB rb3 _ -> rb3.guitar
@@ -545,10 +533,10 @@ processMIDI target songYaml origInput mixMode getAudioLength = inside "Processin
         Just pg -> let
           src = F.getFlexPart fpart trks
           tuning = tuningPitches pg.tuning { gtrGlobal = 0 }
+          applyType :: ProGuitarTrack t -> ProGuitarTrack t
           applyType x = x
-            { pgTrainer = (\(_, trainer) -> (gtype, trainer)) <$> x.pgTrainer
-            , pgBRE     = (\(_, b      ) -> (gtype, b      )) <$> x.pgBRE
-            }
+            & #trainer % mapped %~ (\(_, trainer) -> (gtype, trainer))
+            & #bre     % mapped %~ (\(_, b      ) -> (gtype, b      ))
           extendedTuning = length pitches > case gtype of
             TypeGuitar -> 6
             TypeBass   -> 4
@@ -560,14 +548,12 @@ processMIDI target songYaml origInput mixMode getAudioLength = inside "Processin
             . (if extendedTuning then freezeChordNames pitches defaultFlat else id)
             . autoChordRoot tuning
             . pgRemoveBRE
+          pgRemoveBRE :: ProGuitarTrack U.Beats -> ProGuitarTrack U.Beats
           pgRemoveBRE trk = case removeBRE target trks.onyxEvents of
             Just BRERemover{..} -> trk
-              { pgDifficulties = flip fmap trk.pgDifficulties $ \pgd -> pgd
-                { pgNotes = breRemoveEdges pgd.pgNotes
-                }
-              , pgTremolo = breRemoveLanes trk.pgTremolo
-              , pgTrill = breRemoveLanes trk.pgTrill
-              }
+              & #difficulties % mapped % #notes %~ breRemoveEdges
+              & #tremolo %~ breRemoveLanes
+              & #trill   %~ breRemoveLanes
             Nothing -> trk
           src17  = src.onyxPartRealGuitar
           src22  = src.onyxPartRealGuitar22
@@ -578,8 +564,8 @@ processMIDI target songYaml origInput mixMode getAudioLength = inside "Processin
                   (True, False, _    ) -> convertRStoPG tempos srcRSG
                   (True, True , False) -> convertRStoPG tempos srcRSB
                   (_   , _    , _    ) -> src22
-            let mustang = f $ fretLimit 17 $ if nullPG src17  then src22' else src17
-                squier  = f $ fretLimit 22 $ if nullPG src22' then src17  else src22'
+            let mustang = f $ pgFretLimit 17 if nullPG src17  then src22' else src17
+                squier  = f $ pgFretLimit 22 if nullPG src22' then src17  else src22'
             return (mustang, if mustang == squier then mempty else squier)
 
   (proGtr , proGtr22 ) <- makeProGtrTracks TypeGuitar guitarPart
@@ -598,21 +584,18 @@ processMIDI target songYaml origInput mixMode getAudioLength = inside "Processin
         SharedTargetPS ps -> ps.guitarCoop
       guitarCoopPS = makeGRYBOTrack False guitarCoopPart
 
-      sixEachDiff f st = st
-        { sixDifficulties = fmap f $ sixDifficulties st
-        }
       guitarGHL = case getPart guitarPart songYaml >>= (.ghl) of
         Nothing  -> mempty
-        Just ghl -> sixEachDiff
-          ( emitGuitar6
-          . computeSixFretSHT HOPOsRBGuitar (fromIntegral ghl.hopoThreshold / 480)
-          ) (F.getFlexPart guitarPart trks).onyxPartSix
+        Just ghl -> (F.getFlexPart guitarPart trks).onyxPartSix
+          & #difficulties % mapped
+            %~ emitGuitar6
+            . computeSixFretSHT HOPOsRBGuitar (fromIntegral ghl.hopoThreshold / 480)
       bassGHL = case getPart bassPart songYaml >>= (.ghl) of
         Nothing  -> mempty
-        Just ghl -> sixEachDiff
-          ( emitGuitar6
-          . computeSixFretSHT HOPOsRBGuitar (fromIntegral ghl.hopoThreshold / 480)
-          ) (F.getFlexPart bassPart trks).onyxPartSix
+        Just ghl -> (F.getFlexPart bassPart trks).onyxPartSix
+          & #difficulties % mapped
+            %~ emitGuitar6
+            . computeSixFretSHT HOPOsRBGuitar (fromIntegral ghl.hopoThreshold / 480)
 
       keysPart = case target of
         SharedTargetRB rb3 _ -> rb3.keys
@@ -633,43 +616,45 @@ processMIDI target songYaml origInput mixMode getAudioLength = inside "Processin
                   }
                 in fromMaybe mempty $ Map.lookup diff result.difficulties
               Nothing -> F.keysToProKeys diff basicKeys
-            pkd1 `orIfNull` pkd2 = if length (pkNotes pkd1) < 5 then pkd2 else pkd1
+            orIfNull :: ProKeysTrack t -> ProKeysTrack t -> ProKeysTrack t
+            pkd1 `orIfNull` pkd2 = if length pkd1.notes < 5 then pkd2 else pkd1
             eachPKDiff = ffPro . fixPSRange . fixPKMood . completeRanges
               . (case removeBRE target trks.onyxEvents of
                 Just BRERemover{..} -> \pk -> pk
-                  { pkNotes     = breRemoveEdges $ pkNotes     pk
-                  , pkGlissando = breRemoveBools $ pkGlissando pk
-                  , pkTrill     = breRemoveBools $ pkTrill     pk
-                  }
+                  & #notes     %~ breRemoveEdges
+                  & #glissando %~ breRemoveBools
+                  & #trill     %~ breRemoveBools
                 Nothing -> id)
             keysExpert = eachPKDiff $ keysDiff Expert
             keysHard   = eachPKDiff $ keysDiff Hard   `orIfNull` pkReduce Hard   mmap keysOD keysExpert
             keysMedium = eachPKDiff $ keysDiff Medium `orIfNull` pkReduce Medium mmap keysOD keysHard
             keysEasy   = eachPKDiff $ keysDiff Easy   `orIfNull` pkReduce Easy   mmap keysOD keysMedium
-            fixPKMood x = x { pkMood = noEarlyMood $ pkMood x }
-            keysOD = pkOverdrive keysExpert
+            fixPKMood :: ProKeysTrack U.Beats -> ProKeysTrack U.Beats
+            fixPKMood x = x & #mood %~ noEarlyMood
+            keysOD = keysExpert.overdrive
             originalRH = fpart.onyxPartKeysAnimRH
             originalLH = fpart.onyxPartKeysAnimLH
             (animRH, animLH) = if nullPK originalRH && nullPK originalLH
-              then (mempty { pkNotes = pkNotes keysExpert }, mempty)
+              then (mempty & #notes .~ keysExpert.notes, mempty)
               else (originalRH, originalLH)
-            ffBasic = if fmap (.fixFreeform) part.grybo == Just True
+            ffBasic = if maybe False (.fixFreeform) part.grybo
               then F.fixFreeformFive
               else id
-            ffPro = if fmap (.fixFreeform) part.proKeys == Just True
+            ffPro = if maybe False (.fixFreeform) part.proKeys
               then F.fixFreeformPK
               else id
             -- nemo's checker doesn't like if you include this stuff on PART KEYS
+            removeGtrStuff :: FiveTrack U.Beats -> FiveTrack U.Beats
             removeGtrStuff ft = ft
-              { fiveFretPosition = RTB.empty
-              , fiveHandMap = RTB.empty
-              , fiveStrumMap = RTB.empty
-              , fiveTremolo = RTB.empty
-              , fiveDifficulties = flip Map.mapWithKey ft.fiveDifficulties $ \diff fd ->
-                if elem diff [Easy, Medium]
-                  then fd { fiveForceStrum = RTB.empty, fiveForceHOPO = RTB.empty }
-                  else fd
-              }
+              & #fretPosition .~ RTB.empty
+              & #handMap      .~ RTB.empty
+              & #strumMap     .~ RTB.empty
+              & #tremolo      .~ RTB.empty
+              & #difficulties .~ do
+                flip Map.mapWithKey ft.difficulties \diff fd ->
+                  if elem diff [Easy, Medium]
+                    then fd & #forceStrum .~ RTB.empty & #forceHOPO .~ RTB.empty
+                    else fd
             in  ( ffBasic $ removeGtrStuff basicKeys
                 , animRH
                 , animLH
@@ -687,9 +672,10 @@ processMIDI target songYaml origInput mixMode getAudioLength = inside "Processin
       harm1   = (F.getFlexPart vocalPart trks).onyxHarm1
       harm2   = (F.getFlexPart vocalPart trks).onyxHarm2
       harm3   = (F.getFlexPart vocalPart trks).onyxHarm3
+      withNotesOf :: VocalTrack t -> VocalTrack t -> VocalTrack t
       someV `withNotesOf` otherV = someV
-        { vocalLyrics = vocalLyrics otherV
-        , vocalNotes = vocalNotes otherV
+        { lyrics = otherV.lyrics
+        , notes  = otherV.notes
         }
       makeSoloVocals harm =
         (Just Vocal1, if nullVox partVox then harm else partVox, mempty, mempty, mempty)
@@ -738,28 +724,28 @@ processMIDI target songYaml origInput mixMode getAudioLength = inside "Processin
   let trkVox = if editCount >= Just Vocal2 && nullVox trkPV
         then RBVox.harm1ToPartVocals trkHarm1
         else trkPV
-      autoVoxMood vox = makeMoods tempos timing $ flip fmap (vocalNotes vox) $ \case
+      autoVoxMood :: VocalTrack U.Beats -> RTB.T U.Beats Mood
+      autoVoxMood vox = makeMoods tempos timing $ vox.notes <&> \case
         (_, True)  -> NoteOn () ()
         (_, False) -> NoteOff ()
-      trkVox'   = trkVox
-        { vocalMood = noEarlyMood $ if RTB.null $ vocalMood trkVox
-          then case voxCount of
-            Nothing     -> RTB.empty
-            Just Vocal1 -> autoVoxMood trkVox
-            Just _      -> autoVoxMood trkHarm1
-          else vocalMood trkVox
-        }
-      trkHarm1' = trkHarm1 { vocalMood = RTB.empty }
-      trkHarm2' = trkHarm2 { vocalMood = RTB.empty }
-      trkHarm3' = trkHarm3 { vocalMood = RTB.empty }
-      -- we used to do asciiLyrics here for PS, but removing now since we can give UTF-8 midis to CH
-      voxPSCH = hashTalkies
+  trkVox' <- inside "PART VOCALS" $ fixLyricPositions mmap $ trkVox & #mood %~ \mood ->
+    noEarlyMood if RTB.null mood
+      then case voxCount of
+        Nothing     -> RTB.empty
+        Just Vocal1 -> autoVoxMood trkVox
+        Just _      -> autoVoxMood trkHarm1
+      else mood
+  trkHarm1' <- inside "HARM1" $ fixLyricPositions mmap $ trkHarm1 & #mood .~ RTB.empty
+  trkHarm2' <- inside "HARM2" $ fixLyricPositions mmap $ trkHarm2 & #mood .~ RTB.empty
+  trkHarm3' <- inside "HARM3" $ fixLyricPositions mmap $ trkHarm3 & #mood .~ RTB.empty
+  -- we used to do asciiLyrics here for PS, but removing now since we can give UTF-8 midis to CH
+  let voxPSCH = hashTalkies
       -- CH lyrics don't handle ^ correctly, so we replace with the standard #.
       -- specifically "word-^" results in the hyphen being shown.
-      hashTalkies vt = vt { vocalLyrics = T.replace "^" "#" <$> vocalLyrics vt }
+      hashTalkies vt = vt { lyrics = T.replace "^" "#" <$> vt.lyrics }
 
   drumsTrack' <- let
-    fills = RTB.normalize drumsTrack.drumActivation
+    fills = RTB.normalize drumsTrack.activation
     fixCloseFills rtb = case RTB.viewL rtb of
       Just ((tx, True), rtb') -> case RTB.viewL rtb' of
         Just ((ty, False), rtb'')
@@ -772,7 +758,7 @@ processMIDI target songYaml origInput mixMode getAudioLength = inside "Processin
     in do
       when (fills /= fixedFills) $ warn
         "Removing some drum fills because they are too close (within 2.5 seconds)"
-      return drumsTrack { drumActivation = fixedFills }
+      return drumsTrack { activation = fixedFills }
 
   -- remove tempo and time signature events on or after [end].
   -- found in some of bluzer's RB->PS converts. magma complains
@@ -808,7 +794,7 @@ processMIDI target songYaml origInput mixMode getAudioLength = inside "Processin
         ]
       editRanks = case editCount of
         Nothing -> originalRanks
-          { psDifficultyRB3 = (psDifficultyRB3 originalRanks)
+          { psDifficultyRB3 = originalRanks.psDifficultyRB3
             { rb3VocalRank = 0
             , rb3VocalTier = 0
             }
@@ -876,7 +862,7 @@ processMIDI target songYaml origInput mixMode getAudioLength = inside "Processin
 
 magmaLegalTemposFile :: (SendMessage m) => F.Song (F.FixedFile U.Beats) -> StackTraceT m (F.Song (F.FixedFile U.Beats))
 magmaLegalTemposFile rb3 = let
-  endTime = case RTB.viewL rb3.tracks.fixedEvents.eventsEnd of
+  endTime = case RTB.viewL rb3.tracks.fixedEvents.end of
     Nothing           -> 0 -- shouldn't happen
     Just ((dt, _), _) -> dt
   in magmaLegalTempos endTime rb3.tempos rb3.timesigs >>= \case
@@ -895,7 +881,7 @@ magmaLegalTempos :: (SendMessage m) => U.Beats -> U.TempoMap -> U.MeasureMap -> 
   )
 magmaLegalTempos endTime tmap mmap = do
   res <- errorToWarning $ magmaLegalTemposNoWipe endTime tmap mmap
-  return $ case res of
+  return case res of
     Nothing -> let
       tmap' = U.tempoMapFromBPS $ RTB.singleton 0 4 -- 240 bpm, reasonably fast
       in  ( Just "Wiping tempo map due to unfixable tempo changes, beat lines might be weird!"
@@ -932,7 +918,7 @@ magmaLegalTemposNoWipe endTime tempos sigs = do
       numMeasures = fst (U.applyMeasureMap sigs endTime) + 1
       minTempo =  40 / 60 :: U.BPS
       maxTempo = 300 / 60 :: U.BPS
-  measureChanges <- forM [0 .. numMeasures - 1] $ \msr -> do
+  measureChanges <- forM [0 .. numMeasures - 1] \msr -> do
     let msrStart = U.unapplyMeasureMap sigs (msr, 0)
         msrLength = U.unapplyMeasureMap sigs (msr + 1, 0) - msrStart
         msrEvents = U.trackTake msrLength $ U.trackDrop msrStart allTempos
@@ -1002,7 +988,7 @@ magmaLegalTemposNoWipe endTime tempos sigs = do
 
 fixBeatTrack' :: F.Song (F.FixedFile U.Beats) -> F.Song (F.FixedFile U.Beats)
 fixBeatTrack' rb3 = let
-  endTime = case RTB.viewL rb3.tracks.fixedEvents.eventsEnd of
+  endTime = case RTB.viewL rb3.tracks.fixedEvents.end of
     Nothing           -> 0 -- shouldn't happen
     Just ((dt, _), _) -> dt
   in rb3
@@ -1049,21 +1035,21 @@ magmaPad rb3@(F.Song tmap _ trks) = let
     Just ((dt, _), _) -> dt
     Nothing           -> 999
   firstNoteBeats = foldr min 999 $ concat
-    [ map (firstEvent . (.drumGems)) $ Map.elems trks.fixedPartDrums.drumDifficulties
-    , map (firstEvent . (.fiveGems)) $ Map.elems trks.fixedPartGuitar.fiveDifficulties
-    , map (firstEvent . (.fiveGems)) $ Map.elems trks.fixedPartBass.fiveDifficulties
-    , map (firstEvent . (.fiveGems)) $ Map.elems trks.fixedPartKeys.fiveDifficulties
-    , map (firstEvent . (.pgNotes )) $ Map.elems trks.fixedPartRealGuitar.pgDifficulties
-    , map (firstEvent . (.pgNotes )) $ Map.elems trks.fixedPartRealGuitar22.pgDifficulties
-    , map (firstEvent . (.pgNotes )) $ Map.elems trks.fixedPartRealBass.pgDifficulties
-    , map (firstEvent . (.pgNotes )) $ Map.elems trks.fixedPartRealBass22.pgDifficulties
-    , map (firstEvent . (.pkNotes ))
+    [ map (firstEvent . (.gems )) $ Map.elems trks.fixedPartDrums.difficulties
+    , map (firstEvent . (.gems )) $ Map.elems trks.fixedPartGuitar.difficulties
+    , map (firstEvent . (.gems )) $ Map.elems trks.fixedPartBass.difficulties
+    , map (firstEvent . (.gems )) $ Map.elems trks.fixedPartKeys.difficulties
+    , map (firstEvent . (.notes)) $ Map.elems trks.fixedPartRealGuitar.difficulties
+    , map (firstEvent . (.notes)) $ Map.elems trks.fixedPartRealGuitar22.difficulties
+    , map (firstEvent . (.notes)) $ Map.elems trks.fixedPartRealBass.difficulties
+    , map (firstEvent . (.notes)) $ Map.elems trks.fixedPartRealBass22.difficulties
+    , map (firstEvent . (.notes))
       [ trks.fixedPartRealKeysE
       , trks.fixedPartRealKeysM
       , trks.fixedPartRealKeysH
       , trks.fixedPartRealKeysX
       ]
-    , map (firstEvent . (.vocalNotes))
+    , map (firstEvent . (.notes))
       [ trks.fixedPartVocals
       , trks.fixedHarm1
       , trks.fixedHarm2
@@ -1081,18 +1067,18 @@ magmaPad rb3@(F.Song tmap _ trks) = let
       return (F.padFixedFile padSeconds rb3, padSeconds)
 
 findProblems :: F.Song (F.OnyxFile U.Beats) -> [String]
-findProblems song = execWriter $ do
+findProblems song = execWriter do
   -- Every discobeat mix event should be simultaneous with,
   -- or immediately followed by, a set of notes not including red or yellow.
   let drums = (F.getFlexPart F.PartDrums song.tracks).onyxPartDrums
-      discos = foldr RTB.merge RTB.empty $ do
+      discos = foldr RTB.merge RTB.empty do
         d <- [minBound .. maxBound]
-        let diff = fromMaybe mempty $ Map.lookup d drums.drumDifficulties
-        return $ flip RTB.mapMaybe diff.drumMix $ \case
+        let diff = fromMaybe mempty $ Map.lookup d drums.difficulties
+        return $ flip RTB.mapMaybe diff.mix \case
           (_, Drums.Disco) -> Just d
           _                -> Nothing
       badDiscos = void $ RTB.fromAbsoluteEventList $ ATB.fromPairList $ filter isBadDisco $ ATB.toPairList $ RTB.toAbsoluteEventList 0 discos
-      drumsDiff d = (fromMaybe mempty $ Map.lookup d drums.drumDifficulties).drumGems
+      drumsDiff d = (fromMaybe mempty $ Map.lookup d drums.difficulties).gems
       isBadDisco (t, diff) = case RTB.viewL $ RTB.collectCoincident $ U.trackDrop t $ drumsDiff diff of
         Just ((_, evts), _) | any isDiscoGem evts -> True
         _                                         -> False
@@ -1102,19 +1088,19 @@ findProblems song = execWriter $ do
         _                             -> False
   -- Don't have a vocal phrase that ends simultaneous with a lyric event.
   -- In static vocals, this puts the lyric in the wrong phrase.
-  let vox   = RBVox.vocalToLegacy $ (F.getFlexPart F.PartVocal song.tracks).onyxPartVocals
-      harm1 = RBVox.vocalToLegacy $ (F.getFlexPart F.PartVocal song.tracks).onyxHarm1
-      harm2 = RBVox.vocalToLegacy $ (F.getFlexPart F.PartVocal song.tracks).onyxHarm2
-      harm3 = RBVox.vocalToLegacy $ (F.getFlexPart F.PartVocal song.tracks).onyxHarm3
+  let vox   = RBVox.vocalToLegacy (F.getFlexPart F.PartVocal song.tracks).onyxPartVocals
+      harm1 = RBVox.vocalToLegacy (F.getFlexPart F.PartVocal song.tracks).onyxHarm1
+      harm2 = RBVox.vocalToLegacy (F.getFlexPart F.PartVocal song.tracks).onyxHarm2
+      harm3 = RBVox.vocalToLegacy (F.getFlexPart F.PartVocal song.tracks).onyxHarm3
       phraseOff = RBVox.Phrase False
       isLyric = \case RBVox.Lyric _ -> True; _ -> False
-      voxBugs = flip RTB.mapMaybe (RTB.collectCoincident vox) $ \evts -> do
+      voxBugs = flip RTB.mapMaybe (RTB.collectCoincident vox) \evts -> do
         guard $ elem phraseOff evts && any isLyric evts
         return ()
-      harm1Bugs = flip RTB.mapMaybe (RTB.collectCoincident harm1) $ \evts -> do
+      harm1Bugs = flip RTB.mapMaybe (RTB.collectCoincident harm1) \evts -> do
         guard $ elem phraseOff evts && any isLyric evts
         return ()
-      harm2Bugs = flip RTB.mapMaybe (RTB.collectCoincident $ RTB.merge harm2 harm3) $ \evts -> do
+      harm2Bugs = flip RTB.mapMaybe (RTB.collectCoincident $ RTB.merge harm2 harm3) \evts -> do
         guard $ elem phraseOff evts && any isLyric evts
         return ()
   -- Put it all together and show the error positions.
@@ -1123,7 +1109,7 @@ findProblems song = execWriter $ do
         = map (showPosition song.timesigs)
         . ATB.getTimes
         . RTB.toAbsoluteEventList 0
-      message rtb msg = forM_ (showPositions rtb) $ \pos ->
+      message rtb msg = forM_ (showPositions rtb) \pos ->
         tell [pos ++ ": " ++ msg]
   message badDiscos "discobeat drum event is followed immediately by red or yellow gem"
   message voxBugs "PART VOCALS vocal phrase ends simultaneous with a lyric"

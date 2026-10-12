@@ -3,10 +3,12 @@
 DTX .xa audio decoding
 
 Ported from <https://github.com/Dridi/bjxa>
+(now <https://git.sr.ht/~dridi/bjxa>)
 
 Licensed under the GNU General Public License v3
 
 -}
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE NoFieldSelectors      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
@@ -21,7 +23,7 @@ import           Control.Monad.Trans.Class    (lift)
 import           Control.Monad.Trans.Resource (MonadResource)
 import           Control.Monad.Trans.State    (StateT, evalStateT, gets, modify)
 import           Data.Binary.Get
-import           Data.Bits
+import           Data.Bits                    (shiftL, shiftR, (.&.), (.|.))
 import qualified Data.ByteString              as B
 import qualified Data.ByteString.Lazy         as BL
 import           Data.Conduit                 (yield)
@@ -30,7 +32,10 @@ import           Data.Conduit.Audio
 import           Data.Int
 import qualified Data.Vector.Storable         as V
 import           Data.Word                    (Word8)
-import           System.IO
+import           Onyx.Util.Binary             (runGetM)
+import           Onyx.Util.Handle             (Readable, rOpen, useHandle)
+import           System.IO                    (SeekMode (AbsoluteSeek), hClose,
+                                               hSeek)
 
 data XAState = XAState
   { prev0 :: Int16
@@ -48,12 +53,12 @@ data XAHeader = XAHeader
   , blockSizeXA :: Int
   } deriving (Show)
 
-blockInflater :: Int -> B.ByteString -> ([Int16], Word8)
-blockInflater 8 src =
+blockInflater :: Int -> Maybe (B.ByteString -> ([Int16], Word8))
+blockInflater 8 = Just \src ->
   ( map (\b -> fromIntegral b `shiftL` 8) $ drop 1 $ B.unpack src
   , B.head src
   )
-blockInflater 4 src =
+blockInflater 4 = Just \src ->
   ( do
     b <- drop 1 $ B.unpack src
     [   fromIntegral (b .&. 0xF0) `shiftL` 8
@@ -61,7 +66,7 @@ blockInflater 4 src =
       ]
   , B.head src
   )
-blockInflater 6 src =
+blockInflater 6 = Just \src ->
   ( let
     f (a : b : c : xs) = let
       s :: Int32
@@ -77,7 +82,7 @@ blockInflater 6 src =
     in f $ drop 1 $ B.unpack src
   , B.head src
   )
-blockInflater n _ = error $ "Missing blockInflater for " <> show n <> " bits"
+blockInflater _ = Nothing
 
 gainFactor :: [(Int16, Int16)]
 gainFactor =
@@ -92,7 +97,7 @@ decodeInflated :: (MonadIO m) => [Int16] -> Int -> Word8 -> StateT [XAState] m (
 decodeInflated shorts channel prof = let
   (k0, k1) = gainFactor !! fromIntegral (prof `shiftR` 4)
   range = fromIntegral $ prof .&. 0xF
-  in fmap V.fromList $ forM shorts $ \short -> do
+  in fmap V.fromList $ forM shorts \short -> do
     XAState prev0 prev1 <- gets (!! channel)
     let ranged = fromIntegral $ short `shiftR` range :: Int32
         sampleGain = fromIntegral prev0 * fromIntegral k0 + fromIntegral prev1 * fromIntegral k1 :: Int32
@@ -102,52 +107,52 @@ decodeInflated shorts channel prof = let
           else if sample < fromIntegral (minBound :: Int16)
             then minBound
             else fromIntegral sample
-    modify $ let
+    modify let
       f i s = if i == channel
         then XAState sample' prev0
         else s
       in zipWith f [0..]
     return sample'
 
-sourceXA :: (MonadIO f, MonadResource m) => FilePath -> f (AudioSource m Int16)
-sourceXA f = do
-  headerBytes <- liftIO $ withBinaryFile f ReadMode $ \h -> BL.hGet h headerSizeXA
-  let readHeader = do
-        "KWD1"        <- getByteString 4
-        dataLength <- fromIntegral <$> getWord32le
-        samples    <- fromIntegral <$> getWord32le
-        rate       <- fromIntegral <$> getWord16le
-        bits       <- fromIntegral <$> getWord8
-        channels   <- fromIntegral <$> getWord8
-        initState  <- replicateM channels $ do
-          prev0 <- getInt16le
-          prev1 <- getInt16le
-          return XAState{..}
-        let blockSize   = bits * 4 + 1
-            blockSizeXA = blockSize * channels
-        return XAHeader{..}
-  xa <- case runGetOrFail readHeader headerBytes of
-    Left  (_, _, err) -> liftIO $ ioError $ userError $ "[" <> f <> "] " <> err
-    Right (_, _, x  ) -> return x
+sourceXA :: (MonadIO f, MonadFail f, MonadResource m) => Readable -> f (AudioSource m Int16)
+sourceXA r = do
+  headerBytes <- liftIO $ useHandle r \h -> BL.hGet h headerSizeXA
+  xa <- flip runGetM headerBytes do
+    "KWD1"     <- getByteString 4
+    dataLength <- fromIntegral <$> getWord32le
+    samples    <- fromIntegral <$> getWord32le
+    rate       <- fromIntegral <$> getWord16le
+    bits       <- fromIntegral <$> getWord8
+    channels   <- fromIntegral <$> getWord8
+    initState  <- replicateM channels do
+      prev0 <- getInt16le
+      prev1 <- getInt16le
+      return XAState{..}
+    let blockSize   = bits * 4 + 1
+        blockSizeXA = blockSize * channels
+    return XAHeader{..}
+  inflater <- case blockInflater xa.bits of
+    Just inf -> return inf
+    Nothing  -> fail $ "Missing blockInflater for " <> show xa.bits <> " bits"
   return AudioSource
     { rate     = xa.rate
     , frames   = xa.samples
     , channels = xa.channels
     , source   = C.bracketP
-      (openBinaryFile f ReadMode)
+      (rOpen r)
       hClose
-      $ \h -> liftIO (hSeek h AbsoluteSeek $ fromIntegral headerSizeXA) >> let
+      \h -> liftIO (hSeek h AbsoluteSeek $ fromIntegral headerSizeXA) >> let
         numBlocks = xa.dataLength `quot` xa.blockSize
         go blocksLeft samplesLeft
           | blocksLeft  <= 0 = return ()
           | samplesLeft <= 0 = return ()
           | otherwise        = do
             blocks <- fmap (map $ V.take samplesLeft) $
-              forM [0 .. xa.channels - 1] $ \i -> do
+              forM [0 .. xa.channels - 1] \i -> do
                 block <- liftIO $ B.hGet h xa.blockSize
-                let (shorts, prof) = blockInflater xa.bits block
+                let (shorts, prof) = inflater block
                 decodeInflated shorts i prof
-            lift $ yield $ case blocks of
+            lift $ yield case blocks of
               [x] -> x
               _   -> interleave blocks
             go (blocksLeft - 1) (samplesLeft - blockSamplesXA)

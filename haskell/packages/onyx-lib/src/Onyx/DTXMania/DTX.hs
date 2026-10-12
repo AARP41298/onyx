@@ -1,26 +1,28 @@
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms   #-}
-{-# LANGUAGE RecordWildCards   #-}
-{-# LANGUAGE TupleSections     #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE PatternSynonyms     #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE TupleSections       #-}
 module Onyx.DTXMania.DTX where
 
 import           Control.Applicative              ((<|>))
 import           Control.Arrow                    (first, second)
 import           Control.Monad                    (forM_, guard, void)
 import           Control.Monad.IO.Class           (MonadIO (liftIO))
-import           Control.Monad.Trans.Resource     (MonadResource, runResourceT)
+import           Control.Monad.Trans.Resource     (MonadResource)
 import           Control.Monad.Trans.Writer       (execWriter, tell)
 import           Data.Binary.Get
 import qualified Data.ByteString                  as B
 import qualified Data.ByteString.Lazy             as BL
 import           Data.Char                        (isAlphaNum, isDigit, toLower)
 import           Data.Conduit.Audio
-import           Data.Conduit.Audio.Mpg123        (sourceMpg)
-import           Data.Conduit.Audio.Sndfile       (sourceSnd)
 import qualified Data.EventList.Absolute.TimeBody as ATB
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Fixed                       (Pico)
+import           Data.Functor                     ((<&>))
 import qualified Data.HashMap.Strict              as HM
 import           Data.List.Extra                  (groupOn, nubOrd)
 import qualified Data.Map                         as Map
@@ -32,12 +34,16 @@ import           Data.Tuple                       (swap)
 import           Numeric
 import qualified Numeric.NonNegative.Class        as NNC
 import           Onyx.DTXMania.XA                 (sourceXA)
+import           Onyx.FFMPEG                      (ffSource)
 import           Onyx.MIDI.Common                 (pattern RNil, pattern Wait)
 import qualified Onyx.MIDI.Track.Drums            as D
 import qualified Onyx.MIDI.Track.Drums.Elite      as ED
 import qualified Onyx.MIDI.Track.FiveFret         as Five
 import           Onyx.StackTrace
+import           Onyx.Util.Binary                 (runGetM)
 import           Onyx.Util.Files                  (fixFileCase)
+import           Onyx.Util.Handle                 (Readable, fileReadable,
+                                                   subHandle, useHandle)
 import           Onyx.Util.Text.Decode            (decodeWithDefault)
 import           Onyx.Util.Text.ShiftJIS          (decodeShiftJIS)
 import qualified Sound.MIDI.Util                  as U
@@ -50,7 +56,7 @@ loadDTXLines' :: Bool -> FilePath -> IO [(T.Text, T.Text)]
 loadDTXLines' semicolonComments f = do
   -- Shift-JIS is the usual encoding, but I've seen UTF-16 (with BOM) in the wild
   lns <- T.lines . decodeWithDefault decodeShiftJIS <$> B.readFile f
-  return $ flip mapMaybe lns $ \ln -> case T.uncons ln of
+  return $ flip mapMaybe lns \ln -> case T.uncons ln of
     Just ('#', rest) -> case T.span isAlphaNum rest of
       (x, y) -> Just
         ( T.strip x
@@ -162,7 +168,7 @@ drumGDA = \case
   LeftBass   -> Just "LB" -- guess from DTXC
 
 guitarMapping :: DTXFormat -> [(Channel, [Five.Color])]
-guitarMapping fmt = execWriter $ do
+guitarMapping fmt = execWriter do
   let x chan cols = tell [(chan, cols)]
       n1 = Five.Green  -- red in GF
       n2 = Five.Red    -- green in GF
@@ -172,7 +178,7 @@ guitarMapping fmt = execWriter $ do
       lowFretChars = case fmt of
         FormatDTX -> ['2']
         FormatGDA -> ['2', 'G']
-  forM_ lowFretChars $ \c -> do
+  forM_ lowFretChars \c -> do
     x (T.cons c "0") []
     x (T.cons c "1") [n3]
     x (T.cons c "2") [n2]
@@ -208,7 +214,7 @@ guitarMapping fmt = execWriter $ do
   x "D3" [n1, n2, n3, n4, n5]
 
 bassMapping :: [(Channel, [Five.Color])]
-bassMapping = execWriter $ do
+bassMapping = execWriter do
   let x chan cols = tell [(chan, cols)]
       n1 = Five.Green  -- red in GF
       n2 = Five.Red    -- green in GF
@@ -253,7 +259,7 @@ data DTXFormat = FormatDTX | FormatGDA
   deriving (Eq, Show)
 
 getReferences :: T.Text -> [(T.Text, T.Text)] -> [(Chip, T.Text)]
-getReferences typ = mapMaybe $ \(k, v) -> do
+getReferences typ = mapMaybe \(k, v) -> do
   k' <- T.stripPrefix typ k
   guard $ T.length k' == 2
   return (k', v)
@@ -266,8 +272,8 @@ getObjects lns = let
     else Nothing
   in foldr (Map.unionWith $ HM.unionWith (++)) Map.empty
     $ flip mapMaybe lns
-    $ \(k, v) -> flip fmap (isObjects k)
-      $ \(bar, chan) -> Map.singleton bar $ HM.singleton chan [v]
+    $ \(k, v) -> isObjects k <&> \(bar, chan) ->
+      Map.singleton bar $ HM.singleton chan [v]
 
 getChannelGeneral
   :: Channel
@@ -343,14 +349,14 @@ readDTXLines fmt lns = DTX
   , dtx_BassWailing = void $ getChannel "A8"
   , dtx_BassLong   = void $ getChannel "2D"
   , dtx_BGM        = getChannel "01"
-  , dtx_BGMExtra   = HM.fromList $ filter (not . RTB.null . snd) $ do
+  , dtx_BGMExtra   = HM.fromList $ filter (not . RTB.null . snd) do
     chan <- map (T.pack . show) ([61..69] ++ [70..79] ++ [80..89] ++ [90..92] :: [Int])
     return (chan, getChannel chan)
   , dtx_Video      = getChannel "54"
   } where
 
     -- ¥ is the backslash when Shift-JIS decoded
-    fixPath = map $ \case '¥' -> '/'; '\\' -> '/'; c -> c
+    fixPath = map \case '¥' -> '/'; '\\' -> '/'; c -> c
 
     objects :: Map.Map BarNumber (HM.HashMap Channel [T.Text])
     objects = getObjects lns
@@ -364,7 +370,7 @@ readDTXLines fmt lns = DTX
     getBarLengths len n = if n > maxBar
       then []
       else let
-        len' = maybe len (* 4) $ do
+        len' = maybe len (* 4) do
           obj <- Map.lookup n objects
           lens <- HM.lookup "02" obj <|> HM.lookup "BL" obj -- BL = bar length, in .gda
           listToMaybe lens >>= textFloat
@@ -391,63 +397,59 @@ readDTXLines fmt lns = DTX
     refBPMs = HM.mapMaybe textFloat $ HM.fromList $ getReferences "BPM" lns
     baseBPM = fromMaybe 0 $ lookup "BASEBPM" lns >>= textFloat
 
-    readDrums cols = foldr RTB.merge RTB.empty $ do
+    readDrums cols = foldr RTB.merge RTB.empty do
       lane <- [minBound .. maxBound]
       col <- cols
-      Just chan <- return $ case col of
+      Just chan <- return case col of
         Just c  -> Just $ T.pack [c, drumChar lane]
         Nothing -> guard (fmt == FormatGDA) >> drumGDA lane
       return $ fmap (lane,) $ getChannel chan
 
-    readGuitar mapping = foldr RTB.merge RTB.empty $ do
+    readGuitar mapping = foldr RTB.merge RTB.empty do
       (chan, frets) <- mapping
       return $ (frets,) <$> getChannel chan
 
+findDTXAudio :: FilePath -> IO (Maybe FilePath)
+findDTXAudio fp' = do
+  fp <- fixFileCase fp'
+  Dir.doesFileExist fp >>= \case
+    True  -> return $ Just fp
+    False -> case map toLower $ takeExtension fp of
+      ".ogg" -> return Nothing
+      _      -> findDTXAudio $ fp -<.> "ogg"
+
+loadDTXAudio :: (MonadResource m) => Readable -> IO (AudioSource m Float)
+loadDTXAudio r = do
+  magic <- useHandle r \h -> B.hGet h 4
+  case magic of
+    "KWD1" -> mapSamples fractionalSample <$> sourceXA r
+    "RIFF" -> sourceCompressedWAV r
+    _      -> ffSource r -- mp3, ogg, etc.
+
 dtxAudioSource :: (MonadResource m, MonadIO f, SendMessage f) =>
   FilePath -> StackTraceT f (Maybe (AudioSource m Float))
-dtxAudioSource fp' = do
-  fp <- fixFileCase fp'
-  stackIO (Dir.doesFileExist fp) >>= \case
-    True -> stackIO $ Just <$> case map toLower $ takeExtension fp of
-      ".mp3" -> sourceMpg fp
-      ".xa"  -> mapSamples fractionalSample <$> sourceXA fp
-      ".wav" -> sourceCompressedWAV fp
-      _      -> sourceSnd fp
-    False -> do
-      tryOgg <- case map toLower $ takeExtension fp of
-        ".ogg" -> return Nothing
-        _      -> dtxAudioSource $ fp -<.> "ogg"
-      case tryOgg of
-        Nothing -> warn $ "Couldn't find audio file at: " <> fp
-        Just _  -> return ()
-      return tryOgg
-
-dropBytes :: (MonadResource m) => Integer -> FilePath -> FilePath -> (FilePath -> m a) -> m a
-dropBytes n template f cb = tempDir "onyx-dtx-import" $ \dir -> do
-  temp <- liftIO $ withBinaryFile f ReadMode $ \h -> do
-    let temp = dir </> template
-    hSeek h AbsoluteSeek n
-    BL.hGetContents h >>= BL.writeFile temp
-    return temp
-  cb temp
+dtxAudioSource f = stackIO (findDTXAudio f) >>= \case
+  Nothing    -> do
+    warn $ "Couldn't find audio file at: " <> f
+    return Nothing
+  Just found -> stackIO $ Just <$> loadDTXAudio (fileReadable found)
 
 findOggS :: Handle -> IO (Maybe Integer)
 findOggS h = do
   hSeek h AbsoluteSeek 0
   bs <- B.hGet h 0x1000
-  return $ let
+  return let
     (x, y) = B.breakSubstring "OggS" bs
     in guard (not $ B.null y) >> Just (fromIntegral $ B.length x)
 
-sourceCompressedWAV :: (MonadIO f, MonadResource m) => FilePath -> f (AudioSource m Float)
-sourceCompressedWAV f = liftIO $ do
-  maybeCompressedStart <- withBinaryFile f ReadMode $ \h -> do
+-- Older DTX simfiles sometimes have these strange "wav" with mp3 or ogg data inside
+sourceCompressedWAV :: (MonadIO f, MonadResource m) => Readable -> f (AudioSource m Float)
+sourceCompressedWAV r = liftIO do
+  maybeCompressedStart <- useHandle r \h -> do
     let findChunk magic = hSeek h AbsoluteSeek 12 >> findChunk' magic
         findChunk' magic = do
           thisChunk <- BL.hGet h 4
-          size <- BL.hGet h 4 >>= \bs -> case runGetOrFail getWord32le bs of
-            Left  (_, _, err) -> liftIO $ ioError $ userError $ "[" <> f <> "] " <> err
-            Right (_, _, x  ) -> return x
+          size <- BL.hGet h 4 >>= runGetM getWord32le
           if magic == thisChunk
             then return ()
             else do
@@ -459,27 +461,24 @@ sourceCompressedWAV f = liftIO $ do
     dataStart <- hTell h
     let oggOrData = do
           firstOggS <- findOggS h
-          return $ Just (sourceSnd, "dtx-audio.ogg", fromMaybe dataStart firstOggS)
+          return $ Just $ fromMaybe dataStart firstOggS
     case audioType of
-      "Og"  -> oggOrData
-      "pg"  -> oggOrData
-      "U\0" -> return $ Just (sourceMpg, "dtx-audio.mp3", dataStart)
-      _     -> return $ Nothing
-  case maybeCompressedStart of
-    Nothing                       -> sourceSnd f
-    Just (getSource, name, inner) -> do
-      src <- runResourceT $ dropBytes inner name f $ liftIO . getSource
-      return AudioSource
-        { frames   = frames   src
-        , rate     = rate     src
-        , channels = channels src
-        , source   = dropBytes inner name f $ \temp -> do
-          src' <- liftIO $ getSource temp
-          source src'
-        }
+      -- referencing https://www.recordingblogs.com/wiki/format-chunk-of-a-wave-file
+      "U\0" -> return $ Just dataStart -- MP3
+      -- no idea if these have differences, just adding all from the table
+      "Og"  -> oggOrData -- seen
+      "Pg"  -> oggOrData
+      "Qg"  -> oggOrData
+      "og"  -> oggOrData
+      "pg"  -> oggOrData -- seen
+      "qg"  -> oggOrData
+      _     -> return Nothing
+  ffSource $ case maybeCompressedStart of
+    Nothing    -> r
+    Just inner -> subHandle (<> " | inside compressed wav") inner Nothing r
 
 makeDTX :: DTX -> T.Text
-makeDTX DTX{..} = T.unlines $ execWriter $ do
+makeDTX DTX{..} = T.unlines $ execWriter do
 
   let gap = tell [""]
       pair k v = tell ["#" <> k <> ": " <> v]
@@ -507,19 +506,19 @@ makeDTX DTX{..} = T.unlines $ execWriter $ do
   gap
 
   let allWAVs = Set.toList $ Set.fromList $ HM.keys dtx_WAV <> HM.keys dtx_VOLUME <> HM.keys dtx_PAN
-  forM_ allWAVs $ \chip -> do
+  forM_ allWAVs \chip -> do
     opt ("WAV" <> chip) $ T.pack <$> HM.lookup chip dtx_WAV
     opt ("VOLUME" <> chip) $ T.pack . show <$> HM.lookup chip dtx_VOLUME
     opt ("PAN" <> chip) $ T.pack . show <$> HM.lookup chip dtx_PAN
   gap
 
-  forM_ (HM.toList dtx_AVI) $ \(chip, f) -> pair ("AVI" <> chip) (T.pack f)
+  forM_ (HM.toList dtx_AVI) \(chip, f) -> pair ("AVI" <> chip) (T.pack f)
   gap
 
   let showDecimal r = T.dropWhileEnd (== '.') $ T.dropWhileEnd (== '0') $ T.pack $ show (realToFrac r :: Pico)
 
   tell ["; Time signatures"]
-  forM_ (ATB.toPairList $ RTB.toAbsoluteEventList 0 $ U.measureMapToLengths dtx_MeasureMap) $ \(sigPosn, len) -> let
+  forM_ (ATB.toPairList $ RTB.toAbsoluteEventList 0 $ U.measureMapToLengths dtx_MeasureMap) \(sigPosn, len) -> let
     (sigBar, _sigBeats) = U.applyMeasureMap dtx_MeasureMap sigPosn -- _sigBeats should be 0
     fraction44 = len / 4
     in bar sigBar "02" $ showDecimal fraction44
@@ -534,7 +533,7 @@ makeDTX DTX{..} = T.unlines $ execWriter $ do
       fixedTempoBPS = hackFixTempoMap False $ U.tempoMapToBPS dtx_TempoMap
       tempoRefs = zip alphaNumChips $ Set.toList $ Set.fromList $ RTB.getBodies fixedTempoBPS
       tempoLookup = Map.fromList $ map swap tempoRefs
-  forM_ tempoRefs $ \(chip, bps) -> pair ("BPM" <> chip) $ showDecimal $ bps * 60
+  forM_ tempoRefs \(chip, bps) -> pair ("BPM" <> chip) $ showDecimal $ bps * 60
   gap
 
   let eachBar rtb f = let
@@ -543,7 +542,7 @@ makeDTX DTX{..} = T.unlines $ execWriter $ do
           $ map (first $ U.applyMeasureMap dtx_MeasureMap)
           $ ATB.toPairList
           $ RTB.toAbsoluteEventList 0 rtb
-        in forM_ barGroups $ \barGroup -> case barGroup of
+        in forM_ barGroups \barGroup -> case barGroup of
           [] -> return () -- shouldn't happen
           ((i, _), _) : _ -> let
             barLength = U.unapplyMeasureMap dtx_MeasureMap (i + 1, 0) - U.unapplyMeasureMap dtx_MeasureMap (i, 0)
@@ -554,79 +553,79 @@ makeDTX DTX{..} = T.unlines $ execWriter $ do
       makeBar chips = let
         denom = foldr lcm 1 $ map (denominator . fst) chips
         chips' = map (first $ round . (* realToFrac denom)) chips
-        in T.concat $ do
+        in T.concat do
           num <- [0 .. denom - 1]
           return $ fromMaybe "00" $ lookup num chips'
 
   tell ["; BPM changes"]
-  eachBar fixedTempoBPS $ \barNumber changes -> do
-    bar barNumber "08" $ makeBar $ map (second $ \bps -> fromMaybe "ZZ" $ Map.lookup bps tempoLookup) changes
+  eachBar fixedTempoBPS \barNumber changes -> do
+    bar barNumber "08" $ makeBar $ map (second \bps -> fromMaybe "ZZ" $ Map.lookup bps tempoLookup) changes
   gap
 
   let splitEvents events = do
         group <- nubOrd $ map (\(_, (g, _)) -> g) events
         return (group, mapMaybe (\(t, (g, x)) -> guard (g == group) >> Just (t, x)) events)
 
-  eachBar dtx_Drums $ \barNumber chips -> do
+  eachBar dtx_Drums \barNumber chips -> do
     tell ["; Drums bar " <> T.pack (show barNumber)]
-    forM_ (splitEvents chips) $ \(lane, laneChips) -> do
+    forM_ (splitEvents chips) \(lane, laneChips) -> do
       bar barNumber (T.pack ['1', drumChar lane]) $ makeBar laneChips
     gap
 
-  eachBar dtx_DrumsDummy $ \barNumber chips -> do
+  eachBar dtx_DrumsDummy \barNumber chips -> do
     tell ["; Drums (dummy) bar " <> T.pack (show barNumber)]
-    forM_ (splitEvents chips) $ \(lane, laneChips) -> do
+    forM_ (splitEvents chips) \(lane, laneChips) -> do
       bar barNumber (T.pack ['3', drumChar lane]) $ makeBar laneChips
     gap
 
   -- TODO maybe ensure sort before lookup
   let guitarTable = Map.fromList $ map swap $ guitarMapping FormatDTX
-  eachBar dtx_Guitar $ \barNumber chips -> do
+  eachBar dtx_Guitar \barNumber chips -> do
     tell ["; Guitar bar " <> T.pack (show barNumber)]
-    forM_ (splitEvents chips) $ \(colors, colorsChips) -> do
+    forM_ (splitEvents chips) \(colors, colorsChips) -> do
       bar barNumber (fromMaybe "ZZ" $ Map.lookup colors guitarTable) $ makeBar colorsChips
     gap
 
-  eachBar dtx_GuitarWailing $ \barNumber wails -> do
+  eachBar dtx_GuitarWailing \barNumber wails -> do
     tell ["; Guitar wailing bar " <> T.pack (show barNumber)]
     bar barNumber "28" $ makeBar $ map (\(t, _) -> (t, "01")) wails
     gap
 
-  eachBar dtx_GuitarLong $ \barNumber longs -> do
+  eachBar dtx_GuitarLong \barNumber longs -> do
     tell ["; Guitar long bar " <> T.pack (show barNumber)]
     bar barNumber "2C" $ makeBar $ map (\(t, _) -> (t, "01")) longs
     gap
 
   -- TODO maybe ensure sort before lookup
   let bassTable = Map.fromList $ map swap bassMapping
-  eachBar dtx_Bass $ \barNumber chips -> do
+  eachBar dtx_Bass \barNumber chips -> do
     tell ["; Bass bar " <> T.pack (show barNumber)]
-    forM_ (splitEvents chips) $ \(colors, colorsChips) -> do
+    forM_ (splitEvents chips) \(colors, colorsChips) -> do
       bar barNumber (fromMaybe "ZZ" $ Map.lookup colors bassTable) $ makeBar colorsChips
     gap
 
-  eachBar dtx_BassWailing $ \barNumber wails -> do
+  eachBar dtx_BassWailing \barNumber wails -> do
     tell ["; Bass wailing bar " <> T.pack (show barNumber)]
     bar barNumber "A8" $ makeBar $ map (\(t, _) -> (t, "01")) wails
     gap
 
-  eachBar dtx_BassLong $ \barNumber longs -> do
+  eachBar dtx_BassLong \barNumber longs -> do
     tell ["; Bass long bar " <> T.pack (show barNumber)]
     bar barNumber "2D" $ makeBar $ map (\(t, _) -> (t, "01")) longs
     gap
 
   tell ["; BGM"]
-  eachBar dtx_BGM $ \barNumber chips -> do
+  eachBar dtx_BGM \barNumber chips -> do
     bar barNumber "01" $ makeBar chips
   gap
 
-  forM_ (HM.toList dtx_BGMExtra) $ \(chan, extra) -> do
+  forM_ (HM.toList dtx_BGMExtra) \(chan, extra) -> do
     tell ["; BGM extra channel " <> chan]
-    eachBar extra $ \barNumber chips -> do
+    eachBar extra \barNumber chips -> do
       bar barNumber chan $ makeBar chips
     gap
 
-  eachBar dtx_Video $ \barNumber chips -> do
+  eachBar dtx_Video \barNumber chips -> do
     tell ["; Video bar " <> T.pack (show barNumber)]
     bar barNumber "54" $ makeBar chips
   gap
@@ -648,9 +647,9 @@ data DTXOverride = DTXOverride T.Text [DTXCondition]
   deriving (Read)
 
 lookupDTXMapping :: [DTXCondition] -> ED.EliteDrumNote a -> Maybe Chip
-lookupDTXMapping conds tdn = go $ Branch conds where
+lookupDTXMapping conds edn = go $ Branch conds where
   go (Chip chip)           = Just chip
-  go (MatchNote     n sub) = if n == ED.tdn_gem      tdn then go sub else Nothing
-  go (MatchType     t sub) = if t == ED.tdn_type     tdn then go sub else Nothing
-  go (MatchVelocity v sub) = if v == ED.tdn_velocity tdn then go sub else Nothing
+  go (MatchNote     n sub) = if n == edn.gem      then go sub else Nothing
+  go (MatchType     t sub) = if t == edn.type_    then go sub else Nothing
+  go (MatchVelocity v sub) = if v == edn.velocity then go sub else Nothing
   go (Branch subs)         = listToMaybe $ mapMaybe go subs

@@ -1,10 +1,13 @@
+{-# LANGUAGE BlockArguments    #-}
 {-# LANGUAGE DeriveFoldable    #-}
 {-# LANGUAGE DeriveFunctor     #-}
 {-# LANGUAGE DeriveTraversable #-}
+{-# LANGUAGE NoFieldSelectors  #-}
 module Onyx.FeedBack.Base where
 
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Fixed                       (Micro, Milli)
+import           Data.Functor                     ((<&>))
 import qualified Data.HashMap.Strict              as HM
 import qualified Data.Text                        as T
 import qualified Numeric.NonNegative.Wrapper      as NN
@@ -36,4 +39,4 @@ data Chart t = Chart
 
 instance Functor Chart where
   fmap f (Chart song trks) =
-    Chart song $ flip fmap trks $ RTB.mapTime f . RTB.mapBody (fmap f)
+    Chart song $ trks <&> RTB.mapTime f . RTB.mapBody (fmap f)

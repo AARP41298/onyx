@@ -1,12 +1,11 @@
+{-# LANGUAGE BlockArguments      #-}
 {-# LANGUAGE DeriveGeneric       #-}
-{-# LANGUAGE DerivingStrategies  #-}
 {-# LANGUAGE DerivingVia         #-}
-{-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE RecordWildCards     #-}
-{-# LANGUAGE TupleSections       #-}
 module Onyx.MIDI.Track.Mania where
 
 import           Control.Monad                    (guard)
@@ -14,6 +13,7 @@ import           Control.Monad.Codec
 import           Data.Bifunctor
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Foldable                    (toList)
+import           Data.Functor                     ((<&>))
 import qualified Data.Map                         as Map
 import           Data.Maybe                       (fromMaybe, listToMaybe)
 import qualified Data.Text                        as T
@@ -27,8 +27,8 @@ import qualified Sound.MIDI.Message.Channel       as C
 import qualified Sound.MIDI.Message.Channel.Voice as V
 
 data ManiaTrack t = ManiaTrack
-  { maniaNotes     :: RTB.T t (Edge () (Int, NoteType))
-  , maniaOverdrive :: RTB.T t Bool
+  { notes     :: RTB.T t (Edge () (Int, NoteType))
+  , overdrive :: RTB.T t Bool
   } deriving (Eq, Ord, Show, Generic)
     deriving (Semigroup, Monoid, Mergeable) via GenericMerge (ManiaTrack t)
 
@@ -37,16 +37,16 @@ instance TraverseTrack ManiaTrack where
 
 instance ParseTrack ManiaTrack where
   parseTrack = do
-    maniaOverdrive <- maniaOverdrive =. edges 116
-    maniaNotes     <- maniaNotes     =. fatBlips (1/8) Codec
-      { codecIn = slurpTrack $ \mt -> let
-        applyPitchEdges (pitch, thisEdges) = flip fmap thisEdges $ bimap
+    overdrive <- (.overdrive) =. edges 116
+    notes     <- (.notes    ) =. fatBlips (1/8) Codec
+      { codecIn = slurpTrack \mt -> let
+        applyPitchEdges (pitch, thisEdges) = thisEdges <&> bimap
           (const ())
           (\chan -> (V.fromPitch pitch, fromMaybe NoteNormal $ lookup (C.fromChannel chan) channelMap))
         notes
           = foldr RTB.merge RTB.empty
           $ map applyPitchEdges
-          $ Map.toList $ midiNotes mt
+          $ Map.toList mt.midiNotes
         mt' = mt { midiNotes = Map.empty }
         in (notes, mt')
       , codecOut = makeTrackBuilder $ fmap $ makeEdge' . bimap
@@ -65,7 +65,7 @@ getManiaNormalNotes' keepLift mt = RTB.mapMaybe
     EdgeOn () (k, noteType) -> guard (keep noteType) >> Just (EdgeOn () k)
     EdgeOff   (k, noteType) -> guard (keep noteType) >> Just (EdgeOff   k)
   )
-  (maniaNotes mt)
+  mt.notes
   where keep = \case
           NoteNormal -> True
           NoteMine   -> False
@@ -81,26 +81,26 @@ danceDifficultyName = \case
   SMChallenge -> "challenge"
 
 danceToMania :: DanceTrack t -> Map.Map T.Text (ManiaTrack t)
-danceToMania dt = Map.fromList $ do
+danceToMania dt = Map.fromList do
   diff <- [minBound .. maxBound] :: [SMDifficulty]
   dd <- toList $ Map.lookup diff dt.danceDifficulties
   let mt = ManiaTrack
-        { maniaNotes = fmap (fmap $ first fromEnum) dd.danceNotes
-        , maniaOverdrive = dt.danceOverdrive
+        { notes = fmap (fmap $ first fromEnum) dd.danceNotes
+        , overdrive = dt.danceOverdrive
         }
   return (danceDifficultyName diff, mt)
 
 maniaToDance :: (NNC.C t) => [(SMDifficulty, T.Text)] -> Map.Map T.Text (ManiaTrack t) -> DanceTrack t
 maniaToDance diffMapping trks = DanceTrack
-  { danceDifficulties = Map.fromList $ do
+  { danceDifficulties = Map.fromList do
     (smdiff, maniaDiff) <- diffMapping
     maniaTrack <- toList $ Map.lookup maniaDiff trks
-    let toArrows = mapM $ \(k, noteType) -> do
+    let toArrows = mapM \(k, noteType) -> do
           guard $ k <= 3
           Just (toEnum k, noteType)
-    return (smdiff, DanceDifficulty $ RTB.mapMaybe toArrows maniaTrack.maniaNotes)
-  , danceOverdrive = fromMaybe RTB.empty $ listToMaybe $ do
+    return (smdiff, DanceDifficulty $ RTB.mapMaybe toArrows maniaTrack.notes)
+  , danceOverdrive = fromMaybe RTB.empty $ listToMaybe do
     (_, maniaDiff) <- diffMapping
     maniaTrack <- toList $ Map.lookup maniaDiff trks
-    filter (not . RTB.null) [maniaTrack.maniaOverdrive]
+    filter (not . RTB.null) [maniaTrack.overdrive]
   }

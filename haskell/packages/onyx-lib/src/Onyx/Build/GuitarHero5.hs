@@ -1,8 +1,8 @@
+{-# LANGUAGE BlockArguments      #-}
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE PatternSynonyms     #-}
-{-# LANGUAGE RecordWildCards     #-}
 module Onyx.Build.GuitarHero5 (gh5Rules, onyxGH5PackageTitle, hashGH5) where
 
 import           Control.Monad.Extra               (allM)
@@ -15,6 +15,7 @@ import qualified Data.ByteString.Char8             as B8
 import qualified Data.ByteString.Lazy              as BL
 import           Data.Char                         (toUpper)
 import           Data.Conduit.Audio
+import           Data.Conduit.Audio.LAME           (sinkMP3WithHandle)
 import qualified Data.Conduit.Audio.LAME.Binding   as L
 import           Data.Conduit.Audio.SampleRate
 import           Data.Foldable                     (toList)
@@ -46,7 +47,7 @@ import           Onyx.MIDI.Common                  (RB3Instrument (..),
                                                     pattern RNil, pattern Wait)
 import           Onyx.MIDI.Track.Events            (EventsTrack (..))
 import qualified Onyx.MIDI.Track.File              as F
-import           Onyx.MIDI.Track.Venue             (venueCameraRB3)
+import           Onyx.MIDI.Track.Venue             (cameraRB3)
 import           Onyx.Neversoft.CRC                (qbKeyCRC, qsKey)
 import           Onyx.Neversoft.Crypt              (ghworEncrypt)
 import           Onyx.Neversoft.GH4.Metadata       (makeVocalsCents)
@@ -61,6 +62,7 @@ import           Onyx.PlayStation.NPData           (ghworCustomMidEdatConfig,
                                                     npdContentID, packNPData)
 import           Onyx.PlayStation.PKG              (makePKG)
 import           Onyx.Project                      hiding (Difficulty)
+import           Onyx.Reductions                   (loadFretLimit)
 import           Onyx.Resources                    (getResourcesPath,
                                                     ghWoRThumbnail)
 import           Onyx.StackTrace
@@ -94,7 +96,7 @@ onyxGH5PackageTitle songYaml gh5 cdl = let
 gh5Rules :: BuildInfo -> FilePath -> TargetGH5 FilePath-> QueueLog Rules ()
 gh5Rules buildInfo dir gh5 = do
 
-  let songYaml = biSongYaml buildInfo
+  let songYaml = buildInfo.biSongYaml
 
   (planName, plan) <- case getPlan gh5.common.plan songYaml of
     Nothing   -> fail $ "Couldn't locate a plan for this target: " ++ show gh5
@@ -144,9 +146,7 @@ gh5Rules buildInfo dir gh5 = do
         artistQS = makeQSPair $ "\\L" <> getArtist metadata
         albumQS  = makeQSPair $ getAlbum metadata
         qs = makeQS [titleQS, artistQS, albumQS]
-        genre = worGenre $ interpretGenre
-          metadata.genre
-          metadata.subgenre
+        genre = (interpretGenre metadata.genre metadata.subgenre).worGenre
         qb =
           [ QBSectionArray "gh6_dlc_songlist" textQBFilenameKey $
             QBArrayOfQbKey [songKeyQB]
@@ -158,15 +158,15 @@ gh5Rules buildInfo dir gh5 = do
               , QBStructItemString "name" $ B8.pack songKey
               , QBStructItemQbKeyStringQs "title" $ fst titleQS
               , QBStructItemQbKeyStringQs "artist" $ fst artistQS
-              , QBStructItemQbKeyString "artist_text" $ if metadata.cover
+              , QBStructItemQbKeyString "artist_text" if metadata.cover
                 then "artist_text_as_made_famous_by"
                 else "artist_text_by"
               , QBStructItemInteger "original_artist"
-                $ if metadata.cover then 0 else 1
+                if metadata.cover then 0 else 1
               -- TODO can we omit year, or pick a better default than 1960
               , QBStructItemInteger "year" $ fromIntegral $ getYear metadata
               , QBStructItemQbKeyStringQs "album_title" $ fst albumQS
-              , QBStructItemQbKey "singer" $ case getPart gh5.vocal songYaml >>= (.vocal) >>= (.gender) of
+              , QBStructItemQbKey "singer" case getPart gh5.vocal songYaml >>= (.vocal) >>= (.gender) of
                 Nothing     -> "male" -- can we just omit?
                 Just Male   -> "male"
                 Just Female -> "female"
@@ -188,10 +188,10 @@ gh5Rules buildInfo dir gh5 = do
               , QBStructItemInteger "thin_fretbar_8note_params_high_bpm" 150
               , QBStructItemInteger "thin_fretbar_16note_params_low_bpm" 1
               , QBStructItemInteger "thin_fretbar_16note_params_high_bpm" 120
-              , QBStructItemInteger "guitar_difficulty_rating" $ fromIntegral $ gh5GuitarTier difficulties
-              , QBStructItemInteger "bass_difficulty_rating" $ fromIntegral $ gh5BassTier difficulties
-              , QBStructItemInteger "vocals_difficulty_rating" $ fromIntegral $ gh5VocalsTier difficulties
-              , QBStructItemInteger "drums_difficulty_rating" $ fromIntegral $ gh5DrumsTier difficulties
+              , QBStructItemInteger "guitar_difficulty_rating" $ fromIntegral difficulties.gh5GuitarTier
+              , QBStructItemInteger "bass_difficulty_rating"   $ fromIntegral difficulties.gh5BassTier
+              , QBStructItemInteger "vocals_difficulty_rating" $ fromIntegral difficulties.gh5VocalsTier
+              , QBStructItemInteger "drums_difficulty_rating"  $ fromIntegral difficulties.gh5DrumsTier
               , QBStructItemInteger "band_difficulty_rating" 10 -- doesn't seem to be used anywhere, but we could fill in
               -- maybe we could figure out the options for these and match them to the RB kit options?
               , QBStructItemString "snare" "ModernRock"
@@ -219,12 +219,12 @@ gh5Rules buildInfo dir gh5 = do
       Nothing    -> fatal "Couldn't reparse practice sections .qs file"
 
     mid <- F.shakeMIDI $ planDir </> "processed.mid"
-    endTime <- case mid.tracks.onyxEvents.eventsEnd of
+    endTime <- case mid.tracks.onyxEvents.end of
       Wait dt _ _ -> return dt
       RNil        -> fatal "panic! no [end] in processed midi"
 
     let tmap = mid.tempos
-        rbCamera = venueCameraRB3 $ flip evalRand (mkStdGen hashed) $ getVenue
+        rbCamera = (.cameraRB3) $ flip evalRand (mkStdGen hashed) $ getVenue
           VenueTargetRB3
           partMap
           tmap
@@ -312,8 +312,10 @@ gh5Rules buildInfo dir gh5 = do
 
   (dir </> "ghwor.note", dir </> "ghwor.qs", dir </> "drum-anims.txt") %> \(outNote, outQS, outDrumAnims) -> do
     mid <- F.shakeMIDI $ planDir </> "processed.mid"
+    fretLimit <- loadFretLimit
     (note, qs, drumAnims) <- makeGHWoRNote songYaml gh5
       (applyTargetMIDI gh5.common mid)
+      fretLimit
       $ getAudioLength buildInfo planName plan
     stackIO $ BL.writeFile outNote $ runPut $
       putNote songKeyQB $ makeWoRNoteFile note
@@ -354,7 +356,7 @@ gh5Rules buildInfo dir gh5 = do
       :| [Silence 2 $ Seconds 0]
     runAudio (applyTargetAudio (common gh5) mid src) out
 
-  forM_ ["audio1", "audio2", "audio3", "preview"] $ \audio -> do
+  forM_ ["audio1", "audio2", "audio3", "preview"] \audio -> do
     let wav = dir </> audio <.> "wav"
         fsb = dir </> audio <.> "fsb"
     fsb %> \out -> do
@@ -454,18 +456,22 @@ gh5Rules buildInfo dir gh5 = do
   -- I'm not sure if the game requires 48 kHz,
   -- but apparently 44.1 kHz results in inconsistent frame sizes,
   -- which causes problems with the MP3 interleaving.
-  let setup lame = liftIO $ do
+  let setup lame = liftIO do
         L.check $ L.setBrate lame 128
         L.check $ L.setQuality lame 5
         L.check $ L.setOutSamplerate lame 48000
-      setupSmall lame = liftIO $ do
+        -- this prevents emitting an Info frame,
+        -- game doesn't recognize that so it would delay the audio
+        L.check $ L.setBWriteVbrTag lame False
+      setupSmall lame = liftIO do
         -- Tried 8-bit 16kHz (MPEG-2 layer 3) but got stuck loading in game
         L.check $ L.setBrate lame 32
         L.check $ L.setQuality lame 5
         L.check $ L.setOutSamplerate lame 48000
+        L.check $ L.setBWriteVbrTag lame False
   ps3MP3Preview %> \out -> do
     src <- shk $ buildSource $ Input (dir </> "preview.wav")
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setup
+    stackIO $ runResourceT $ sinkMP3WithHandle out setup
       $ resampleTo 48000 SincMediumQuality src
 
   let midAndAudioLength = do
@@ -481,7 +487,7 @@ gh5Rules buildInfo dir gh5 = do
       pad = 0 -- TODO did we forget to pad ghwor output?
   ps3MP3SilenceSmall %> \out -> do
     (_, setLength) <- midAndAudioLength
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setupSmall $ setLength $ silent (Frames 0) 48000 2
+    stackIO $ runResourceT $ sinkMP3WithHandle out setupSmall $ setLength $ silent (Frames 0) 48000 2
   (ps3MP3Kick, ps3MP3Snare, ps3MP3Toms, ps3MP3Cymbals) %> \_ -> do
     (mid, setLength) <- midAndAudioLength
     kick    <- sourceKick    buildInfo ghParts gh5.common mid pad SpecStereo planName plan gh5.drums difficulties.gh5DrumsTier
@@ -496,10 +502,10 @@ gh5Rules buildInfo dir gh5 = do
         shk $ copyFile' ps3MP3SilenceSmall ps3MP3Toms
         shk $ copyFile' ps3MP3SilenceSmall ps3MP3Cymbals
       else do
-        stackIO $ runResourceT $ sinkMP3PadWithHandle ps3MP3Kick    setup $ setLength kick
-        stackIO $ runResourceT $ sinkMP3PadWithHandle ps3MP3Snare   setup $ setLength snare
-        stackIO $ runResourceT $ sinkMP3PadWithHandle ps3MP3Toms    setup $ setLength toms
-        stackIO $ runResourceT $ sinkMP3PadWithHandle ps3MP3Cymbals setup $ setLength cymbals
+        stackIO $ runResourceT $ sinkMP3WithHandle ps3MP3Kick    setup $ setLength kick
+        stackIO $ runResourceT $ sinkMP3WithHandle ps3MP3Snare   setup $ setLength snare
+        stackIO $ runResourceT $ sinkMP3WithHandle ps3MP3Toms    setup $ setLength toms
+        stackIO $ runResourceT $ sinkMP3WithHandle ps3MP3Cymbals setup $ setLength cymbals
   (ps3MP3Guitar, ps3MP3Bass, ps3MP3Vocals) %> \_ -> do
     (mid, setLength) <- midAndAudioLength
     guitar <- sourceSimplePart buildInfo ghParts gh5.common mid pad SpecStereo planName plan gh5.guitar difficulties.gh5GuitarTier
@@ -512,9 +518,9 @@ gh5Rules buildInfo dir gh5 = do
         shk $ copyFile' ps3MP3SilenceSmall ps3MP3Bass
         shk $ copyFile' ps3MP3SilenceSmall ps3MP3Vocals
       else do
-        stackIO $ runResourceT $ sinkMP3PadWithHandle ps3MP3Guitar setup $ setLength guitar
-        stackIO $ runResourceT $ sinkMP3PadWithHandle ps3MP3Bass   setup $ setLength bass
-        stackIO $ runResourceT $ sinkMP3PadWithHandle ps3MP3Vocals setup $ setLength vocals
+        stackIO $ runResourceT $ sinkMP3WithHandle ps3MP3Guitar setup $ setLength guitar
+        stackIO $ runResourceT $ sinkMP3WithHandle ps3MP3Bass   setup $ setLength bass
+        stackIO $ runResourceT $ sinkMP3WithHandle ps3MP3Vocals setup $ setLength vocals
   ps3MP3Backing %> \out -> do
     (mid, setLength) <- midAndAudioLength
     backing <- sourceBacking buildInfo gh5.common mid pad planName plan ghDifficulties
@@ -524,11 +530,11 @@ gh5Rules buildInfo dir gh5 = do
       else do
         kit <- sourceKit buildInfo ghParts gh5.common mid pad SpecStereo planName plan gh5.drums difficulties.gh5DrumsTier
         return $ mix backing kit
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setup $ setLength backingWithDrums
+    stackIO $ runResourceT $ sinkMP3WithHandle out setup $ setLength backingWithDrums
   ps3MP3Crowd %> \out -> do
     (mid, setLength) <- midAndAudioLength
     crowd <- sourceCrowd buildInfo gh5.common mid pad planName plan
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setup $ setLength crowd
+    stackIO $ runResourceT $ sinkMP3WithHandle out setup $ setLength crowd
 
   let readMP3s paths = do
         shk $ need paths
@@ -580,7 +586,7 @@ gh5Rules buildInfo dir gh5 = do
   ps3SongRoot </> ps3ManifestPak %> \out -> do
     packNPData' ps3EDATConfig (dir </> "cmanifest.pak.xen") out $ B8.pack ps3ManifestPak
 
-  phony ps3SongRoot $ do
+  phony ps3SongRoot do
     shk $ need $ map (ps3SongRoot </>)
       [ ps3Audio1, ps3Audio2, ps3Audio3, ps3AudioPreview, ps3SongVRAMPak, ps3SongPak
       , ps3CDLTextVRAMPak, ps3CDLTextPak, ps3CDLVRAMPak, ps3CDLPak, ps3ManifestVRAMPak, ps3ManifestPak

@@ -1,4 +1,5 @@
 -- | .moggsong files found in Amplitude (PS3 + PS4)
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
@@ -57,7 +58,7 @@ data SongInfo = SongInfo
   } deriving (Eq, Show)
 
 chunkTracks :: (SendMessage m) => ChunkCodec m [(T.Text, ([Integer], T.Text))]
-chunkTracks = dimap DictList fromDictList $ chunkParens $ chunksDictList chunkSym $ chunksPair (chunkParens stackChunks) chunkSym
+chunkTracks = dimap DictList (.fromDictList) $ chunkParens $ chunksDictList chunkSym $ chunksPair (chunkParens stackChunks) chunkSym
 
 -- | Drops children that aren't parentheses.
 -- (This is a hack because in Crystal, HMX forgot to comment out the line
@@ -66,12 +67,12 @@ chunkTracks = dimap DictList fromDictList $ chunkParens $ chunksDictList chunkSy
 cleanAssoc :: (Monad m) => ChunksCodec m a -> ChunksCodec m a
 cleanAssoc cdc = cdc
   { codecIn = let
-    f = filter $ \case Parens{} -> True; _ -> False
+    f = filter \case Parens{} -> True; _ -> False
     in mapStackTraceT (local f) $ codecIn cdc
   }
 
 instance StackChunks Song where
-  stackChunks = cleanAssoc $ asStrictAssoc "Song" $ do
+  stackChunks = cleanAssoc $ asStrictAssoc "Song" do
     mogg_path          <- (.mogg_path          ) =. req "mogg_path"           (single chunkSym)
     midi_path          <- (.midi_path          ) =. req "midi_path"           (single chunkSym)
     song_info          <- (.song_info          ) =. req "song_info"           stackChunks
@@ -109,7 +110,7 @@ chunkBarBeatTick = Codec
         ticks' <- read' ticks
         return $ bars' * 4 + beats' + ticks' / 480
       _ -> expected "a length in the form bars:beats:ticks"
-  , codecOut = fmapArg $ \t -> let
+  , codecOut = fmapArg \t -> let
     bars, beats', ticks :: Integer
     (bars, beats) = divMod' t 4
     (beats', part) = properFraction beats
@@ -118,7 +119,7 @@ chunkBarBeatTick = Codec
   }
 
 instance StackChunks SongInfo where
-  stackChunks = cleanAssoc $ asStrictAssoc "SongInfo" $ do
+  stackChunks = cleanAssoc $ asStrictAssoc "SongInfo" do
     length_ <- (.length_) =. req "length" (single chunkBarBeatTick)
     countin <- (.countin) =. req "countin" stackChunks
     return SongInfo{..}

@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments    #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Main where
 
@@ -44,7 +45,7 @@ main = getArgs >>= \args -> case args of
 
     -- Make sure I wrote up the changes for this version
     changes <- readUTF8 "CHANGES.md"
-    unless (versionString `T.isInfixOf` changes) $ do
+    unless (versionString `T.isInfixOf` changes) do
       error $ "No changelog written for version " ++ versionString
 
   ["version-print"] -> do
@@ -55,7 +56,7 @@ main = getArgs >>= \args -> case args of
   "version-write" : files -> do
 
     -- Insert version string into files specified on command line
-    forM_ files $ \f -> readUTF8 f >>= insertInfo >>= writeUTF8 f
+    forM_ files \f -> readUTF8 f >>= insertInfo >>= writeUTF8 f
 
   ["dlls", exe] -> do
 
@@ -74,10 +75,10 @@ main = getArgs >>= \args -> case args of
         go [] dlls = return dlls
     dlls <- go [takeFileName exe] Set.empty
     alldlls <- filter ((== ".dll") . takeExtension) <$> listDirectory dir
-    forM_ (filter (`Set.notMember` dlls) alldlls) $ \dll -> do
+    forM_ (filter (`Set.notMember` dlls) alldlls) \dll -> do
       removeFile $ dir </> dll
 
-  ["nsis"] -> writeFile "installer.nsi" $ nsis $ do
+  ["nsis"] -> writeFile "installer.nsi" $ nsis do
 
     -- Create Windows installer script
     name "Onyx Music Game Toolkit"
@@ -91,7 +92,7 @@ main = getArgs >>= \args -> case args of
     page Directory
     page InstFiles
     -- hack to run onyx without admin privilege so drag and drop works
-    event "LaunchApplication" $ do
+    event "LaunchApplication" do
       exec "\"$WINDIR/explorer.exe\" \"$INSTDIR/onyx.exe\""
     unsafeInjectGlobal "!define MUI_FINISHPAGE_RUN_FUNCTION LaunchApplication"
     page $ Finish finishOptions
@@ -105,11 +106,11 @@ main = getArgs >>= \args -> case args of
     unpage Confirm
     unpage InstFiles
 
-    _ <- section "Onyx" [Required] $ do
+    _ <- section "Onyx" [Required] do
       setOutPath "$INSTDIR"
-      -- delete existing resource folder and older resource locations
+      -- delete older resource locations, but now we're leaving an existing current one
+      -- to preserve user-added things like localizations or RAP files
       rmdir [Recursive] "$INSTDIR/onyx-resource"
-      rmdir [Recursive] "$INSTDIR/onyx-resources"
       rmdir [Recursive] "$INSTDIR/magma-v1"
       rmdir [Recursive] "$INSTDIR/magma-v2"
       rmdir [Recursive] "$INSTDIR/magma-ogg2mogg"
@@ -129,7 +130,7 @@ main = getArgs >>= \args -> case args of
       writeRegDWORD HKLM "Software/Microsoft/Windows/CurrentVersion/Uninstall/OnyxToolkit" "NoRepair" 1
       writeUninstaller "uninstall.exe"
 
-    _ <- section "Start Menu Shortcuts" [] $ do
+    _ <- section "Start Menu Shortcuts" [] do
       createDirectory "$SMPROGRAMS/Onyx Music Game Toolkit"
       createShortcut "$SMPROGRAMS/Onyx Music Game Toolkit/Uninstall.lnk"
         [ Target "$INSTDIR/uninstall.exe"
@@ -142,7 +143,7 @@ main = getArgs >>= \args -> case args of
         , IconIndex 0
         ]
 
-    uninstall $ do
+    uninstall do
       -- Remove registry keys
       deleteRegKey HKLM "Software/Microsoft/Windows/CurrentVersion/Uninstall/OnyxToolkit"
       deleteRegKey HKLM "SOFTWARE/OnyxToolkit"

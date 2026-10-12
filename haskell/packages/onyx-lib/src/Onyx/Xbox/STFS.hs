@@ -7,10 +7,13 @@ This code was written with the help of
   * Free60 - <https://free60project.github.io/wiki/STFS.html>
 
 -}
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
-{-# LANGUAGE TupleSections     #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE TupleSections       #-}
 module Onyx.Xbox.STFS
 ( extractSTFS
 , getSTFSFolder, readableSTFSFolder
@@ -54,6 +57,7 @@ import qualified Data.ByteString           as B
 import qualified Data.ByteString.Lazy      as BL
 import           Data.Either               (lefts, rights)
 import           Data.Foldable             (toList)
+import           Data.Functor              ((<&>))
 import           Data.IORef                (newIORef, readIORef, writeIORef)
 import           Data.List.Extra           (nubOrd, partition)
 import qualified Data.Map                  as Map
@@ -113,15 +117,15 @@ utf16BEString n = dimap
 
 instance Bin CONHeader where
   bin = do
-    ch_PublicKeyCertSize       <- ch_PublicKeyCertSize       =. byteString 2
-    ch_CertOwnerConsoleID      <- ch_CertOwnerConsoleID      =. byteString 5
-    ch_CertOwnerConsolePartNum <- ch_CertOwnerConsolePartNum =. utf8String 0x14
-    ch_CertOwnerConsoleType    <- ch_CertOwnerConsoleType    =. bin
-    ch_CertDateGeneration      <- ch_CertDateGeneration      =. utf8String 8
-    ch_PublicExponent          <- ch_PublicExponent          =. byteString 4
-    ch_PublicModulus           <- ch_PublicModulus           =. byteString 0x80
-    ch_CertSignature           <- ch_CertSignature           =. byteString 0x100
-    ch_Signature               <- ch_Signature               =. byteString 0x80
+    ch_PublicKeyCertSize       <- (.ch_PublicKeyCertSize)       =. byteString 2
+    ch_CertOwnerConsoleID      <- (.ch_CertOwnerConsoleID)      =. byteString 5
+    ch_CertOwnerConsolePartNum <- (.ch_CertOwnerConsolePartNum) =. utf8String 0x14
+    ch_CertOwnerConsoleType    <- (.ch_CertOwnerConsoleType)    =. bin
+    ch_CertDateGeneration      <- (.ch_CertDateGeneration)      =. utf8String 8
+    ch_PublicExponent          <- (.ch_PublicExponent)          =. byteString 4
+    ch_PublicModulus           <- (.ch_PublicModulus)           =. byteString 0x80
+    ch_CertSignature           <- (.ch_CertSignature)           =. byteString 0x100
+    ch_Signature               <- (.ch_Signature)               =. byteString 0x80
     return CONHeader{..}
 
 data ConsoleType = Devkit | Retail
@@ -144,7 +148,7 @@ data LIVEHeader = LIVEHeader
 
 instance Bin LIVEHeader where
   bin = do
-    lh_PackageSignature <- lh_PackageSignature =. byteString 0x100
+    lh_PackageSignature <- (.lh_PackageSignature) =. byteString 0x100
     _ <- const (B.replicate 0x128 0) =. byteString 0x128
     return LIVEHeader{..}
 
@@ -155,7 +159,7 @@ instance Bin Header where
       "LIVE" -> LIVE <$> codecIn bin
       "PIRS" -> PIRS <$> codecIn bin
       s      -> fail $ "Unrecognized STFS magic: " <> show s
-    , codecOut = fmapArg $ \case
+    , codecOut = fmapArg \case
       CON  x -> void $ putByteString "CON " >> codecOut bin x
       LIVE x -> void $ putByteString "LIVE" >> codecOut bin x
       PIRS x -> void $ putByteString "PIRS" >> codecOut bin x
@@ -240,35 +244,35 @@ fixedList n cdc = Codec
 
 instance Bin Metadata where
   bin = do
-    md_LicenseEntries       <- md_LicenseEntries       =. fixedList 0x10 bin
-    md_HeaderSHA1           <- md_HeaderSHA1           =. byteString 0x14
-    md_HeaderSize           <- md_HeaderSize           =. word32be
-    md_ContentType          <- md_ContentType          =. bin
-    md_MetadataVersion      <- md_MetadataVersion      =. int32be
-    md_ContentSize          <- md_ContentSize          =. int64be
-    md_MediaID              <- md_MediaID              =. word32be
-    md_Version              <- md_Version              =. int32be
-    md_BaseVersion          <- md_BaseVersion          =. int32be
-    md_TitleID              <- md_TitleID              =. word32be
-    md_Platform             <- md_Platform             =. bin
-    md_ExecutableType       <- md_ExecutableType       =. word8
-    md_DiscNumber           <- md_DiscNumber           =. word8
-    md_DiscInSet            <- md_DiscInSet            =. word8
-    md_SaveGameID           <- md_SaveGameID           =. word32be
-    md_ConsoleID            <- md_ConsoleID            =. byteString 5
-    md_ProfileID            <- md_ProfileID            =. byteString 8
-    md_VolumeDescriptor     <- md_VolumeDescriptor     =. bin
-    md_DataFileCount        <- md_DataFileCount        =. int32be
-    md_DataFileCombinedSize <- md_DataFileCombinedSize =. int64be
-    md_DescriptorType       <- md_DescriptorType       =. bin
-    md_Reserved             <- md_Reserved             =. int32be
-    md_Padding              <- md_Padding              =. byteString 0x4C
-    md_DeviceID             <- md_DeviceID             =. byteString 0x14
-    md_DisplayName          <- md_DisplayName          =. fixedList 9 (utf16BEString 0x100)
-    md_DisplayDescription   <- md_DisplayDescription   =. fixedList 9 (utf16BEString 0x100)
-    md_PublisherName        <- md_PublisherName        =. utf16BEString 0x80
-    md_TitleName            <- md_TitleName            =. utf16BEString 0x80
-    md_TransferFlags        <- md_TransferFlags        =. word8
+    md_LicenseEntries       <- (.md_LicenseEntries)       =. fixedList 0x10 bin
+    md_HeaderSHA1           <- (.md_HeaderSHA1)           =. byteString 0x14
+    md_HeaderSize           <- (.md_HeaderSize)           =. word32be
+    md_ContentType          <- (.md_ContentType)          =. bin
+    md_MetadataVersion      <- (.md_MetadataVersion)      =. int32be
+    md_ContentSize          <- (.md_ContentSize)          =. int64be
+    md_MediaID              <- (.md_MediaID)              =. word32be
+    md_Version              <- (.md_Version)              =. int32be
+    md_BaseVersion          <- (.md_BaseVersion)          =. int32be
+    md_TitleID              <- (.md_TitleID)              =. word32be
+    md_Platform             <- (.md_Platform)             =. bin
+    md_ExecutableType       <- (.md_ExecutableType)       =. word8
+    md_DiscNumber           <- (.md_DiscNumber)           =. word8
+    md_DiscInSet            <- (.md_DiscInSet)            =. word8
+    md_SaveGameID           <- (.md_SaveGameID)           =. word32be
+    md_ConsoleID            <- (.md_ConsoleID)            =. byteString 5
+    md_ProfileID            <- (.md_ProfileID)            =. byteString 8
+    md_VolumeDescriptor     <- (.md_VolumeDescriptor)     =. bin
+    md_DataFileCount        <- (.md_DataFileCount)        =. int32be
+    md_DataFileCombinedSize <- (.md_DataFileCombinedSize) =. int64be
+    md_DescriptorType       <- (.md_DescriptorType)       =. bin
+    md_Reserved             <- (.md_Reserved)             =. int32be
+    md_Padding              <- (.md_Padding)              =. byteString 0x4C
+    md_DeviceID             <- (.md_DeviceID)             =. byteString 0x14
+    md_DisplayName          <- (.md_DisplayName)          =. fixedList 9 (utf16BEString 0x100)
+    md_DisplayDescription   <- (.md_DisplayDescription)   =. fixedList 9 (utf16BEString 0x100)
+    md_PublisherName        <- (.md_PublisherName)        =. utf16BEString 0x80
+    md_TitleName            <- (.md_TitleName)            =. utf16BEString 0x80
+    md_TransferFlags        <- (.md_TransferFlags)        =. word8
     (md_ThumbnailImage, md_TitleThumbnailImage) <- Codec
       { codecIn = do
         thumbSize <- getInt32be
@@ -277,13 +281,13 @@ instance Bin Metadata where
         title <- B.take (fromIntegral titleSize) <$> getByteString 0x4000
         return (thumb, title)
       , codecOut = \md -> do
-        let thumbSize = B.length $ md_ThumbnailImage md
-            titleSize = B.length $ md_TitleThumbnailImage md
+        let thumbSize = B.length md.md_ThumbnailImage
+            titleSize = B.length md.md_TitleThumbnailImage
         putInt32be $ fromIntegral thumbSize
         putInt32be $ fromIntegral titleSize
-        putByteString $ md_ThumbnailImage      md <> B.replicate (0x4000 - thumbSize) 0
-        putByteString $ md_TitleThumbnailImage md <> B.replicate (0x4000 - titleSize) 0
-        return (md_ThumbnailImage md, md_TitleThumbnailImage md)
+        putByteString $ md.md_ThumbnailImage      <> B.replicate (0x4000 - thumbSize) 0
+        putByteString $ md.md_TitleThumbnailImage <> B.replicate (0x4000 - titleSize) 0
+        return (md.md_ThumbnailImage, md.md_TitleThumbnailImage)
       }
     return Metadata{..}
 
@@ -295,9 +299,9 @@ data LicenseEntry = LicenseEntry
 
 instance Bin LicenseEntry where
   bin = do
-    le_LicenseID    <- le_LicenseID    =. int64be
-    le_LicenseBits  <- le_LicenseBits  =. int32be
-    le_LicenseFlags <- le_LicenseFlags =. int32be
+    le_LicenseID    <- (.le_LicenseID)    =. int64be
+    le_LicenseBits  <- (.le_LicenseBits)  =. int32be
+    le_LicenseFlags <- (.le_LicenseFlags) =. int32be
     return LicenseEntry{..}
 
 data STFSDescriptor = STFSDescriptor
@@ -318,7 +322,7 @@ int24le = Codec
     b <- getWord8
     c <- getWord8
     return $ fromIntegral a + fromIntegral b * 0x100 + fromIntegral c * 0x10000
-  , codecOut = fmapArg $ \w -> do
+  , codecOut = fmapArg \w -> do
     putWord16le $ fromIntegral w
     putWord8 $ fromIntegral $ w `shiftR` 16
   }
@@ -330,21 +334,21 @@ int24be = Codec
     b <- getWord8
     c <- getWord8
     return $ fromIntegral a * 0x10000 + fromIntegral b * 0x100 + fromIntegral c
-  , codecOut = fmapArg $ \w -> do
+  , codecOut = fmapArg \w -> do
     putWord8 $ fromIntegral $ w `shiftR` 16
     putWord16be $ fromIntegral w
   }
 
 instance Bin STFSDescriptor where
   bin = do
-    sd_VolDescSize                <- sd_VolDescSize                =. word8
-    sd_Reserved                   <- sd_Reserved                   =. word8
-    sd_BlockSeparation            <- sd_BlockSeparation            =. word8
-    sd_FileTableBlockCount        <- sd_FileTableBlockCount        =. int16le
-    sd_FileTableBlockNumber       <- sd_FileTableBlockNumber       =. int24le
-    sd_TopHashTableHash           <- sd_TopHashTableHash           =. byteString 0x14
-    sd_TotalAllocatedBlockCount   <- sd_TotalAllocatedBlockCount   =. int32be
-    sd_TotalUnallocatedBlockCount <- sd_TotalUnallocatedBlockCount =. int32be
+    sd_VolDescSize                <- (.sd_VolDescSize)                =. word8
+    sd_Reserved                   <- (.sd_Reserved)                   =. word8
+    sd_BlockSeparation            <- (.sd_BlockSeparation)            =. word8
+    sd_FileTableBlockCount        <- (.sd_FileTableBlockCount)        =. int16le
+    sd_FileTableBlockNumber       <- (.sd_FileTableBlockNumber)       =. int24le
+    sd_TopHashTableHash           <- (.sd_TopHashTableHash)           =. byteString 0x14
+    sd_TotalAllocatedBlockCount   <- (.sd_TotalAllocatedBlockCount)   =. int32be
+    sd_TotalUnallocatedBlockCount <- (.sd_TotalUnallocatedBlockCount) =. int32be
     return STFSDescriptor{..}
 
 data ContentType
@@ -455,9 +459,9 @@ instance Bin BlockStatus where
 
 instance Bin BlockHashRecord where
   bin = do
-    bhr_SHA1      <- bhr_SHA1      =. byteString 0x14
-    bhr_Status    <- bhr_Status    =. bin
-    bhr_NextBlock <- bhr_NextBlock =. int24be
+    bhr_SHA1      <- (.bhr_SHA1)      =. byteString 0x14
+    bhr_Status    <- (.bhr_Status)    =. bin
+    bhr_NextBlock <- (.bhr_NextBlock) =. int24be
     return BlockHashRecord{..}
 
 data TableSizeShift = Shift0 | Shift1
@@ -520,21 +524,21 @@ instance Bin FileEntry where
             dir  = len `testBit` 7
         return (name, cons, dir)
       , codecOut = \fe -> do
-        let str = fe_FileName fe
+        let str = fe.fe_FileName
         putByteString $ encodeUtf8 $ str <> T.replicate (0x28 - T.length str) "\0"
         putWord8 $ foldr (.|.) (fromIntegral $ T.length str)
-          [ if fe_Consecutive fe then bit 6 else 0
-          , if fe_Directory   fe then bit 7 else 0
+          [ if fe.fe_Consecutive then bit 6 else 0
+          , if fe.fe_Directory   then bit 7 else 0
           ]
-        return (fe_FileName fe, fe_Consecutive fe, fe_Directory fe)
+        return (fe.fe_FileName, fe.fe_Consecutive, fe.fe_Directory)
       }
-    fe_Blocks1         <- fe_Blocks1         =. int24le
-    fe_Blocks2         <- fe_Blocks2         =. int24le
-    fe_FirstBlock      <- fe_FirstBlock      =. int24le
-    fe_PathIndex       <- fe_PathIndex       =. int16be
-    fe_Size            <- fe_Size            =. word32be
-    fe_UpdateTimestamp <- fe_UpdateTimestamp =. word32le
-    fe_AccessTimestamp <- fe_AccessTimestamp =. word32le
+    fe_Blocks1         <- (.fe_Blocks1)         =. int24le
+    fe_Blocks2         <- (.fe_Blocks2)         =. int24le
+    fe_FirstBlock      <- (.fe_FirstBlock)      =. int24le
+    fe_PathIndex       <- (.fe_PathIndex)       =. int16be
+    fe_Size            <- (.fe_Size)            =. word32be
+    fe_UpdateTimestamp <- (.fe_UpdateTimestamp) =. word32le
+    fe_AccessTimestamp <- (.fe_AccessTimestamp) =. word32le
     return FileEntry{..}
 
 data STFSPackage = STFSPackage
@@ -544,7 +548,7 @@ data STFSPackage = STFSPackage
   }
 
 withSTFSReadable :: Readable -> (STFSPackage -> IO a) -> IO a
-withSTFSReadable r fn = useHandle r $ \fd -> do
+withSTFSReadable r fn = useHandle r \fd -> do
   headerMetaBytes <- BL.hGet fd 0x971A
   (header, meta) <- flip runGetM headerMetaBytes $ (,)
     <$> (codecIn bin :: Get Header)
@@ -561,11 +565,11 @@ newtype FileBlock = FileBlock Int32
 
 seekToRealBlock :: RealBlock -> STFSPackage -> IO ()
 seekToRealBlock (RealBlock blk) stfs = do
-  hSeek (stfsHandle stfs) AbsoluteSeek $ 0xc000 + fromIntegral blk * 0x1000
+  hSeek stfs.stfsHandle AbsoluteSeek $ 0xc000 + fromIntegral blk * 0x1000
 
 tableSizeShift :: Metadata -> TableSizeShift
 tableSizeShift meta
-  | ((md_HeaderSize meta + 0xFFF) .&. 0xF000) `shiftR` 0xC == 0xB = Shift0
+  | ((meta.md_HeaderSize + 0xFFF) .&. 0xF000) `shiftR` 0xC == 0xB = Shift0
   | otherwise                                                     = Shift1
 
 seekToFileBlock :: FileBlock -> STFSPackage -> IO ()
@@ -573,7 +577,7 @@ seekToFileBlock fblk stfs = seekToRealBlock (fixBlockNumber fblk stfs) stfs
 
 seekToBlockHash :: FileBlock -> Int32 -> STFSPackage -> IO ()
 seekToBlockHash (FileBlock blk) tableOffset stfs = do
-  let meta = stfsMetadata stfs
+  let meta = stfs.stfsMetadata
       tss = tableSizeShift meta
       tssNum = fromEnum tss
   -- Given a block number return the hash object that goes with it
@@ -592,11 +596,11 @@ seekToBlockHash (FileBlock blk) tableOffset stfs = do
         , tableOffset - (1 `shiftL` tssNum)
         ]
   seekToRealBlock (RealBlock tablenum) stfs
-  hSeek (stfsHandle stfs) RelativeSeek $ fromIntegral record * 0x18
+  hSeek stfs.stfsHandle RelativeSeek $ fromIntegral record * 0x18
 
 fixBlockNumber :: FileBlock -> STFSPackage -> RealBlock
 fixBlockNumber (FileBlock blk) stfs = let
-  tss = fromEnum $ tableSizeShift $ stfsMetadata stfs
+  tss = fromEnum $ tableSizeShift stfs.stfsMetadata
   in RealBlock $ blk + sum
     [ if blk >= 0xAA then ((blk `div` 0xAA) + 1) `shiftL` tss else 0
     , if blk >= 0x70E4 then ((blk `div` 0x70E4) + 1) `shiftL` tss else 0
@@ -604,12 +608,12 @@ fixBlockNumber (FileBlock blk) stfs = let
     ]
 
 readBlock :: Word32 -> STFSPackage -> IO B.ByteString
-readBlock len stfs = B.hGet (stfsHandle stfs) $ fromIntegral len
+readBlock len stfs = B.hGet stfs.stfsHandle $ fromIntegral len
 
 readBlockHash :: STFSPackage -> IO BlockHashRecord
 readBlockHash stfs = do
-  bs <- BL.hGet (stfsHandle stfs) 0x18
-  runGetM (codecIn bin) $ if BL.null bs then BL.replicate 0x18 0 else bs
+  bs <- BL.hGet stfs.stfsHandle 0x18
+  runGetM (codecIn bin) if BL.null bs then BL.replicate 0x18 0 else bs
 
 getCorrectBlockHash :: FileBlock -> STFSPackage -> IO BlockHashRecord
 getCorrectBlockHash fblk stfs = do
@@ -617,7 +621,7 @@ getCorrectBlockHash fblk stfs = do
         seekToBlockHash fblk tableOffset stfs
         readBlockHash stfs
   hsh <- getBlockHash 0
-  if tableSizeShift (stfsMetadata stfs) == Shift1 && bhr_Status hsh < BlockUsed
+  if tableSizeShift stfs.stfsMetadata == Shift1 && hsh.bhr_Status < BlockUsed
     then getBlockHash 1
     else return hsh
 
@@ -629,19 +633,19 @@ getCorrectBlockHash fblk stfs = do
 
 getFileEntries :: STFSPackage -> IO [FileEntry]
 getFileEntries stfs = let
-  stfsDesc = md_VolumeDescriptor $ stfsMetadata stfs
+  stfsDesc = stfs.stfsMetadata.md_VolumeDescriptor
   readFileBlocks :: Word32 -> Int32 -> IO BL.ByteString
   readFileBlocks 0     _   = return BL.empty
   readFileBlocks count blk = do
     seekToFileBlock (FileBlock blk) stfs
     blockData <- BL.fromStrict <$> readBlock 0x1000 stfs
     blkHash <- getCorrectBlockHash (FileBlock blk) stfs
-    BL.append blockData <$> readFileBlocks (count - 1) (bhr_NextBlock blkHash)
+    BL.append blockData <$> readFileBlocks (count - 1) blkHash.bhr_NextBlock
   in do
     filesBytes <- readFileBlocks
-      (fromIntegral $ sd_FileTableBlockCount stfsDesc)
-      (sd_FileTableBlockNumber stfsDesc)
-    fmap (takeWhile $ not . T.null . fe_FileName)
+      (fromIntegral stfsDesc.sd_FileTableBlockCount)
+      stfsDesc.sd_FileTableBlockNumber
+    fmap (takeWhile $ not . T.null . (.fe_FileName))
       $ flip runGetM filesBytes
       $ replicateM (fromIntegral (BL.length filesBytes) `div` 0x40)
       $ codecIn bin
@@ -652,29 +656,29 @@ getFileHandle fe stfs readable = Readable
   , rOpen = do
     h <- rOpen readable
     let stfs' = stfs { stfsHandle = h }
-        stfsDesc = md_VolumeDescriptor $ stfsMetadata stfs'
+        stfsDesc = stfs.stfsMetadata.md_VolumeDescriptor
         getBlockSequence :: Word32 -> FileBlock -> BlockStatus -> IO [Int32]
         getBlockSequence size fb@(FileBlock blk) info
           | size <= 0
             || blk <= 0
-            || blk >= sd_TotalAllocatedBlockCount stfsDesc
+            || blk >= stfsDesc.sd_TotalAllocatedBlockCount
             || info < BlockUsed
             = return []
           | otherwise = do
             let len = min 0x1000 size
             blkHash <- getCorrectBlockHash fb stfs'
-            (blk :) <$> getBlockSequence (size - len) (FileBlock $ bhr_NextBlock blkHash) (bhr_Status blkHash)
-    blks <- VU.fromList <$> if fe_Consecutive fe
+            (blk :) <$> getBlockSequence (size - len) (FileBlock blkHash.bhr_NextBlock) blkHash.bhr_Status
+    blks <- VU.fromList <$> if fe.fe_Consecutive
       -- important optimization, this saves a lot of time when opening e.g. mogg files.
       -- unfortunately I didn't mark Onyx-created cons as consecutive until 20210702 (2ced8ab2)
       -- and I don't think X360 (C3 CON Tools, Le Fluffie, RB3Maker) marks as consecutive.
       -- but new Onyx files and real DLC files can benefit at least.
-      then return $ take (fromIntegral $ fe_Blocks1 fe) [fe_FirstBlock fe ..]
-      else getBlockSequence (fe_Size fe) (FileBlock $ fe_FirstBlock fe) BlockUsed
+      then return $ take (fromIntegral fe.fe_Blocks1) [fe.fe_FirstBlock ..]
+      else getBlockSequence fe.fe_Size (FileBlock fe.fe_FirstBlock) BlockUsed
     posn <- newIORef 0
     -- TODO include the whole directory in the new label, not just fe_FileName
-    openSimpleHandle (handleLabel h <> " | " <> T.unpack (fe_FileName fe)) SimpleHandle
-      { shSize  = fromIntegral $ fe_Size fe
+    openSimpleHandle (handleLabel h <> " | " <> T.unpack fe.fe_FileName) SimpleHandle
+      { shSize  = fromIntegral fe.fe_Size
       , shSeek  = writeIORef posn
       , shTell  = readIORef posn
       , shClose = hClose h
@@ -700,16 +704,16 @@ getFileEntriesFolder :: Readable -> STFSPackage -> IO (Folder T.Text Readable)
 getFileEntriesFolder r stfs = do
   files <- getFileEntries stfs
   let getFolder pathIndex = let
-        contents = [ (i, fe) | (i, fe) <- zip [0..] files, fe_PathIndex fe == pathIndex ]
+        contents = [ (i, fe) | (i, fe) <- zip [0..] files, fe.fe_PathIndex == pathIndex ]
         in Folder
           { folderFiles = do
             (_, fe) <- contents
-            guard $ not $ fe_Directory fe
-            return (fe_FileName fe, getFileHandle fe stfs r)
+            guard $ not fe.fe_Directory
+            return (fe.fe_FileName, getFileHandle fe stfs r)
           , folderSubfolders = do
             (i, fe) <- contents
-            guard $ fe_Directory fe
-            return (fe_FileName fe, getFolder i)
+            guard fe.fe_Directory
+            return (fe.fe_FileName, getFolder i)
           }
   return $ getFolder (-1)
 
@@ -751,10 +755,10 @@ blockContentsPattern tss = let
 
 verifyHashes :: Bool -> STFSPackage -> IO ()
 verifyHashes fixHashes stfs = let
-  meta = stfsMetadata stfs
-  sd = md_VolumeDescriptor meta
+  meta = stfs.stfsMetadata
+  sd = meta.md_VolumeDescriptor
   blockPattern = takeWhile
-    (/= DataBlock (sd_TotalAllocatedBlockCount sd + 1))
+    (/= DataBlock (sd.sd_TotalAllocatedBlockCount + 1))
     -- TODO does this need to use sd_TotalUnallocatedBlockCount as well
     (blockContentsPattern $ tableSizeShift meta)
   patternWithIndexes = zip blockPattern $ map RealBlock [(-1) ..]
@@ -764,11 +768,11 @@ verifyHashes fixHashes stfs = let
     Just rblk -> do
       seekToRealBlock rblk stfs
       contents <- readBlock 0x1000 stfs
-      unless (B.null contents) $ do
+      unless (B.null contents) do
         seekToRealBlock hblk stfs
-        hSeek (stfsHandle stfs) RelativeSeek $ i * 0x18
+        hSeek stfs.stfsHandle RelativeSeek $ i * 0x18
         hsh <- readBlockHash stfs
-        let written = bhr_SHA1 hsh
+        let written = hsh.bhr_SHA1
             expected = convert (hash contents :: Digest SHA1)
         if written == expected
           then return ()
@@ -776,8 +780,8 @@ verifyHashes fixHashes stfs = let
             then do
               let hsh' = hsh { bhr_SHA1 = expected }
               seekToRealBlock hblk stfs
-              hSeek (stfsHandle stfs) RelativeSeek $ i * 0x18
-              BL.hPut (stfsHandle stfs) $ runPut $ void $ codecOut bin hsh'
+              hSeek stfs.stfsHandle RelativeSeek $ i * 0x18
+              BL.hPut stfs.stfsHandle $ runPut $ void $ codecOut bin hsh'
             else putStrLn $ unwords
               [ show hashed
               , "has written hash"
@@ -786,38 +790,38 @@ verifyHashes fixHashes stfs = let
               , show $ B.unpack expected
               ]
   in do
-    forM_ patternWithIndexes $ \(contents, rblk) -> case contents of
+    forM_ patternWithIndexes \(contents, rblk) -> case contents of
       L0Hashes i -> do
-        forM_ [0 .. 0xA9] $ \j -> do
+        forM_ [0 .. 0xA9] \j -> do
           let hashedIndex = i * 0xAA + fromIntegral j
           verify (DataBlock hashedIndex) rblk j
       _ -> return ()
-    forM_ patternWithIndexes $ \(contents, rblk) -> case contents of
+    forM_ patternWithIndexes \(contents, rblk) -> case contents of
       L1Hashes i -> do
-        forM_ [0 .. 0xA9] $ \j -> do
+        forM_ [0 .. 0xA9] \j -> do
           let hashedIndex = i * 0xAA + fromIntegral j
           verify (L0Hashes hashedIndex) rblk j
         -- add a count of data blocks covered by this hash, seen in (some?) DLC files
-        when fixHashes $ do
+        when fixHashes do
           seekToRealBlock rblk stfs
-          hSeek (stfsHandle stfs) RelativeSeek 0xFF0
-          BL.hPut (stfsHandle stfs) $ runPut $ putInt32be $ min (0xAA * 0xAA) $ sd_TotalAllocatedBlockCount sd - 0xAA * 0xAA * i
+          hSeek stfs.stfsHandle RelativeSeek 0xFF0
+          BL.hPut stfs.stfsHandle $ runPut $ putInt32be $ min (0xAA * 0xAA) $ sd.sd_TotalAllocatedBlockCount - 0xAA * 0xAA * i
       _ -> return ()
-    forM_ patternWithIndexes $ \(contents, rblk) -> case contents of
+    forM_ patternWithIndexes \(contents, rblk) -> case contents of
       L2Hashes i -> do
-        forM_ [0 .. 0xA9] $ \j -> do
+        forM_ [0 .. 0xA9] \j -> do
           let hashedIndex = i * 0xAA + fromIntegral j
           verify (L1Hashes hashedIndex) rblk j
         -- add a count of data blocks covered by this hash (which is all of them), seen in (some?) DLC files
-        when fixHashes $ do
+        when fixHashes do
           seekToRealBlock rblk stfs
-          hSeek (stfsHandle stfs) RelativeSeek 0xFF0
-          BL.hPut (stfsHandle stfs) $ runPut $ putInt32be $ sd_TotalAllocatedBlockCount sd
+          hSeek stfs.stfsHandle RelativeSeek 0xFF0
+          BL.hPut stfs.stfsHandle $ runPut $ putInt32be sd.sd_TotalAllocatedBlockCount
       _ -> return ()
 
 stockScramble :: B.ByteString -> B.ByteString
 stockScramble bs = case quotRem (B.length bs) 8 of
-  (q, 0) -> B.concat $ do
+  (q, 0) -> B.concat do
     i <- [0 .. q - 1]
     return $ B.take 8 $ B.drop ((q - 1 - i) * 8) bs
   _ -> error "stockScramble: input length not divisible by 8"
@@ -829,7 +833,7 @@ data KV = KV
   } deriving (Eq, Show)
 
 bytesToInteger :: B.ByteString -> Integer
-bytesToInteger bs = sum $ do
+bytesToInteger bs = sum do
   (i, b) <- zip [0..] $ B.unpack $ B.reverse bs
   return $ (0x100 ^ (i :: Int)) * fromIntegral b
 
@@ -917,7 +921,7 @@ loadKVbinLIVE = let
 -- readAsBlocks :: FilePath -> IO (Integer, [B.ByteString])
 -- readAsBlocks f = do
 --   size <- Dir.getFileSize f
---   blocks <- withBinaryFile f ReadMode $ \h -> fix $ \go -> do
+--   blocks <- withBinaryFile f ReadMode \h -> fix \go -> do
 --     blk <- B.hGet h 0x1000
 --     if B.null blk
 --       then return []
@@ -934,11 +938,11 @@ type BlocksPlan = [(Int, T.Text, Maybe (Integer, IO [B.ByteString]))]
 traverseReadable :: Folder T.Text Readable -> IO BlocksPlan
 traverseReadable top = toList <$> execStateT (go (-1) top) Seq.empty where
   go parentIndex folder = do
-    forM_ (folderSubfolders folder) $ \(f, sub) -> do
+    forM_ (folderSubfolders folder) \(f, sub) -> do
       thisIndex <- gets Seq.length
       modify (|> (parentIndex, f, Nothing))
       go thisIndex sub
-    forM_ (folderFiles folder) $ \(f, r) -> do
+    forM_ (folderFiles folder) \(f, r) -> do
       lenBlocks <- splitIntoBlocks r
       modify (|> (parentIndex, f, Just lenBlocks))
   splitIntoBlocks r = do
@@ -954,11 +958,11 @@ traverseReadable top = toList <$> execStateT (go (-1) top) Seq.empty where
 traverseMemory :: Folder T.Text BL.ByteString -> BlocksPlan
 traverseMemory top = toList $ execState (go (-1) top) Seq.empty where
   go parentIndex folder = do
-    forM_ (folderSubfolders folder) $ \(f, sub) -> do
+    forM_ (folderSubfolders folder) \(f, sub) -> do
       thisIndex <- gets Seq.length
       modify (|> (parentIndex, f, Nothing))
       go thisIndex sub
-    forM_ (folderFiles folder) $ \(f, bs) -> do
+    forM_ (folderFiles folder) \(f, bs) -> do
       modify (|> (parentIndex, f, Just (fromIntegral $ BL.length bs, return $ splitIntoBlocks bs)))
   splitIntoBlocks bs = if BL.null bs
     then []
@@ -982,7 +986,7 @@ data CreateOptions = CreateOptions
   }
 
 gh2pkg :: (MonadIO m) => T.Text -> T.Text -> FilePath -> FilePath -> StackTraceT m ()
-gh2pkg title desc dir fout = inside "making GH2 LIVE package" $ stackIO $ do
+gh2pkg title desc dir fout = inside "making GH2 LIVE package" $ stackIO do
   thumb <- gh2Thumbnail >>= B.readFile
   makeCON CreateOptions
     { createNames = [title]
@@ -1000,7 +1004,7 @@ gh2pkg title desc dir fout = inside "making GH2 LIVE package" $ stackIO $ do
     } dir fout
 
 ghworpkg :: (MonadIO m) => [T.Text] -> [T.Text] -> FilePath -> FilePath -> StackTraceT m ()
-ghworpkg titles descs dir fout = inside "making GH:WoR LIVE package" $ stackIO $ do
+ghworpkg titles descs dir fout = inside "making GH:WoR LIVE package" $ stackIO do
   thumb <- ghWoRThumbnail >>= B.readFile
   makeCON CreateOptions
     { createNames = titles
@@ -1036,7 +1040,7 @@ rb3STFSOptions title desc live = do
     }
 
 rb3pkg :: (MonadIO m) => T.Text -> T.Text -> FilePath -> FilePath -> StackTraceT m ()
-rb3pkg title desc dir fout = inside "making RB3 CON package" $ stackIO $ do
+rb3pkg title desc dir fout = inside "making RB3 CON package" $ stackIO do
   opts <- rb3STFSOptions title desc False
   makeCON opts dir fout
 
@@ -1059,7 +1063,7 @@ rb2STFSOptions title desc live = do
     }
 
 rb2pkg :: (MonadIO m) => T.Text -> T.Text -> FilePath -> FilePath -> StackTraceT m ()
-rb2pkg title desc dir fout = inside "making RB2 CON package" $ stackIO $ do
+rb2pkg title desc dir fout = inside "making RB2 CON package" $ stackIO do
   opts <- rb2STFSOptions title desc False
   makeCON opts dir fout
 
@@ -1082,7 +1086,7 @@ rrSTFSOptions title desc = do
     }
 
 rrpkg :: (MonadIO m) => T.Text -> T.Text -> FilePath -> FilePath -> StackTraceT m ()
-rrpkg title desc dir fout = inside "making Rock Revolution LIVE package" $ stackIO $ do
+rrpkg title desc dir fout = inside "making Rock Revolution LIVE package" $ stackIO do
   opts <- rrSTFSOptions title desc
   makeCON opts dir fout
 
@@ -1106,7 +1110,7 @@ makeCONReadable :: CreateOptions -> Folder T.Text Readable -> FilePath -> IO ()
 makeCONReadable opts mem con = traverseReadable mem >>= \plan -> makeCONGeneral opts plan con
 
 makeCONGeneral :: CreateOptions -> BlocksPlan -> FilePath -> IO ()
-makeCONGeneral opts fileList con = withBinaryFile con ReadWriteMode $ \fd -> do
+makeCONGeneral opts fileList con = withBinaryFile con ReadWriteMode \fd -> do
   hSetFileSize fd 0
 
   -- each 0x1000 block can store 64 file entries (each of which is 64 bytes)
@@ -1119,17 +1123,17 @@ makeCONGeneral opts fileList con = withBinaryFile con ReadWriteMode $ \fd -> do
 
   let metadata = Metadata
         { md_LicenseEntries = take 0x10
-          $ createLicenses opts
+          $ opts.createLicenses
           <> repeat (LicenseEntry 0 0 0)
         , md_HeaderSHA1 = B.replicate 0x14 0 -- filled in later
         , md_HeaderSize = 0xAD0E
-        , md_ContentType = if createLIVE opts then CT_MarketplaceContent else CT_SavedGame
+        , md_ContentType = if opts.createLIVE then CT_MarketplaceContent else CT_SavedGame
         , md_MetadataVersion = 2
         , md_ContentSize = 0 -- filled in later
-        , md_MediaID = createMediaID opts
-        , md_Version = createVersion opts
-        , md_BaseVersion = createBaseVersion opts
-        , md_TitleID = createTitleID opts
+        , md_MediaID = opts.createMediaID
+        , md_Version = opts.createVersion
+        , md_BaseVersion = opts.createBaseVersion
+        , md_TitleID = opts.createTitleID
         , md_Platform = P_Unknown
         , md_ExecutableType = 0
         , md_DiscNumber = 0
@@ -1153,20 +1157,20 @@ makeCONGeneral opts fileList con = withBinaryFile con ReadWriteMode $ \fd -> do
         , md_Reserved = 0
         , md_Padding = B.replicate 0x4C 0
         , md_DeviceID = B.replicate 0x14 0
-        , md_DisplayName = take 9 $ createNames opts <> repeat ""
-        , md_DisplayDescription = take 9 $ createDescriptions opts <> repeat ""
+        , md_DisplayName = take 9 $ opts.createNames <> repeat ""
+        , md_DisplayDescription = take 9 $ opts.createDescriptions <> repeat ""
         , md_PublisherName = ""
-        , md_TitleName = createTitleName opts
-        , md_TransferFlags = createTransferFlags opts
-        , md_ThumbnailImage = createThumb opts
-        , md_TitleThumbnailImage = createTitleThumb opts
+        , md_TitleName = opts.createTitleName
+        , md_TransferFlags = opts.createTransferFlags
+        , md_ThumbnailImage = opts.createThumb
+        , md_TitleThumbnailImage = opts.createTitleThumb
         }
   hSeek fd AbsoluteSeek 0x22C
   BL.hPut fd $ runPut $ void $ codecOut bin metadata
 
   kv <- xboxKV >>= B.readFile
-  let key = if createLIVE opts then loadKVbinLIVE else loadKVbinCON kv
-      header maybeSig = if createLIVE opts
+  let key = if opts.createLIVE then loadKVbinLIVE else loadKVbinCON kv
+      header maybeSig = if opts.createLIVE
         then LIVE LIVEHeader
           { lh_PackageSignature = fromMaybe (B.replicate 0x100 0) maybeSig
           }
@@ -1176,8 +1180,8 @@ makeCONGeneral opts fileList con = withBinaryFile con ReadWriteMode $ \fd -> do
           , ch_CertOwnerConsolePartNum = "X803395-001"
           , ch_CertOwnerConsoleType    = Retail
           , ch_CertDateGeneration      = "09-18-06"
-          , ch_PublicExponent          = bytesFromInteger 4 $ public_e $ private_pub $ kv_PrivateKey key
-          , ch_PublicModulus           = stockScramble $ bytesFromInteger 0x80 $ public_n $ private_pub $ kv_PrivateKey key
+          , ch_PublicExponent          = bytesFromInteger 4 key.kv_PrivateKey.private_pub.public_e
+          , ch_PublicModulus           = stockScramble $ bytesFromInteger 0x80 key.kv_PrivateKey.private_pub.public_n
           , ch_CertSignature           = B.take 0x100 $ B.drop 0xA60 kv
           , ch_Signature               = fromMaybe (B.replicate 0x80 0) maybeSig
           }
@@ -1251,7 +1255,7 @@ makeCONGeneral opts fileList con = withBinaryFile con ReadWriteMode $ \fd -> do
       writeFiles n ((_, _, Nothing) : rest) = writeFiles n rest
       writeFiles n ((_, _, Just (_size, getBlocks)) : rest) = do
         blocks <- getBlocks
-        forM_ (addHasNext $ zip [n..] blocks) $ \((n', block), hasNext) -> do
+        forM_ (addHasNext $ zip [n..] blocks) \((n', block), hasNext) -> do
           writeFileBlock n' hasNext $ BL.fromStrict block
         writeFiles (n + fromIntegral (length blocks)) rest
 
@@ -1279,7 +1283,7 @@ makeCONGeneral opts fileList con = withBinaryFile con ReadWriteMode $ \fd -> do
     table <- readBlock 0x1000 initPackage
     return metadata
       { md_ContentSize = fromIntegral size - 0xB000
-      , md_VolumeDescriptor = (md_VolumeDescriptor metadata)
+      , md_VolumeDescriptor = metadata.md_VolumeDescriptor
         { sd_TopHashTableHash = convert (hash table :: Digest SHA1)
         }
       }
@@ -1298,14 +1302,14 @@ makeCONGeneral opts fileList con = withBinaryFile con ReadWriteMode $ \fd -> do
   finalHeader <- do
     hSeek fd AbsoluteSeek 0x22C
     signedStuff <- B.hGet fd 0x118
-    case sign Nothing (Just SHA1) (kv_PrivateKey key) signedStuff of
+    case sign Nothing (Just SHA1) key.kv_PrivateKey signedStuff of
       Left err        -> error $ show err
       Right signature -> return $ header $ Just $ B.reverse signature
   hSeek fd AbsoluteSeek 0
   BL.hPut fd $ runPut $ void $ codecOut bin finalHeader
 
 stfsFolder :: (MonadIO m) => FilePath -> m (Word32, Word32)
-stfsFolder f = liftIO $ withBinaryFile f ReadMode $ \h -> do
+stfsFolder f = liftIO $ withBinaryFile f ReadMode \h -> do
   ftype <- B.hGet h 4 >>= \case
     "CON " -> return 1
     "LIVE" -> return 2
@@ -1319,7 +1323,7 @@ packCombineFolders :: (MonadIO m) => [Folder T.Text Readable] -> StackTraceT m (
 packCombineFolders roots = let
   combineFolders parents folders = do
     let allNames = nubOrd $ folders >>= \f -> map fst (folderSubfolders f) <> map fst (folderFiles f)
-    newContents <- fmap catMaybes $ forM allNames $ \name -> let
+    newContents <- fmap catMaybes $ forM allNames \name -> let
       matchFolders = mapMaybe (lookup name . folderSubfolders) folders
       matchFiles   = mapMaybe (lookup name . folderFiles     ) folders
       in case (matchFolders, matchFiles) of
@@ -1333,7 +1337,7 @@ packCombineFolders roots = let
   combineFiles parents name contents
     | ".dta" `T.isSuffixOf` name = do
       let stripBOM bs = fromMaybe bs $ BL.stripPrefix "\xEF\xBB\xBF" bs
-      bytes <- stackIO $ forM contents $ \r -> stripBOM <$> useHandle r handleToByteString
+      bytes <- stackIO $ forM contents \r -> stripBOM <$> useHandle r handleToByteString
       return $ Just $ makeHandle ("Pack-merged contents for " <> showPath parents name)
         $ byteStringSimpleHandle $ BL.intercalate "\n" bytes
     | ".pak.xen" `T.isSuffixOf` name = fatal "Pack creator does not yet support Neversoft GH files."
@@ -1358,26 +1362,26 @@ packCombineFolders roots = let
 makePack :: (MonadIO m) => [FilePath] -> (CreateOptions -> CreateOptions) -> FilePath -> StackTraceT m (Maybe FilePath)
 makePack []                 _         _    = fatal "Need at least 1 file for STFS pack"
 makePack inputs@(input : _) applyOpts fout = do
-  opts <- stackIO $ withSTFSPackage input $ \stfs -> return $ applyOpts CreateOptions
+  opts <- stackIO $ withSTFSPackage input \stfs -> return $ applyOpts CreateOptions
     { createNames         = ["Package"]
     , createDescriptions  = []
-    , createTitleID       = md_TitleID             $ stfsMetadata stfs
-    , createTitleName     = md_TitleName           $ stfsMetadata stfs
-    , createThumb         = md_TitleThumbnailImage $ stfsMetadata stfs -- use title thumb for package as well
-    , createTitleThumb    = md_TitleThumbnailImage $ stfsMetadata stfs
+    , createTitleID       = stfs.stfsMetadata.md_TitleID
+    , createTitleName     = stfs.stfsMetadata.md_TitleName
+    , createThumb         = stfs.stfsMetadata.md_TitleThumbnailImage -- use title thumb for package as well
+    , createTitleThumb    = stfs.stfsMetadata.md_TitleThumbnailImage
     , createLicenses      = [LicenseEntry (-1) 1 0] -- unlocked
     , createMediaID       = 0
     , createVersion       = 0
     , createBaseVersion   = 0
     , createTransferFlags = 0xC0
-    , createLIVE          = case stfsHeader stfs of
+    , createLIVE          = case stfs.stfsHeader of
       CON{} -> False
       _     -> True
     }
   roots <- stackIO $ mapM getSTFSFolder inputs
   merged <- packCombineFolders roots
   stackIO $ makeCONReadable opts merged fout
-  forM (findGH2DXAlbumArt merged) $ \art -> do
+  forM (findGH2DXAlbumArt merged) \art -> do
     let artTarget = takeDirectory fout </> "album_art"
     stackIO $ saveHandleFolder art artTarget
     return artTarget
@@ -1410,18 +1414,18 @@ findGH2DXAlbumArt root = let
 
 repackOptions :: STFSPackage -> CreateOptions
 repackOptions stfs = CreateOptions
-  { createNames         = md_DisplayName         $ stfsMetadata stfs
-  , createDescriptions  = md_DisplayDescription  $ stfsMetadata stfs
-  , createTitleID       = md_TitleID             $ stfsMetadata stfs
-  , createTitleName     = md_TitleName           $ stfsMetadata stfs
-  , createThumb         = md_ThumbnailImage      $ stfsMetadata stfs
-  , createTitleThumb    = md_TitleThumbnailImage $ stfsMetadata stfs
-  , createLicenses      = md_LicenseEntries      $ stfsMetadata stfs
-  , createMediaID       = md_MediaID             $ stfsMetadata stfs
-  , createVersion       = md_Version             $ stfsMetadata stfs
-  , createBaseVersion   = md_BaseVersion         $ stfsMetadata stfs
-  , createTransferFlags = md_TransferFlags       $ stfsMetadata stfs
-  , createLIVE          = case stfsHeader stfs of
+  { createNames         = stfs.stfsMetadata.md_DisplayName
+  , createDescriptions  = stfs.stfsMetadata.md_DisplayDescription
+  , createTitleID       = stfs.stfsMetadata.md_TitleID
+  , createTitleName     = stfs.stfsMetadata.md_TitleName
+  , createThumb         = stfs.stfsMetadata.md_ThumbnailImage
+  , createTitleThumb    = stfs.stfsMetadata.md_TitleThumbnailImage
+  , createLicenses      = stfs.stfsMetadata.md_LicenseEntries
+  , createMediaID       = stfs.stfsMetadata.md_MediaID
+  , createVersion       = stfs.stfsMetadata.md_Version
+  , createBaseVersion   = stfs.stfsMetadata.md_BaseVersion
+  , createTransferFlags = stfs.stfsMetadata.md_TransferFlags
+  , createLIVE          = case stfs.stfsHeader of
     CON{} -> False
     _     -> True
   }
@@ -1430,23 +1434,23 @@ saveCreateOptions :: CreateOptions -> Folder T.Text Readable
 saveCreateOptions copts = Folder
   { folderSubfolders = []
   , folderFiles =
-    [ ("thumbnail.png", makeHandle "thumbnail.png" $ byteStringSimpleHandle $ BL.fromStrict $ createThumb copts)
-    , ("title-thumbnail.png", makeHandle "thumbnail.png" $ byteStringSimpleHandle $ BL.fromStrict $ createTitleThumb copts)
+    [ ("thumbnail.png", makeHandle "thumbnail.png" $ byteStringSimpleHandle $ BL.fromStrict copts.createThumb)
+    , ("title-thumbnail.png", makeHandle "thumbnail.png" $ byteStringSimpleHandle $ BL.fromStrict copts.createTitleThumb)
     , ("repack-stfs.yaml", makeHandle "repack-stfs.yaml" $ byteStringSimpleHandle $ BL.fromStrict $ Y.encode $ Y.object
-      [ ("package-name", Y.toJSON $ createNames copts)
-      , ("package-description", Y.toJSON $ createDescriptions copts)
-      , ("title-id", Y.toJSON $ createTitleID copts) -- TODO maybe replace with hex
-      , ("title-name", Y.toJSON $ createTitleName copts)
-      , ("licenses", Y.toJSON $ flip map (createLicenses copts) $ \license -> Y.object
-        [ ("id", Y.toJSON $ le_LicenseID license)
-        , ("bits", Y.toJSON $ le_LicenseBits license)
-        , ("flags", Y.toJSON $ le_LicenseFlags license)
+      [ ("package-name", Y.toJSON copts.createNames)
+      , ("package-description", Y.toJSON copts.createDescriptions)
+      , ("title-id", Y.toJSON copts.createTitleID) -- TODO maybe replace with hex
+      , ("title-name", Y.toJSON copts.createTitleName)
+      , ("licenses", Y.toJSON $ copts.createLicenses <&> \license -> Y.object
+        [ ("id", Y.toJSON license.le_LicenseID)
+        , ("bits", Y.toJSON license.le_LicenseBits)
+        , ("flags", Y.toJSON license.le_LicenseFlags)
         ])
-      , ("media-id", Y.toJSON $ createMediaID copts)
-      , ("version", Y.toJSON $ createVersion copts)
-      , ("base-version", Y.toJSON $ createBaseVersion copts)
-      , ("transfer-flags", Y.toJSON $ createTransferFlags copts)
-      , ("sign-live", Y.toJSON $ createLIVE copts)
+      , ("media-id", Y.toJSON copts.createMediaID)
+      , ("version", Y.toJSON copts.createVersion)
+      , ("base-version", Y.toJSON copts.createBaseVersion)
+      , ("transfer-flags", Y.toJSON copts.createTransferFlags)
+      , ("sign-live", Y.toJSON copts.createLIVE)
       ])
     ]
   }
@@ -1476,7 +1480,7 @@ loadCreateOptions folder = do
             createTransferFlags <- o .: "transfer-flags"
             createLIVE <- o .: "sign-live"
             licenseObjects <- o .: "licenses"
-            createLicenses <- forM (licenseObjects :: [Y.Object]) $ \lobj -> do
+            createLicenses <- forM (licenseObjects :: [Y.Object]) \lobj -> do
               le_LicenseID <- lobj .: "id"
               le_LicenseBits <- lobj .: "bits"
               le_LicenseFlags <- lobj .: "flags"

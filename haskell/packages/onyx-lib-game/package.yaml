@@ -1,7 +1,7 @@
 name: onyx-lib-game
 version: '20190209'
 github: mtolly/onyx
-author: Michael Tolly <miketolly@gmail.com>
+author: Melody Tolly <miketolly@gmail.com>
 category: Distribution
 license: GPL-3
 license-file: ../../LICENSE.txt
@@ -28,6 +28,7 @@ library:
   - midi-util
   - gl
   - JuicyPixels
+  - JuicyPixels-stbir
   - bytestring
   - linear
   - text
@@ -36,7 +37,6 @@ library:
   - OpenAL
   - conduit
   - conduit-audio
-  - conduit-audio-sndfile
   - wavefront
   - codec
   - directory
@@ -46,3 +46,5 @@ library:
   - split
   - extra
   - StateVar
+  - optics
+  - inline-c

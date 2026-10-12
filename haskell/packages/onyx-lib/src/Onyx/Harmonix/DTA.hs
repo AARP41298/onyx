@@ -1,5 +1,6 @@
 -- | All functions that take a 'Handle' or 'FilePath' do their reading/writing
 -- strictly.
+{-# LANGUAGE BlockArguments    #-}
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Onyx.Harmonix.DTA
@@ -28,8 +29,10 @@ import           Onyx.Harmonix.DTA.Base
 import           Onyx.Harmonix.DTA.Crypt (decrypt, newCrypt, oldCrypt)
 import           Onyx.Harmonix.DTA.Parse
 import           Onyx.Harmonix.DTA.Print
+import           Onyx.Harmonix.DTA.Run   (runPreprocess)
 import           Onyx.Harmonix.DTA.Scan
-import           Onyx.StackTrace         (StackTraceT, fatal, inside)
+import           Onyx.StackTrace         (SendMessage, StackTraceT, fatal,
+                                          inside)
 import           Onyx.Util.Text.Decode   (decodeGeneral, encodeLatin1,
                                           removeBOM)
 import           System.IO.Error         (tryIOError)
@@ -75,7 +78,7 @@ readFileDTA_utf8 :: FilePath -> IO (DTA T.Text)
 readFileDTA_utf8 = fmap (readDTA . decodeUtf8) . B.readFile
 
 readFileDTA_latin1' :: (MonadIO m) => FilePath -> StackTraceT m (DTA T.Text)
-readFileDTA_latin1' f = inside ("DTA file: " ++ show f) $ do
+readFileDTA_latin1' f = inside ("DTA file: " ++ show f) do
   liftIO (tryIOError $ B.readFile f) >>= \case
     Left err -> fatal $ show err
     Right bs -> scanStack (removeBOM $ decodeLatin1 bs) >>= parseStack
@@ -86,10 +89,13 @@ readDTA_latin1 bs = scanStack (removeBOM $ decodeLatin1 bs) >>= parseStack
 readDTABytes :: (Monad m) => B.ByteString -> StackTraceT m (DTA B.ByteString)
 readDTABytes bs = fmap (B8.pack . T.unpack) <$> readDTA_latin1 bs
 
-readDTASections :: (Monad m) => B.ByteString -> StackTraceT m [(B.ByteString, Chunk B.ByteString)]
+readDTASections :: (SendMessage m) => B.ByteString -> StackTraceT m [(B.ByteString, Chunk B.ByteString)]
 readDTASections bs = do
-  sects <- scanStack (removeBOM $ decodeLatin1 bs) >>= parseStackPositions
-  return $ do
+  sectsOrig <- scanStack (removeBOM $ decodeLatin1 bs) >>= parseStackPositions
+  -- lego RB needs preprocess before splitting into chunks due to #ifdefs.
+  -- though we'd normally read from .dtb there anyway, but good to be safe
+  sects <- runPreprocess sectsOrig
+  return do
     (sect, next) <- zip sects $ map Just (drop 1 sects) ++ [Nothing]
     let AlexPn startBytes _ _ = fst sect
         taker = case next of
@@ -99,7 +105,7 @@ readDTASections bs = do
     return (sectBS, B8.pack . T.unpack <$> snd sect)
 
 readFileDTA_utf8' :: (MonadIO m) => FilePath -> StackTraceT m (DTA T.Text)
-readFileDTA_utf8' f = inside ("DTA file: " ++ show f) $ do
+readFileDTA_utf8' f = inside ("DTA file: " ++ show f) do
   liftIO (tryIOError $ B.readFile f) >>= \case
     Left err -> fatal $ show err
     Right bs -> case decodeUtf8' bs of

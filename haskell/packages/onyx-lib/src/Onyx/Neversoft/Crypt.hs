@@ -8,7 +8,9 @@ https://www.scorehero.com/forum/viewtopic.php?t=39923
 GHWT/GH5 encryption from GHWT Importer by Buldy, originally from GHWT All in One mod by .ocz
 https://www.scorehero.com/forum/viewtopic.php?t=110650
 -}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
 module Onyx.Neversoft.Crypt where
 
 import           Control.Applicative          ((<|>))
@@ -22,6 +24,7 @@ import           Data.Bits
 import qualified Data.ByteString              as B
 import qualified Data.ByteString.Lazy         as BL
 import qualified Data.Conduit.Audio           as CA
+import           Data.Functor                 ((<&>))
 import           Data.Maybe                   (fromMaybe)
 import           Data.STRef
 import qualified Data.Text                    as T
@@ -332,19 +335,19 @@ readFSBXMA dec = let
     , BL.drop 0x63 dec
     ]
   readable = makeHandle "decoded FSB audio" $ byteStringSimpleHandle dec'
-  in ffSource $ Left readable
+  in ffSource readable
 
 readFSB :: (MonadResource m) => BL.ByteString -> IO (CA.AudioSource m Float)
 readFSB dec = do
   fsb <- parseFSB dec
-  let song = head $ either fsb3Songs fsb4Songs $ fsbHeader fsb
-  case fsbExtra song of
+  let song = head $ either (.fsb3Songs) (.fsb4Songs) fsb.fsbHeader
+  case song.fsbExtra of
     Left _xma -> readFSBXMA dec
     Right _mp3 -> do
-      let numStreams = case quotRem (fromIntegral $ fsbSongChannels song) 2 of
+      let numStreams = case quotRem (fromIntegral song.fsbSongChannels) 2 of
             (x, y) -> x + y
-      mp3s <- splitInterleavedMP3 numStreams $ head $ fsbSongData fsb
-      srcs <- forM mp3s $ \mp3 -> ffSource $ Left $ makeHandle "decoded FSB audio" $ byteStringSimpleHandle mp3
+      mp3s <- splitInterleavedMP3 numStreams $ head fsb.fsbSongData
+      srcs <- forM mp3s \mp3 -> ffSource $ makeHandle "decoded FSB audio" $ byteStringSimpleHandle mp3
       return $ foldl1 CA.merge srcs
 
 decryptFSB' :: FilePath -> B.ByteString -> Maybe BL.ByteString
@@ -364,13 +367,13 @@ convertAudio fin fout = do
   audioIO Nothing src fout
 
 reverseMapping :: B.ByteString
-reverseMapping = B.pack $ flip map [0 .. 0xFF] $ \i -> foldr (.|.) 0
+reverseMapping = B.pack $ [0 .. 0xFF] <&> \i -> foldr (.|.) 0
   -- i is a Word8 so shiftR fills with zeroes, matching the Java >>>
   [  i `shiftR` 7
   , (i `shiftR` 5) .&. 0x02
   , (i `shiftR` 3) .&. 0x04
   , (i `shiftR` 1) .&. 0x08
-  , (i `shiftL` 7)
+  ,  i `shiftL` 7
   , (i `shiftL` 5) .&. 0x40
   , (i `shiftL` 3) .&. 0x20
   , (i `shiftL` 1) .&. 0x10
@@ -411,10 +414,10 @@ gh3Encrypt bs = let
 -- GHWT == GH5
 
 ghwtKey :: B.ByteString -> B.ByteString
-ghwtKey str = runST $ do
+ghwtKey str = runST do
   let ncycle = 32
   vxor <- newSTRef (0xFFFFFFFF :: Word32)
-  encstr <- fmap B.pack $ forM [0 .. ncycle - 1] $ \i -> do
+  encstr <- fmap B.pack $ forM [0 .. ncycle - 1] \i -> do
     let ch = B.index str $ i `rem` B.length str
         QBKey crc = qbKeyCRC $ B.singleton ch
     xorOld <- readSTRef vxor
@@ -422,7 +425,7 @@ ghwtKey str = runST $ do
     writeSTRef vxor xorNew
     let index = fromIntegral $ xorNew `rem` fromIntegral (B.length str)
     return $ B.index str index
-  key <- forM [0 .. ncycle - 2] $ \i -> do
+  key <- forM [0 .. ncycle - 2] \i -> do
     let ch = B.index encstr i
         QBKey crc = qbKeyCRC $ B.singleton ch
     xorOld <- readSTRef vxor
@@ -434,9 +437,9 @@ ghwtKey str = runST $ do
   return $ B.pack $ takeWhile (/= 0) key
 
 ghwtKeyFromFile :: FilePath -> B.ByteString
-ghwtKeyFromFile f = ghwtKey $ let
+ghwtKeyFromFile f = ghwtKey let
   s1 = T.toLower $ T.pack $ takeFileName f
-  s2 = fromMaybe s1 $ T.stripSuffix ".xen" s1
+  s2 = fromMaybe s1 $ T.stripSuffix ".xen" s1 <|> T.stripSuffix ".ps3" s1
   s3 = fromMaybe s2 $ T.stripSuffix ".fsb" s2
   s4 = case T.stripPrefix "adlc" s3 of
     Nothing -> s3

@@ -1,9 +1,10 @@
-{-# LANGUAGE DeriveGeneric      #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE DerivingVia        #-}
-{-# LANGUAGE FlexibleContexts   #-}
-{-# LANGUAGE LambdaCase         #-}
-{-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE DerivingVia         #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE RecordWildCards     #-}
 module Onyx.MIDI.Track.ProKeys where
 
 import           Control.Monad                    ((>=>))
@@ -27,43 +28,43 @@ data Pitch = RedYellow Key | BlueGreen Key | OrangeC
   deriving (Enum, Bounded) via GenericFullEnum Pitch
 
 data ProKeysTrack t = ProKeysTrack
-  { pkLanes     :: RTB.T t LaneRange
-  , pkTrainer   :: RTB.T t Trainer
-  , pkMood      :: RTB.T t Mood
-  , pkSolo      :: RTB.T t Bool
-  , pkGlissando :: RTB.T t Bool
-  , pkTrill     :: RTB.T t Bool
-  , pkOverdrive :: RTB.T t Bool
-  , pkBRE       :: RTB.T t Bool
-  , pkNotes     :: RTB.T t (Edge () Pitch)
+  { lanes     :: RTB.T t LaneRange
+  , trainer   :: RTB.T t Trainer
+  , mood      :: RTB.T t Mood
+  , solo      :: RTB.T t Bool
+  , glissando :: RTB.T t Bool
+  , trill     :: RTB.T t Bool
+  , overdrive :: RTB.T t Bool
+  , bre       :: RTB.T t Bool
+  , notes     :: RTB.T t (Edge () Pitch)
   } deriving (Eq, Ord, Show, Generic)
     deriving (Semigroup, Monoid, Mergeable) via GenericMerge (ProKeysTrack t)
 
 nullPK :: ProKeysTrack t -> Bool
-nullPK = RTB.null . pkNotes
+nullPK = RTB.null . (.notes)
 
 instance ChopTrack ProKeysTrack where
   chopTake t pk = ProKeysTrack
-    { pkLanes     = U.trackTake  t $ pkLanes     pk
-    , pkTrainer   = U.trackTake  t $ pkTrainer   pk
-    , pkMood      = U.trackTake  t $ pkMood      pk
-    , pkSolo      = chopTakeBool t $ pkSolo      pk
-    , pkGlissando = chopTakeBool t $ pkGlissando pk
-    , pkTrill     = chopTakeBool t $ pkTrill     pk
-    , pkOverdrive = chopTakeBool t $ pkOverdrive pk
-    , pkBRE       = chopTakeBool t $ pkBRE       pk
-    , pkNotes     = chopTakeEdge t $ pkNotes     pk
+    { lanes     = U.trackTake  t pk.lanes
+    , trainer   = U.trackTake  t pk.trainer
+    , mood      = U.trackTake  t pk.mood
+    , solo      = chopTakeBool t pk.solo
+    , glissando = chopTakeBool t pk.glissando
+    , trill     = chopTakeBool t pk.trill
+    , overdrive = chopTakeBool t pk.overdrive
+    , bre       = chopTakeBool t pk.bre
+    , notes     = chopTakeEdge t pk.notes
     }
   chopDrop t pk = ProKeysTrack
-    { pkLanes     = chopDropStatus t $ pkLanes     pk
-    , pkTrainer   = U.trackDrop    t $ pkTrainer   pk
-    , pkMood      = chopDropStatus t $ pkMood      pk
-    , pkSolo      = chopDropBool   t $ pkSolo      pk
-    , pkGlissando = chopDropBool   t $ pkGlissando pk
-    , pkTrill     = chopDropBool   t $ pkTrill     pk
-    , pkOverdrive = chopDropBool   t $ pkOverdrive pk
-    , pkBRE       = chopDropBool   t $ pkBRE       pk
-    , pkNotes     = chopDropEdge   t $ pkNotes     pk
+    { lanes     = chopDropStatus t pk.lanes
+    , trainer   = U.trackDrop    t pk.trainer
+    , mood      = chopDropStatus t pk.mood
+    , solo      = chopDropBool   t pk.solo
+    , glissando = chopDropBool   t pk.glissando
+    , trill     = chopDropBool   t pk.trill
+    , overdrive = chopDropBool   t pk.overdrive
+    , bre       = chopDropBool   t pk.bre
+    , notes     = chopDropEdge   t pk.notes
     }
 
 instance TraverseTrack ProKeysTrack where
@@ -73,26 +74,28 @@ instance TraverseTrack ProKeysTrack where
 
 instance ParseTrack ProKeysTrack where
   parseTrack = do
-    pkTrainer   <- pkTrainer   =. let
+    trainer   <- (.trainer  ) =. let
       parse = toCommand >=> \case (t, k) | k == T.pack "key" -> Just t; _ -> Nothing
+      unparse :: Trainer -> [T.Text]
       unparse t = fromCommand (t, T.pack "key")
       in commandMatch' parse unparse
-    pkMood      <- pkMood      =. command
-    pkGlissando <- pkGlissando =. edges 126
-    pkTrill     <- pkTrill     =. edges 127
-    pkOverdrive <- pkOverdrive =. edges 116
-    pkSolo      <- pkSolo      =. edges 115
-    pkBRE       <- pkBRE       =. edges 120
+    mood      <- (.mood     ) =. command
+    glissando <- (.glissando) =. edges 126
+    trill     <- (.trill    ) =. edges 127
+    overdrive <- (.overdrive) =. edges 116
+    solo      <- (.solo     ) =. edges 115
+    bre       <- (.bre      ) =. edges 120
     chordSnap [48 .. 72]
-    pkNotes     <- (pkNotes    =.) $ fatBlips (1/8) $ translateEdges
-      $ condenseMap $ eachKey each $ \k -> edges $ fromEnum k + 48
-    pkLanes     <- (pkLanes    =.) $ statusBlips $ condenseMap_ $ eachKey each $ blip . \case
-      RangeC -> 0
-      RangeD -> 2
-      RangeE -> 4
-      RangeF -> 5
-      RangeG -> 7
-      RangeA -> 9
+    notes     <- (.notes    ) =. do
+      fatBlips (1/8) $ translateEdges $ condenseMap $ eachKey each \k -> edges $ fromEnum k + 48
+    lanes     <- (.lanes    ) =. do
+      statusBlips $ condenseMap_ $ eachKey each $ blip . \case
+        RangeC -> 0
+        RangeD -> 2
+        RangeE -> 4
+        RangeF -> 5
+        RangeG -> 7
+        RangeA -> 9
     return ProKeysTrack{..}
 
 -- | Moves the first range event to time zero, to work around a Phase Shift bug.
@@ -104,4 +107,4 @@ fixPSRange trk = let
         RTB.cons NNC.zero range1 $ RTB.cons (NNC.add t1 t2) range2 ranges''
       Nothing -> RTB.singleton NNC.zero range1
     Nothing -> RTB.empty
-  in trk { pkLanes = fix $ pkLanes trk }
+  in trk { lanes = fix trk.lanes }

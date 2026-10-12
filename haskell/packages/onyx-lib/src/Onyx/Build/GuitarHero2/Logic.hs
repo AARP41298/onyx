@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
@@ -13,6 +14,7 @@ import           Control.Monad.Random                 (evalRand, mkStdGen)
 import           Data.Bifunctor                       (bimap)
 import qualified Data.EventList.Relative.TimeBody     as RTB
 import           Data.Foldable                        (toList)
+import           Data.Functor                         ((<&>))
 import           Data.Hashable                        (hash)
 import qualified Data.Map                             as Map
 import           Data.Maybe                           (catMaybes, fromMaybe,
@@ -50,7 +52,8 @@ import qualified Onyx.MIDI.Track.Vocal                as RB
 import           Onyx.Mode
 import           Onyx.Overdrive                       (removeNotelessOD)
 import           Onyx.Project
-import           Onyx.Reductions                      (completeFiveResult)
+import           Onyx.Reductions                      (FretLimit,
+                                                       completeFiveResult)
 import           Onyx.Sections                        (makeGH2Section,
                                                        sectionBody)
 import           Onyx.StackTrace
@@ -65,10 +68,10 @@ gh2Pad rb3@(F.Song tmap _ trks) = let
     Just ((dt, _), _) -> dt
     Nothing           -> 999
   firstNoteBeats = foldr min 999 $ concat
-    [ map (firstEvent . partGems) $ Map.elems $ partDifficulties $ gh2PartGuitar     trks
-    , map (firstEvent . partGems) $ Map.elems $ partDifficulties $ gh2PartBass       trks
-    , map (firstEvent . partGems) $ Map.elems $ partDifficulties $ gh2PartRhythm     trks
-    , map (firstEvent . partGems) $ Map.elems $ partDifficulties $ gh2PartGuitarCoop trks
+    [ map (firstEvent . (.partGems)) $ Map.elems trks.gh2PartGuitar.partDifficulties
+    , map (firstEvent . (.partGems)) $ Map.elems trks.gh2PartBass.partDifficulties
+    , map (firstEvent . (.partGems)) $ Map.elems trks.gh2PartRhythm.partDifficulties
+    , map (firstEvent . (.partGems)) $ Map.elems trks.gh2PartGuitarCoop.partDifficulties
     ]
   firstNoteSeconds = U.applyTempoMap tmap firstNoteBeats
   -- no idea but just going with similar value to what Magma enforces for RB
@@ -205,16 +208,17 @@ midiRB3toGH2
   => SongYaml f
   -> TargetGH2 f
   -> GH2Audio
+  -> FretLimit
   -> F.Song (F.OnyxFile U.Beats)
   -> StackTraceT m U.Seconds
   -> StackTraceT m (F.Song (GH2File U.Beats), Int)
-midiRB3toGH2 song target audio inputMid@(F.Song tmap mmap onyx) getAudioLength = do
+midiRB3toGH2 song target audio fretLimit inputMid@(F.Song tmap mmap onyx) getAudioLength = do
   timing <- basicTiming False inputMid getAudioLength
   let makeMoods origMoods gems = let
         moods = if RTB.null origMoods
           then RB3.makeMoods tmap timing gems
           else origMoods
-        bools = flip fmap moods $ \case
+        bools = moods <&> \case
           Mood_idle_realtime -> False
           Mood_idle          -> False
           Mood_idle_intense  -> False
@@ -222,8 +226,8 @@ midiRB3toGH2 song target audio inputMid@(F.Song tmap mmap onyx) getAudioLength =
           Mood_mellow        -> True
           Mood_intense       -> True
           Mood_play_solo     -> True
-        in (const () <$> RTB.filter not bools, const () <$> RTB.filter id bools) -- (idle, play)
-      makeGRYBO fpart = case completeFiveResult False mmap <$> getFive' fpart of
+        in (void $ RTB.filter not bools, void $ RTB.filter id bools) -- (idle, play)
+      makeGRYBO fpart = case completeFiveResult fretLimit False mmap <$> getFive' fpart of
         Nothing -> return mempty
         Just result -> do
           let gap = fromIntegral result.settings.sustainGap / 480
@@ -236,18 +240,18 @@ midiRB3toGH2 song target audio inputMid@(F.Song tmap mmap onyx) getAudioLength =
                 od <- removeNotelessOD
                   mmap
                   [(fpart, [(show diff, void notes')])]
-                  ((fpart,) <$> result.other.fiveOverdrive)
+                  ((fpart,) <$> result.other.overdrive)
                 let emitted = emitGuitar5 notes'
                 return PartDifficulty
                   { partStarPower  = snd <$> od
-                  , partPlayer1    = result.other.fivePlayer1
-                  , partPlayer2    = result.other.fivePlayer2
-                  , partGems       = RTB.mapMaybe sequence emitted.fiveGems
-                  , partForceHOPO  = if target.gh2Deluxe then emitted.fiveForceHOPO  else RTB.empty
-                  , partForceStrum = if target.gh2Deluxe then emitted.fiveForceStrum else RTB.empty
-                  , partForceTap   = if target.gh2Deluxe then emitted.fiveTap        else RTB.empty
+                  , partPlayer1    = result.other.player1
+                  , partPlayer2    = result.other.player2
+                  , partGems       = RTB.mapMaybe sequence emitted.gems
+                  , partForceHOPO  = if target.gh2Deluxe then emitted.forceHOPO  else RTB.empty
+                  , partForceStrum = if target.gh2Deluxe then emitted.forceStrum else RTB.empty
+                  , partForceTap   = if target.gh2Deluxe then emitted.tap        else RTB.empty
                   }
-              (idle, play) = makeMoods result.other.fiveMood
+              (idle, play) = makeMoods result.other.mood
                 $ maybe mempty (splitEdges . fmap (\((fret, sht), len) -> (fret, sht, len)))
                 $ Map.lookup Expert result.notes
           diffs <- fmap Map.fromList
@@ -255,10 +259,10 @@ midiRB3toGH2 song target audio inputMid@(F.Song tmap mmap onyx) getAudioLength =
             $ Map.toList result.notes
           return mempty
             { partDifficulties = diffs
-            , partFretPosition = result.other.fiveFretPosition
+            , partFretPosition = result.other.fretPosition
             , partIdle         = idle
             , partPlay         = play
-            , partHandMap      = flip fmap result.other.fiveHandMap $ \case
+            , partHandMap      = result.other.handMap <&> \case
               RB.HandMap_Default   -> HandMap_Default
               RB.HandMap_NoChords  -> HandMap_NoChords
               RB.HandMap_AllChords -> HandMap_AllChords
@@ -270,7 +274,7 @@ midiRB3toGH2 song target audio inputMid@(F.Song tmap mmap onyx) getAudioLength =
               RB.HandMap_Chord_D   -> HandMap_Default
               RB.HandMap_Chord_A   -> HandMap_Default
             , partSoloEdge     = if target.gh2Deluxe
-              then makeSoloEdges result.other.fiveSolo
+              then makeSoloEdges result.other.solo
               else RTB.empty
             }
       makeDrum fpart = case getPart fpart song >>= anyDrums of
@@ -284,14 +288,14 @@ midiRB3toGH2 song target audio inputMid@(F.Song tmap mmap onyx) getAudioLength =
               , part   = F.getFlexPart fpart onyx
               }
           in GH2DrumTrack
-            { gh2drumDifficulties = flip fmap trackOrig.drumDifficulties $ \diff -> GH2DrumDifficulty
-              { gh2drumStarPower = trackOrig.drumOverdrive
-              , gh2drumPlayer1   = trackOrig.drumPlayer1
-              , gh2drumPlayer2   = trackOrig.drumPlayer2
-              , gh2drumGems      = fmap fst diff.drumGems
+            { gh2drumDifficulties = trackOrig.difficulties <&> \diff -> GH2DrumDifficulty
+              { gh2drumStarPower = trackOrig.overdrive
+              , gh2drumPlayer1   = trackOrig.player1
+              , gh2drumPlayer2   = trackOrig.player2
+              , gh2drumGems      = fmap fst diff.gems
               }
             , gh2drumSoloEdge = if target.gh2Deluxe
-              then makeSoloEdges trackOrig.drumSolo
+              then makeSoloEdges trackOrig.solo
               else RTB.empty
             }
       makeBandBass :: FiveResult -> BandBassTrack U.Beats
@@ -303,43 +307,44 @@ midiRB3toGH2 song target audio inputMid@(F.Song tmap mmap onyx) getAudioLength =
           . RTB.collectCoincident
           . fromMaybe mempty
           $ Map.lookup Expert result.notes
-        } where (idle, play) = makeMoods result.other.fiveMood
+        } where (idle, play) = makeMoods result.other.mood
                   $ maybe mempty (splitEdges . fmap (\((fret, sht), len) -> (fret, sht, len)))
                   $ Map.lookup Expert result.notes
       makeBandDrums trk = mempty
         { drumsIdle = idle
         , drumsPlay = play
-        , drumsKick  = void $ flip RTB.filter anims $ \case
+        , drumsKick  = void $ flip RTB.filter anims \case
           RB.KickRF -> True
           _         -> False
-        , drumsCrash = void $ RTB.collectCoincident $ flip RTB.filter anims $ \case
+        , drumsCrash = void $ RTB.collectCoincident $ flip RTB.filter anims \case
           RB.Crash1{}        -> True
           RB.Crash2{}        -> True
           RB.Crash1RHChokeLH -> True
           RB.Crash2RHChokeLH -> True
           _                  -> False
-        } where (idle, play) = makeMoods trk.drumMood $ Blip () () <$ anims
-                anims = (RB.fillDrumAnimation (0.25 :: U.Seconds) tmap trk).drumAnimation
+        } where (idle, play) = makeMoods trk.mood $ Blip () () <$ anims
+                anims = (RB.fillDrumAnimation (0.25 :: U.Seconds) tmap trk).animation
       makeBandKeys :: FiveResult -> BandKeysTrack U.Beats
       makeBandKeys result = let
-        (idle, play) = makeMoods result.other.fiveMood
+        (idle, play) = makeMoods result.other.mood
           $ maybe mempty (splitEdges . fmap (\((fret, sht), len) -> (fret, sht, len)))
           $ Map.lookup Expert result.notes
         in mempty { keysIdle = idle, keysPlay = play }
+      makeBandSinger :: RB.VocalTrack U.Beats -> BandSingerTrack U.Beats
       makeBandSinger trk = let
-        (idle, play) = makeMoods trk.vocalMood
+        (idle, play) = makeMoods trk.mood
           $ fmap (\case (p, True) -> NoteOn () p; (p, False) -> NoteOff p)
-          $ RB.vocalNotes trk
+          $ trk.notes
         in mempty { singerIdle = idle, singerPlay = play }
       events = mempty
-        { eventsSections      = fmap (makeGH2Section . sectionBody) onyx.onyxEvents.eventsSections
+        { eventsSections      = fmap (makeGH2Section . sectionBody) onyx.onyxEvents.sections
         , eventsOther         = foldr RTB.merge RTB.empty
-          [ RTB.cons (timingMusicStart timing) MusicStart RTB.empty
-          , RTB.cons (timingEnd        timing) End        RTB.empty
+          [ RTB.cons timing.timingMusicStart MusicStart RTB.empty
+          , RTB.cons timing.timingEnd        End        RTB.empty
           ]
         }
       triggers = mempty
-        { triggersBacking = onyx.onyxEvents.eventsBacking
+        { triggersBacking = onyx.onyxEvents.backing
         }
       getFive' fpart = do
         builder <- getPart fpart song >>= anyFiveFret
@@ -455,7 +460,7 @@ makeGH2DTA song key preview target audio title = D.SongPackage
         GH2Silent       -> [0]
       , D.vols          = audio.audioSections >>= \case
         GH2PartStereo _ -> [0, 0]
-        GH2PartMono   _ -> [20 * (log 2 / log 10)] -- compensate for half volume later
+        GH2PartMono   _ -> [20 * logBase 10 2] -- compensate for half volume later
         GH2Band         -> [0, 0]
         GH2Silent       -> [0]
       , D.cores         = audio.audioSections >>= \case
@@ -500,7 +505,7 @@ makeGH2DTA360 song key preview target audio title = D.SongPackage
         GH2Silent       -> [0]
       , D.vols          = audio.audioSections >>= \case
         GH2PartStereo _ -> [0, 0]
-        GH2PartMono   _ -> [20 * (log 2 / log 10)] -- compensate for half volume later
+        GH2PartMono   _ -> [20 * logBase 10 2] -- compensate for half volume later
         GH2Band         -> [0, 0]
         GH2Silent       -> [0]
       , D.cores         = audio.audioSections >>= \case
@@ -513,10 +518,10 @@ makeGH2DTA360 song key preview target audio title = D.SongPackage
       }
 
 addDXExtra :: GH2DXExtra -> [D.Chunk T.Text] -> [D.Chunk T.Text]
-addDXExtra extra = map $ \case
+addDXExtra extra = map \case
   D.Parens (D.Tree _ [D.Sym "artist", artist]) -> D.Parens $ D.Tree 0
     [ D.Sym "artist"
-    , D.Braces $ D.Tree 0 $ let
+    , D.Braces $ D.Tree 0 let
       setter k v = D.Braces $ D.Tree 0 [D.Sym "set", D.Var k, v]
       in catMaybes
         [ pure $ D.Sym "do"

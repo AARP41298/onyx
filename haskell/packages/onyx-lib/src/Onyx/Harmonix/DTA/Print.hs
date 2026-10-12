@@ -1,5 +1,8 @@
 -- | Pretty-print text (DTA) files.
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
 module Onyx.Harmonix.DTA.Print (showDTA) where
 
 import qualified Data.Text                 as T
@@ -82,7 +85,7 @@ ppSym = unsafeTextWithoutNewlines . T.pack . f . show where
   f (x:xs)      = x : f xs
 
 ppDTA :: DTA T.Text -> PP.Doc ()
-ppDTA = PP.vcat . map ppChunk . treeChunks . topTree
+ppDTA = PP.vcat . map ppChunk . (.treeChunks) . (.topTree)
 
 showDTA :: DTA T.Text -> T.Text
 showDTA = let

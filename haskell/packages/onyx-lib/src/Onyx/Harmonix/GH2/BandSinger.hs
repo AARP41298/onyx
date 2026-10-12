@@ -1,11 +1,13 @@
 {- |
 BAND SINGER
 -}
-{-# LANGUAGE DeriveGeneric      #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE DerivingVia        #-}
-{-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE DerivingVia         #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
 module Onyx.Harmonix.GH2.BandSinger where
 
 import           Control.Monad.Codec
@@ -28,7 +30,7 @@ instance TraverseTrack BandSingerTrack where
 
 instance ParseTrack BandSingerTrack where
   parseTrack = do
-    singerTempo    <- singerTempo    =. command
-    singerIdle     <- singerIdle     =. commandMatch ["idle"]
-    singerPlay     <- singerPlay     =. commandMatch ["play"]
+    singerTempo    <- (.singerTempo)    =. command
+    singerIdle     <- (.singerIdle)     =. commandMatch ["idle"]
+    singerPlay     <- (.singerPlay)     =. commandMatch ["play"]
     return BandSingerTrack{..}

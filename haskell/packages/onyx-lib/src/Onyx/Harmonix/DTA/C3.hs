@@ -1,7 +1,9 @@
 {- |
 Add the C3 comments into a @songs.dta@ file.
 -}
+{-# LANGUAGE BlockArguments            #-}
 {-# LANGUAGE LambdaCase                #-}
+{-# LANGUAGE NoFieldSelectors          #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE OverloadedRecordDot       #-}
 {-# LANGUAGE OverloadedStrings         #-}
@@ -28,7 +30,7 @@ import           Data.Version                         (showVersion)
 import           Onyx.Codec.Common                    (makeValue)
 import qualified Onyx.Harmonix.DTA                    as D
 import qualified Onyx.Harmonix.DTA.Crypt              as D
-import           Onyx.Harmonix.DTA.Run
+import           Onyx.Harmonix.DTA.Run                (noPosn, runPreprocess)
 import           Onyx.Harmonix.DTA.Serialize
 import qualified Onyx.Harmonix.DTA.Serialize.RockBand as D
 import           Onyx.Project
@@ -106,7 +108,7 @@ fixTracksCount = map findSong where
 -- | Remove keys which were moved or renamed in RB3.
 -- The correct versions are added by missing_song_data.dta
 removeOldDTAKeys :: [D.Chunk T.Text] -> [D.Chunk T.Text]
-removeOldDTAKeys = filter $ \case
+removeOldDTAKeys = filter \case
   D.Parens (D.Tree _ (D.Sym "hopo_threshold" : _)) -> False -- Aesthetics of Hate. it should be under 'song'
   D.Parens (D.Tree _ (D.Sym "tuning_offset"  : _)) -> False -- in a few songs. changed to 'tuning_offset_cents'
   _                                                -> True
@@ -114,7 +116,7 @@ removeOldDTAKeys = filter $ \case
 -- | Ignore DTA scripts used in songs such as TBRB's All You Need Is Love,
 -- as well as songs produced by the TBRB Custom DLC Project.
 skipScripting :: [D.Chunk T.Text] -> [D.Chunk T.Text]
-skipScripting = map $ \chunk -> case chunk of
+skipScripting = map \chunk -> case chunk of
   D.Braces (D.Tree _ (D.Sym "do" : xs)) -> case reverse xs of
     val : _ -> val
     []      -> chunk
@@ -134,7 +136,7 @@ missingMapping = case missingSongData of
 -- | Applies an update from missing_song_data.dta.
 applyUpdate :: [D.Chunk T.Text] -> [D.Chunk T.Text] -> [D.Chunk T.Text]
 applyUpdate original update = let
-  getSong = partitionMaybe $ \case
+  getSong = partitionMaybe \case
     D.Parens (D.Tree _ (D.Sym "song" : s)) -> Just s
     _                                      -> Nothing
   (originalSong, untouched) = getSong original
@@ -170,23 +172,27 @@ readDTASingle :: (SendMessage m) => (B.ByteString, D.Chunk B.ByteString) -> Stac
 readDTASingle (bytes, chunk) = do
   let readTextChunk = \case
         D.Parens (D.Tree _ (D.Sym k : chunks)) -> do
-          -- run dta preprocessing so we don't choke on Deluxe custom sources.
+          -- dta preprocessing is needed for RB3 Deluxe custom sources,
+          -- but we now do that earlier in readDTASections + readDTBSingles.
           -- currently we do not then run full dta evaluation.
           -- if we did, we could maybe remove skipScripting below.
-          chunks' <- runPreprocess chunks
           let missingChunks = fromMaybe [] $ HM.lookup k missingMapping
           pkg <- unserialize stackChunks $ D.DTA 0 $ D.Tree 0
             $ removeOldDTAKeys $ fixTracksCount $ skipScripting
-            $ applyUpdate chunks' missingChunks
+            $ applyUpdate chunks missingChunks
           return (k, pkg)
         _ -> fatal "Not a valid song chunk in the format (topkey ...)"
   (latinKey, latinPkg) <- readTextChunk $ fmap TE.decodeLatin1 chunk
+  let useUTF8 = do
+        (k, pkg) <- readTextChunk $ fmap decodeGeneral chunk
+        return (k, pkg, True)
   (k, pkg, isUTF8) <- case D.encoding latinPkg of
-    Nothing -> return (latinKey, latinPkg, False)
+    Nothing -> case D.gameOrigin latinPkg of
+      Just "rb3" -> useUTF8 -- RB3 disc songs.dtb is UTF-8 but no encoding listed
+      -- But otherwise for older songs this means Latin-1 by default
+      _          -> return (latinKey, latinPkg, False)
     Just "latin1" -> return (latinKey, latinPkg, False)
-    Just "utf8" -> do
-      (k, pkg) <- readTextChunk $ fmap decodeGeneral chunk
-      return (k, pkg, True)
+    Just "utf8" -> useUTF8
     Just enc -> fatal $ "Unrecognized DTA character encoding: " ++ T.unpack enc
   let comments = readC3Comments $ (if isUTF8 then decodeGeneral else TE.decodeLatin1) bytes
   return (DTASingle k pkg comments, isUTF8)
@@ -194,23 +200,24 @@ readDTASingle (bytes, chunk) = do
 readDTASingles :: (SendMessage m) => B.ByteString -> StackTraceT m [(DTASingle, Bool)]
 readDTASingles bs = do
   songs <- D.readDTASections bs
-  fmap catMaybes $ forM (zip [1..] songs) $ \(i, pair) -> do
-    inside ("songs.dta entry #" ++ show (i :: Int) ++ " (starting from 1)") $ do
+  fmap catMaybes $ forM (zip [1..] songs) \(i, pair) -> do
+    inside ("songs.dta entry #" ++ show (i :: Int) ++ " (starting from 1)") do
       errorToWarning $ readDTASingle pair
 
 readDTBSingles :: (SendMessage m) => B.ByteString -> StackTraceT m [(DTASingle, Bool)]
 readDTBSingles bs = do
   -- TODO better determination of encrypted .dtb
-  dta <- D.decodeDTB $ if B.take 1 bs == "\x01"
+  dta <- D.decodeDTB if B.take 1 bs == "\x01"
     then BL.fromStrict bs
     else D.decrypt D.newCrypt $ BL.fromStrict bs
-  let songs = D.treeChunks $ D.topTree dta
-  fmap catMaybes $ forM (zip [1..] songs) $ \(i, chunk) -> do
-    inside ("songs.dta entry #" ++ show (i :: Int) ++ " (starting from 1)") $ do
+  -- run preprocess here, needed for Lego RB #ifdefs
+  songs <- map snd <$> runPreprocess (noPosn dta.topTree.treeChunks)
+  fmap catMaybes $ forM (zip [1..] songs) \(i, chunk) -> do
+    inside ("songs.dta entry #" ++ show (i :: Int) ++ " (starting from 1)") do
       errorToWarning $ readDTASingle (B.empty, chunk)
 
 readFileSongsDTA :: (SendMessage m, MonadIO m) => FilePath -> StackTraceT m [(DTASingle, Bool)]
-readFileSongsDTA file = inside ("loading songs.dta from: " ++ show file) $ do
+readFileSongsDTA file = inside ("loading songs.dta from: " ++ show file) do
   stackIO (B.readFile file) >>= readDTASingles
 
 --- | Returns @(short song name, DTA file contents, is UTF8)@
@@ -223,28 +230,28 @@ writeDTASingle :: DTASingle -> T.Text
 writeDTASingle (DTASingle x y z) = prettyDTA x y z
 
 writeC3Comments :: C3DTAComments -> [T.Text]
-writeC3Comments C3DTAComments{..} = execWriter $ do
+writeC3Comments C3DTAComments{..} = execWriter do
   let ln s = tell [s]
   ln ";DO NOT EDIT THE FOLLOWING LINES MANUALLY"
-  forM_ c3dtaCreatedUsing $ \t -> ln $ ";Created using " <> t
-  forM_ c3dtaAuthoredBy $ \t -> ln $ ";Song authored by " <> t
-  forM_ c3dtaSong $ \t -> ln $ ";Song=" <> t
-  forM_ c3dtaLanguages $ \ts -> ln $ ";Languages=" <> T.concat (map (<> ",") ts)
-  forM_ c3dtaKaraoke $ \b -> ln $ ";Karaoke=" <> if b then "1" else "0"
-  forM_ c3dtaMultitrack $ \b -> ln $ ";Multitrack=" <> if b then "1" else "0"
-  forM_ c3dtaConvert $ \b -> ln $ ";Convert=" <> if b then "1" else "0"
-  forM_ c3dta2xBass $ \b -> ln $ ";2xBass=" <> if b then "1" else "0"
-  forM_ c3dtaRhythmKeys $ \b -> ln $ ";RhythmKeys=" <> if b then "1" else "0"
-  forM_ c3dtaRhythmBass $ \b -> ln $ ";RhythmBass=" <> if b then "1" else "0"
-  forM_ c3dtaCATemh $ \b -> ln $ ";CATemh=" <> if b then "1" else "0"
-  forM_ c3dtaExpertOnly $ \b -> ln $ ";ExpertOnly=" <> if b then "1" else "0"
+  forM_ c3dtaCreatedUsing \t -> ln $ ";Created using " <> t
+  forM_ c3dtaAuthoredBy \t -> ln $ ";Song authored by " <> t
+  forM_ c3dtaSong \t -> ln $ ";Song=" <> t
+  forM_ c3dtaLanguages \ts -> ln $ ";Languages=" <> T.concat (map (<> ",") ts)
+  forM_ c3dtaKaraoke \b -> ln $ ";Karaoke=" <> if b then "1" else "0"
+  forM_ c3dtaMultitrack \b -> ln $ ";Multitrack=" <> if b then "1" else "0"
+  forM_ c3dtaConvert \b -> ln $ ";Convert=" <> if b then "1" else "0"
+  forM_ c3dta2xBass \b -> ln $ ";2xBass=" <> if b then "1" else "0"
+  forM_ c3dtaRhythmKeys \b -> ln $ ";RhythmKeys=" <> if b then "1" else "0"
+  forM_ c3dtaRhythmBass \b -> ln $ ";RhythmBass=" <> if b then "1" else "0"
+  forM_ c3dtaCATemh \b -> ln $ ";CATemh=" <> if b then "1" else "0"
+  forM_ c3dtaExpertOnly \b -> ln $ ";ExpertOnly=" <> if b then "1" else "0"
 
 prettyDTA :: T.Text -> D.SongPackage -> C3DTAComments -> T.Text
 prettyDTA name pkg c3 = let
   dta = D.DTA 0 $ D.Tree 0 [D.Parens $ D.Tree 0 $ D.Sym name : makeValue stackChunks pkg]
   dtaLines = filter (T.any $ not . isSpace) $ T.lines $ D.showDTA dta
   c3Lines = writeC3Comments c3
-  in T.unlines $ case reverse dtaLines of
+  in T.unlines case reverse dtaLines of
     ")" : dtaLines' -> reverse dtaLines' ++ c3Lines ++ [")"]
     _               -> dtaLines ++ c3Lines -- I don't think this works but it shouldn't happen
 
@@ -253,6 +260,6 @@ insertCommentsBytes :: D.DTA B.ByteString -> [B.ByteString] -> BL.ByteString
 insertCommentsBytes dta comments = let
   comments' = map BL.fromStrict comments
   dtaLines = filter (BL8.any $ not . isSpace) $ BL8.lines $ BL.fromStrict $ encodeLatin1 $ D.showDTA $ fmap TE.decodeLatin1 dta
-  in BL8.unlines $ case reverse dtaLines of
+  in BL8.unlines case reverse dtaLines of
     ")" : dtaLines' -> reverse dtaLines' <> comments' <> [")"]
     _               -> dtaLines <> comments' -- shouldn't happen

@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
@@ -17,6 +18,7 @@ import           Data.Char                        (toLower, toUpper)
 import qualified Data.EventList.Absolute.TimeBody as ATB
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Foldable                    (toList)
+import           Data.Functor                     ((<&>))
 import qualified Data.HashMap.Strict              as HM
 import           Data.List                        (sort)
 import qualified Data.Map                         as Map
@@ -60,7 +62,8 @@ import           Onyx.PlayStation.NPData          (ghworCustomMidEdatConfig,
 import           Onyx.PlayStation.PKG             (loadPKG, makePKG, pkgFolder,
                                                    tryDecryptEDAT)
 import           Onyx.Project
-import           Onyx.Reductions                  (completeFiveResult)
+import           Onyx.Reductions                  (FretLimit,
+                                                   completeFiveResult)
 import           Onyx.Resources                   (getResourcesPath,
                                                    ghWoRThumbnail)
 import           Onyx.Sections                    (makeDisplaySection,
@@ -85,7 +88,7 @@ worGuitarEdits
     -- Also making chords immediately after tap notes strums, because they are
     -- weirdly hard to hit when hopos (have to play late, even if you strum)
     go = \case
-      Wait t1 c1 rest1@(Wait t2 c2 rest2) -> Wait t1 c1 $ go $ let
+      Wait t1 c1 rest1@(Wait t2 c2 rest2) -> Wait t1 c1 $ go let
         isRepeatedChord = not (null $ drop 1 c1)
           && sort (map (fst . fst) c1) == sort (map (fst . fst) c2)
           && any (\((_color, sht), _len) -> sht == HOPO) c2
@@ -151,7 +154,7 @@ makeDrumFill :: RTB.T U.Seconds gem -> U.Seconds -> [(U.Seconds, U.Seconds)]
 makeDrumFill notes end = let
   notePosns = ATB.getTimes $ RTB.toAbsoluteEventList 0 $ RTB.collectCoincident notes
   gaps = zip (0 : notePosns) (notePosns <> [end])
-  potentialFills = flip map gaps $ \(gapStart, gapEnd) ->
+  potentialFills = gaps <&> \(gapStart, gapEnd) ->
     ( if gapStart == 0 then 0 else gapStart + 0.15 -- NS actually appear to use a gap of "32nd note and then 100ms" but this should work
     , if gapEnd == end then end else gapEnd -| 0.1
     )
@@ -179,7 +182,7 @@ annotateOverlaps = go . fmap (, Set.empty) where
   go = \case
     RNil -> RNil
     Wait t ((colors, sht, mlen), preheld) rest -> let
-      postheld = Set.fromList $ case mlen of
+      postheld = Set.fromList case mlen of
         Nothing  -> []
         Just len -> do
           ((colors', _, _), _) <- RTB.getBodies $ U.trackTake len rest
@@ -219,12 +222,12 @@ pullBackTapEnds = go . RTB.normalize where
 pullBackTapEnds' :: (NNC.C t, Fractional t) => RTB.T t (note, Maybe t) -> RTB.T t Bool -> RTB.T t Bool
 pullBackTapEnds' notes taps = let
   result = pullBackTapEnds $ RTB.merge
-    (U.trackJoin $ flip fmap notes $ \case
+    (U.trackJoin $ notes <&> \case
       (_, Just len) -> Wait 0 NoteOn $ Wait len NoteOff RNil
       (_, Nothing ) -> Wait 0 NoteBlip RNil
     )
     (fmap (\b -> if b then TapStart else TapEnd) taps)
-  in flip RTB.mapMaybe result $ \case
+  in flip RTB.mapMaybe result \case
     TapStart -> Just True
     TapEnd   -> Just False
     _        -> Nothing
@@ -234,22 +237,23 @@ makeGHWoRNote
   => SongYaml f
   -> TargetGH5 f
   -> F.Song (F.OnyxFile U.Beats)
+  -> FretLimit
   -> StackTraceT m U.Seconds -- ^ get longest audio length
   -> StackTraceT m (GHNoteFile, HM.HashMap Word32 T.Text, [Word32])
-makeGHWoRNote songYaml target song@(F.Song tmap mmap ofile) getAudioLength = let
+makeGHWoRNote songYaml target song@(F.Song tmap mmap ofile) fretLimit getAudioLength = let
   secondsToMS :: U.Seconds -> Word32
   secondsToMS = floor . (* 1000)
   beatsToMS :: U.Beats -> Word32
   beatsToMS = secondsToMS . U.applyTempoMap tmap
   makeStarPower od = do
-    (t, ((), (), len)) <- ATB.toPairList $ RTB.toAbsoluteEventList 0 $ joinEdgesSimple $ flip fmap od $ \case
+    (t, ((), (), len)) <- ATB.toPairList $ RTB.toAbsoluteEventList 0 $ joinEdgesSimple $ od <&> \case
       True  -> EdgeOn () ()
       False -> EdgeOff ()
     let start = beatsToMS t
         end   = beatsToMS $ t + len
     return $ Single start (fromIntegral $ end - start)
   resultGB fpart = getPart fpart songYaml >>= anyFiveFret >>= \builder ->
-    return $ completeFiveResult False mmap $ builder FiveTypeGuitarExt ModeInput
+    return $ completeFiveResult fretLimit False mmap $ builder FiveTypeGuitarExt ModeInput
       { tempo  = tmap
       , events = ofile.onyxEvents
       , part   = F.getFlexPart fpart ofile
@@ -260,7 +264,7 @@ makeGHWoRNote songYaml target song@(F.Song tmap mmap ofile) getAudioLength = let
   makeGB Nothing       _    = GuitarBass [] [] []
   makeGB (Just result) diff = let
     notes = worGuitarEdits $ fromMaybe mempty $ Map.lookup diff result.notes
-    taps = pullBackTapEnds' notes (emitGuitar5 notes).fiveTap
+    taps = pullBackTapEnds' notes (emitGuitar5 notes).tap
     colorToBit = \case
       Just Five.Green  -> 0
       Just Five.Red    -> 1
@@ -277,7 +281,7 @@ makeGHWoRNote songYaml target song@(F.Song tmap mmap ofile) getAudioLength = let
         return Note
           { noteTimeOffset = beatsToMS t
           , noteDuration = fromIntegral $ end - start
-          , noteBits = foldr (.|.) 0 $ do
+          , noteBits = foldr (.|.) 0 do
             -- Open pulloff notes only work on bass for some reason.
             -- For now we just leave them in on guitar to become strums;
             -- could also consider modifying the no-opens algorithm to only
@@ -291,9 +295,9 @@ makeGHWoRNote songYaml target song@(F.Song tmap mmap ofile) getAudioLength = let
           , noteAccent = foldr (\mcolor n -> n `clearBit` colorToBit mcolor) 31 overlaps
           }
       , gb_tapping = makeStarPower taps
-      , gb_starpower = makeStarPower result.other.fiveOverdrive
+      , gb_starpower = makeStarPower result.other.overdrive
       }
-  drumResult = flip fmap (getPart target.drums songYaml >>= anyDrums) $ \builder ->
+  drumResult = (getPart target.drums songYaml >>= anyDrums) <&> \builder ->
     builder DrumTargetGH ModeInput
       { tempo  = tmap
       , events = F.getEventsTrack ofile
@@ -302,14 +306,14 @@ makeGHWoRNote songYaml target song@(F.Song tmap mmap ofile) getAudioLength = let
   makeDrums diff = case drumResult of
     Just result -> let
       trk = drumResultToTrack result
-      dd = fromMaybe mempty $ Map.lookup diff trk.drumDifficulties
+      dd = fromMaybe mempty $ Map.lookup diff trk.difficulties
       add2x xs = case diff of
-        Expert -> RTB.merge (fmap Just xs) $ Nothing <$ trk.drumKick2x
+        Expert -> RTB.merge (fmap Just xs) $ Nothing <$ trk.kick2x
         _      -> fmap Just xs
       fiveLane = case result.settings.mode of
-        Drums4 -> add2x dd.drumGems
-        Drums5 -> add2x dd.drumGems
-        _ | target.proTo4 -> add2x dd.drumGems
+        Drums4 -> add2x dd.gems
+        Drums5 -> add2x dd.gems
+        _ | target.proTo4 -> add2x dd.gems
         _ -> let
           -- TODO this logic should be moved to Onyx.Mode DrumResult
           pro = add2x $ D.computePro (Just diff) trk
@@ -370,8 +374,8 @@ makeGHWoRNote songYaml target song@(F.Song tmap mmap ofile) getAudioLength = let
         { drums_instrument = case diff of
           Expert -> Right withGhost
           _      -> Left $ map (.xdNote) withGhost
-        , drums_starpower = makeStarPower trk.drumOverdrive
-        , drums_drumfill = flip map fills $ \(gapStart, gapEnd) ->
+        , drums_starpower = makeStarPower trk.overdrive
+        , drums_drumfill = fills <&> \(gapStart, gapEnd) ->
           Single (secondsToMS gapStart) (secondsToMS gapEnd)
         }
     Nothing -> Drums (case diff of Expert -> Right []; _ -> Left []) [] []
@@ -383,9 +387,9 @@ makeGHWoRNote songYaml target song@(F.Song tmap mmap ofile) getAudioLength = let
             trk = if nullVox opart.onyxPartVocals
               then harm1ToPartVocals opart.onyxHarm1
               else opart.onyxPartVocals
-            sp = makeStarPower $ vocalOverdrive trk
+            sp = makeStarPower trk.overdrive
             phrases = map secondsToMS $ makePhrasePoints
-              (mapTrack (U.applyTempoTrack tmap) $ timingBeat timing)
+              (mapTrack (U.applyTempoTrack tmap) timing.timingBeat)
               (U.applyTempoTrack tmap $ vocalPhraseAll trk)
         lyricNotes <- getLyricNotes mmap trk
         let lyrics
@@ -393,15 +397,17 @@ makeGHWoRNote songYaml target song@(F.Song tmap mmap ofile) getAudioLength = let
               $ ATB.toPairList
               $ RTB.toAbsoluteEventList 0
               $ makeLyrics False $ fmap fst lyricNotes
+            makeLyrics :: (NNC.C t) => Bool -> RTB.T t LyricNote -> RTB.T t T.Text
             makeLyrics continuing = let
+              emitLyric :: Lyric -> T.Text
               emitLyric lyric = if continuing
-                then "=" <> lyricText lyric
-                else lyricText lyric
+                then "=" <> lyric.lyricText
+                else lyric.lyricText
               in \case
                 Wait t (Pitched _ lyric) rest -> Wait t (emitLyric lyric)
-                  $ makeLyrics (lyricContinues lyric) rest
+                  $ makeLyrics lyric.lyricContinues rest
                 Wait t (Talky _ lyric) rest -> Wait t (emitLyric lyric)
-                  $ makeLyrics (lyricContinues lyric) rest
+                  $ makeLyrics lyric.lyricContinues rest
                 Wait t (SlideTo _) rest -> RTB.delay t $ makeLyrics continuing rest
                 RNil -> RNil
             notes
@@ -416,7 +422,7 @@ makeGHWoRNote songYaml target song@(F.Song tmap mmap ofile) getAudioLength = let
             makeNotes = let
               makeNote t mpitch len rest = let
                 ghPitch = maybe 26 (\p -> fromIntegral $ fromEnum p + 36) (mpitch :: Maybe Pitch)
-                in Wait t (ghPitch, len) $ case rest of
+                in Wait t (ghPitch, len) case rest of
                   Wait t2 next@(SlideTo _, _) rest2 -> Wait len (2, t2 - len)
                     $ makeNotes $ Wait (t2 - len) next rest2
                   _ -> makeNotes rest
@@ -428,10 +434,10 @@ makeGHWoRNote songYaml target song@(F.Song tmap mmap ofile) getAudioLength = let
             markers
               = map (\(t, label) -> Single (beatsToMS t) label)
               $ ATB.toPairList $ RTB.toAbsoluteEventList 0
-              $ getPhraseLabels (vocalPhrase1 trk) lyricNotes
+              $ getPhraseLabels trk.phrase1 lyricNotes
         return (notes, lyrics, sp, phrases, markers)
       Nothing -> return ([], [], [], [], [])
-    let fretbars = map beatsToMS $ ATB.getTimes $ RTB.toAbsoluteEventList 0 $ beatLines $ timingBeat timing
+    let fretbars = map beatsToMS $ ATB.getTimes $ RTB.toAbsoluteEventList 0 timing.timingBeat.beatLines
         beatToTimesigs = \case
           Wait t _bar rest -> case RTB.span (== Beat) rest of
             (beats, after) -> let
@@ -439,21 +445,21 @@ makeGHWoRNote songYaml target song@(F.Song tmap mmap ofile) getAudioLength = let
               in Wait t num $ beatToTimesigs $ RTB.delay (mconcat $ RTB.getTimes beats) after
           RNil -> RNil
         timesig = do
-          (t, num) <- ATB.toPairList $ RTB.toAbsoluteEventList 0 $ noRedundantStatus $ beatToTimesigs $ beatLines $ timingBeat timing
+          (t, num) <- ATB.toPairList $ RTB.toAbsoluteEventList 0 $ noRedundantStatus $ beatToTimesigs timing.timingBeat.beatLines
           return TimeSig
             { tsTimestamp = beatsToMS t
             , tsNumerator = fromIntegral num
             , tsDenominator = 4
             }
-        sections = flip fmap ofile.onyxEvents.eventsSections $ \section -> let
+        sections = ofile.onyxEvents.sections <&> \section -> let
           sectionPrint = sectionBody $ makeDisplaySection section
           sectionGH = "\\u[m]" <> sectionPrint
           in (qsKey sectionGH, sectionGH)
-        sections' = RTB.merge sections $ let
+        sections' = RTB.merge sections let
           -- Not all songs have this event, but it lets you place the song end precisely.
           -- Otherwise it just ends right after the last playable note
           sectionGH = "\\L_ENDOFSONG"
-          in RTB.singleton (timingEnd timing) (qsKey sectionGH, sectionGH)
+          in RTB.singleton timing.timingEnd (qsKey sectionGH, sectionGH)
         sectionMarkers
           = map (\(t, (qsid, _)) -> Single (beatsToMS t) qsid)
           $ ATB.toPairList
@@ -529,11 +535,11 @@ makeDrumAnimations tmap anims = do
   [round $ secs * 1000, 0x77000000 + pitch * 0x10000 + 0x60]
 
 getAllMetadata :: (SendMessage m, MonadIO m) => [FilePath] -> StackTraceT m [TextPakSongStruct]
-getAllMetadata inputs = fmap (combineTextPakQBs . concat) $ forM inputs $ \input -> do
+getAllMetadata inputs = fmap (combineTextPakQBs . concat) $ forM inputs \input -> do
   texts <- case map toLower $ takeExtension input of
     ".pkg" -> do
-      folder <- pkgFolder <$> stackIO (loadPKG input)
-      fmap catMaybes $ mapM (uncurry $ tryDecryptEDAT "") $ do
+      folder <- (.pkgFolder) <$> stackIO (loadPKG input)
+      fmap catMaybes $ mapM (uncurry $ tryDecryptEDAT "") do
         (_, usrdir) <- folderSubfolders folder
         (_, songdir) <- folderSubfolders usrdir
         pair@(name, _) <- folderFiles songdir
@@ -543,7 +549,7 @@ getAllMetadata inputs = fmap (combineTextPakQBs . concat) $ forM inputs $ \input
     _ -> do
       folder <- stackIO $ getSTFSFolder input
       return [ r | (name, r) <- folderFiles folder, "_text.pak.xen" `T.isSuffixOf` name ]
-  fmap (concat . catMaybes) $ forM texts $ \r -> do
+  fmap (concat . catMaybes) $ forM texts \r -> do
     bs <- stackIO $ useHandle r handleToByteString
     errorToWarning $ readTextPakQB bs Nothing Nothing
 
@@ -808,10 +814,10 @@ metadataPS3Folder library = let
     ]
 
   in do
-    edats <- withSystemTempDirectory "onyx-ps3-wor-cache" $ \tmp -> do
+    edats <- withSystemTempDirectory "onyx-ps3-wor-cache" \tmp -> do
       let edatIn  = tmp </> "in.bin"
           edatOut = tmp </> "out.bin"
-      forM files $ \(name, bs) -> do
+      forM files \(name, bs) -> do
         let edatName = TE.encodeUtf8 $ T.toUpper (T.pack name) <> ".EDAT"
         BL.writeFile edatIn bs
         packNPData ps3EDATConfig edatIn edatOut edatName
@@ -833,7 +839,7 @@ saveMetadataPKG library fout = let
     makePKG ps3ContentID (main <> extra) fout
 
 packageNameHashFormat :: Bool -> T.Text -> B.ByteString
-packageNameHashFormat caps t = B8.pack $ do
+packageNameHashFormat caps t = B8.pack do
   c <- take 42 $ T.unpack t -- not sure if cutoff is 42 chars, 96 bytes, 42 non-zero bytes, or something else
   let inRange x y = x <= c && c <= y
   if inRange 'a' 'z' || inRange 'A' 'Z' || inRange '0' '9'

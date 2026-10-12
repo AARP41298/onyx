@@ -5,9 +5,12 @@ https://github.com/0x0L/rocksmith/blob/master/rocksmith/psarc.py
 
 -}
 
-{-# LANGUAGE CPP             #-}
-{-# LANGUAGE LambdaCase      #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE CPP                 #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE RecordWildCards     #-}
 module Onyx.Rocksmith.PSARC where
 
 import qualified Codec.Compression.Zlib.Internal as Z
@@ -15,6 +18,7 @@ import           Control.Monad                   (replicateM)
 import           Control.Monad.ST.Lazy           (runST)
 import qualified Data.ByteString                 as B
 import qualified Data.ByteString.Lazy            as BL
+import           Data.Functor                    ((<&>))
 import           Data.Maybe                      (fromMaybe)
 import qualified Data.Text                       as T
 import qualified Data.Text.Encoding              as TE
@@ -44,15 +48,15 @@ data Header = Header
 
 instance Bin Header where
   bin = do
-    hdr_magic        <- hdr_magic        =. byteString 4
-    hdr_versionMajor <- hdr_versionMajor =. word16be
-    hdr_versionMinor <- hdr_versionMinor =. word16be
-    hdr_compression  <- hdr_compression  =. byteString 4
-    hdr_tocLength    <- hdr_tocLength    =. word32be
-    hdr_tocEntrySize <- hdr_tocEntrySize =. word32be
-    hdr_tocEntries   <- hdr_tocEntries   =. word32be
-    hdr_blockSize    <- hdr_blockSize    =. word32be
-    hdr_archiveFlags <- hdr_archiveFlags =. word32be
+    hdr_magic        <- (.hdr_magic)        =. byteString 4
+    hdr_versionMajor <- (.hdr_versionMajor) =. word16be
+    hdr_versionMinor <- (.hdr_versionMinor) =. word16be
+    hdr_compression  <- (.hdr_compression)  =. byteString 4
+    hdr_tocLength    <- (.hdr_tocLength)    =. word32be
+    hdr_tocEntrySize <- (.hdr_tocEntrySize) =. word32be
+    hdr_tocEntries   <- (.hdr_tocEntries)   =. word32be
+    hdr_blockSize    <- (.hdr_blockSize)    =. word32be
+    hdr_archiveFlags <- (.hdr_archiveFlags) =. word32be
     return Header{..}
 
 data TOCEntry = TOCEntry
@@ -64,10 +68,10 @@ data TOCEntry = TOCEntry
 
 instance Bin TOCEntry where
   bin = do
-    toc_MD5    <- toc_MD5    =. byteString 16
-    toc_zIndex <- toc_zIndex =. word32be
-    toc_length <- toc_length =. word40be
-    toc_offset <- toc_offset =. word40be
+    toc_MD5    <- (.toc_MD5)    =. byteString 16
+    toc_zIndex <- (.toc_zIndex) =. word32be
+    toc_length <- (.toc_length) =. word40be
+    toc_offset <- (.toc_offset) =. word40be
     return TOCEntry{..}
 
 word40be :: BinaryCodec Word64
@@ -86,37 +90,37 @@ extractPSARC fin dout = do
 
 readPSARCFolder :: SH.Readable -> IO (SH.Folder T.Text SH.Readable)
 readPSARCFolder readable = do
-  (hdr, tocBytes, origLabel) <- SH.useHandle readable $ \h -> do
+  (hdr, tocBytes, origLabel) <- SH.useHandle readable \h -> do
     hdr <- BL.hGet h 32 >>= runGetM (codecIn (bin :: BinaryCodec Header))
-    tocEnc <- B.hGet h $ fromIntegral (hdr_tocLength hdr) - 32
+    tocEnc <- B.hGet h $ fromIntegral hdr.hdr_tocLength - 32
     toc <- decryptPSARCTable' tocEnc
     return (hdr, toc, SH.handleLabel h)
-  (toc, zlengths) <- return $ flip runGet (BL.fromStrict tocBytes) $ do
-    toc <- replicateM (fromIntegral $ hdr_tocEntries hdr) $ do
+  (toc, zlengths) <- return $ flip runGet (BL.fromStrict tocBytes) do
+    toc <- replicateM (fromIntegral hdr.hdr_tocEntries) do
       codecIn (bin :: BinaryCodec TOCEntry)
     let getZLengths = isEmpty >>= \case
           True  -> return []
           False -> liftA2 (:) getWord16be getZLengths
     zlengths <- getZLengths
     return (toc, zlengths)
-  let entryReaders = flip map toc $ \entry -> SH.useHandle readable $ \h -> do
-        hSeek h AbsoluteSeek $ fromIntegral $ toc_offset entry
+  let entryReaders = toc <&> \entry -> SH.useHandle readable \h -> do
+        hSeek h AbsoluteSeek $ fromIntegral entry.toc_offset
         let readEntry' []       _   = return BL.empty
-            readEntry' (z : zs) len = if len == toc_length entry
+            readEntry' (z : zs) len = if len == entry.toc_length
               then return BL.empty
               else do
                 let defaultBlockSize = 0x10000
-                chunk <- BL.hGet h $ if z == 0 then defaultBlockSize else z
+                chunk <- BL.hGet h if z == 0 then defaultBlockSize else z
                 let chunk' = fromMaybe chunk $ zlibMaybe chunk
                 (chunk' <>) <$> readEntry' zs (len + fromIntegral (BL.length chunk'))
-            lens = map fromIntegral $ drop (fromIntegral $ toc_zIndex entry) zlengths
+            lens = map fromIntegral $ drop (fromIntegral entry.toc_zIndex) zlengths
         readEntry' lens 0
   (listingReader, fileReaders) <- case entryReaders of
     []     -> fail "No file listing found in PSARC"
     x : xs -> return (x, xs)
   listing <- listingReader
   let filenames = T.lines $ TE.decodeLatin1 $ BL.toStrict listing
-      folder = SH.fromFiles $ do
+      folder = SH.fromFiles do
         (path, fileReader) <- zip filenames fileReaders
         Just spath <- [SH.splitPath path] -- error if Nothing?
         let newLabel = origLabel <> " | " <> T.unpack path
@@ -124,7 +128,7 @@ readPSARCFolder readable = do
   return folder
 
 zlibMaybe :: BL.ByteString -> Maybe BL.ByteString
-zlibMaybe bs = runST $ let
+zlibMaybe bs = runST let
   go input = \case
     Z.DecompressInputRequired f              -> case input of
       []     -> f B.empty >>= go []

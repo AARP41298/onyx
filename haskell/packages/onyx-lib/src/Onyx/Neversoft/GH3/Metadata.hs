@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments      #-}
 {-# LANGUAGE ImplicitParams      #-}
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE NoFieldSelectors    #-}
@@ -18,6 +19,7 @@ import qualified Data.ByteString.Char8        as B8
 import qualified Data.ByteString.Lazy         as BL
 import           Data.Char                    (toLower)
 import           Data.Either                  (lefts, rights)
+import           Data.Functor                 ((<&>))
 import           Data.List.Extra              (nubOrd, nubOrdOn)
 import           Data.Maybe                   (catMaybes, fromMaybe,
                                                listToMaybe, mapMaybe)
@@ -111,7 +113,7 @@ readGH3TextSetDLC folder = let
     (T.stripSuffix "_text_i.pak" -> Just dlName) -> Just (GH3Italian, dlName)
     (T.stripSuffix "_text_s.pak" -> Just dlName) -> Just (GH3Spanish, dlName)
     _                                            -> Nothing
-  in fmap mconcat $ forM (folderFiles folder) $ \(name, r) -> case stripLang name of
+  in fmap mconcat $ forM (folderFiles folder) \(name, r) -> case stripLang name of
     -- require "dl" in front to ignore GHWT files in Death Magnetic
     Just (lang, dlName) | "dl" `T.isPrefixOf` dlName -> do
       bs <- liftIO $ useHandle r handleToByteString
@@ -126,8 +128,8 @@ readGH3TextSetDLC folder = let
         let ?endian = BigEndian
         nodes <- splitPakNodes (pakFormatGH3 ?endian) pak Nothing
         let filenameKey = qbKeyCRC $ "1ni76fm\\" <> B8.pack (T.unpack dlName) <> ".qb"
-        fmap mconcat $ forM nodes $ \(node, bs) -> if node.nodeFilenameKey == filenameKey && node.nodeFileType == ".qb"
-          then errorToWarning (runGetM parseQB bs) >>= return . \case
+        fmap mconcat $ forM nodes \(node, bs) -> if node.nodeFilenameKey == filenameKey && node.nodeFileType == ".qb"
+          then errorToWarning (runGetM parseQB bs) <&> \case
             Nothing -> mempty
             Just qb -> case [ v | QBSectionInteger "dlc_script_version" _ v <- qb ] of
               []          -> mempty
@@ -141,14 +143,14 @@ readGH3TextSetDLC folder = let
 loadGH3TextSetDLC :: (SendMessage m, MonadIO m) => FilePath -> StackTraceT m GH3TextSet
 loadGH3TextSetDLC f = case map toLower $ takeExtension f of
   ".pkg"  -> do
-    usrdir <- stackIO (pkgFolder <$> loadPKG f) >>= getDecryptedUSRDIR
-    fmap mconcat $ forM (map snd $ folderSubfolders usrdir) $ \dir -> do
+    usrdir <- stackIO ((.pkgFolder) <$> loadPKG f) >>= getDecryptedUSRDIR
+    fmap mconcat $ forM (map snd $ folderSubfolders usrdir) \dir -> do
       readGH3TextSetDLC $ first TE.decodeLatin1 dir
   ".edat" -> do
     -- search folder for any package metadata edats and try to load them
     folderOrig <- stackIO $ crawlFolder $ takeDirectory f
     let matchSuffixes = map (\x -> "_text" <> x <> ".pak.ps3") ["", "_f", "_g", "_i", "_s"]
-    decryptedFiles <- fmap catMaybes $ forM folderOrig.folderFiles $ \(name, file) ->
+    decryptedFiles <- fmap catMaybes $ forM folderOrig.folderFiles \(name, file) ->
       case T.stripSuffix ".edat" $ T.toLower name of
         Nothing -> return Nothing
         Just noEdat -> if any (\sfx -> sfx `T.isSuffixOf` noEdat) matchSuffixes
@@ -196,7 +198,7 @@ buildGH3TextSet prefs dlName lang paks = let
         , QBStructItemInteger810000 "num_tiers" 1
         , QBStructItemStruct8A0000 "tier1"
           [ QBStructHeader
-          , QBStructItemStringW "title" $ case lang of
+          , QBStructItemStringW "title" case lang of
             GH3English -> "Downloaded songs"
             GH3French  -> "Chansons téléchargées"
             GH3German  -> "Heruntergel. Songs"
@@ -206,7 +208,7 @@ buildGH3TextSet prefs dlName lang paks = let
           , if isAerosmith
             then QBStructItemInteger810000 "defaultunlocked" 4
             else QBStructItemQbKey8D0000 0 "unlockall"
-          , QBStructItemQbKey8D0000 "level" $ if isAerosmith
+          , QBStructItemQbKey8D0000 "level" if isAerosmith
             then "load_z_Nipmuc"
             else "load_z_artdeco"
           ]
@@ -231,7 +233,7 @@ buildGH3TextSet prefs dlName lang paks = let
       }
     , BL.replicate 4 0xAB
     )
-  songsLog = flip map allSongData $ \(k, items) -> case parseSongInfoGH3 items of
+  songsLog = allSongData <&> \(k, items) -> case parseSongInfoGH3 items of
     Left  _    -> "[" <> T.pack (show k) <> "] (couldn't recognize metadata keys)"
     Right song -> T.pack (show song.gh3Title) <> " (" <> song.gh3Artist <> ")"
   in (buildPak $ otherNodes <> [metadataQB, end], songsLog)
@@ -253,7 +255,7 @@ combineGH3SongCache360 ins out = do
   game <- detectGH3Game sets
   let dlText = "dl2000000000"
       dlBytes = B8.pack $ T.unpack dlText
-  mystery <- gh3MysteryScript dlBytes $ case game of
+  mystery <- gh3MysteryScript dlBytes case game of
     GuitarHero3         -> snd <$> sets.dlcScript
     GuitarHeroAerosmith -> Just emptyMysteryScript
   prefs <- readPreferences
@@ -272,10 +274,10 @@ combineGH3SongCache360 ins out = do
       getLanguage lang = buildGH3TextSet prefs dlBytes lang
         [ pak | (lang', pak) <- sets.languages, lang == lang' ]
   lg $ "Found " <> show (length engLog) <> " songs"
-  forM_ engLog $ \line -> lg $ "- " <> T.unpack line
+  forM_ engLog \line -> lg $ "- " <> T.unpack line
   thumb <- liftIO $ gh3Thumbnail >>= B.readFile
   liftIO $ makeCONMemory CreateOptions
-    { createNames = replicate 6 $ case game of
+    { createNames = replicate 6 case game of
       GuitarHero3         -> "GH3 Customs Database"
       GuitarHeroAerosmith -> "GHA Customs Database"
     , createDescriptions = []
@@ -305,7 +307,7 @@ combineGH3SongCachePS3Folder ins = do
       edatConfig = case game of
         GuitarHero3         -> gh3CustomMidEdatConfig folderLabel
         GuitarHeroAerosmith -> ghaCustomMidEdatConfig folderLabel
-  mystery <- gh3MysteryScript dlBytes $ case game of
+  mystery <- gh3MysteryScript dlBytes case game of
     GuitarHero3         -> snd <$> sets.dlcScript
     GuitarHeroAerosmith -> Just emptyMysteryScript
   prefs <- readPreferences
@@ -321,12 +323,12 @@ combineGH3SongCachePS3Folder ins = do
       getLanguage lang = buildGH3TextSet prefs dlBytes lang
         [ pak | (lang', pak) <- sets.languages, lang == lang' ]
   lg $ "Found " <> show (length engLog) <> " songs"
-  forM_ engLog $ \line -> lg $ "- " <> T.unpack line
-  edats <- tempDir "onyx-gh3-ps3" $ \tmp -> do
+  forM_ engLog \line -> lg $ "- " <> T.unpack line
+  edats <- tempDir "onyx-gh3-ps3" \tmp -> do
     let fin  = tmp </> "tmp.pak"
         fout = tmp </> "tmp.edat"
     fout' <- shortWindowsPath True fout
-    forM files $ \(name, bs) -> do
+    forM files \(name, bs) -> do
       let nameText  = T.toUpper name <> ".EDAT"
           nameBytes = TE.encodeUtf8 nameText
       stackIO $ BL.writeFile fin bs
@@ -361,24 +363,24 @@ readGH3TextPakQB nodes = let
       , "gh3_songlist_props" -- GH3 DEMO BUILD
       ]
     songs
-  sortedNodes = flip map nodes $ \pair@(node, bs) -> if node.nodeFileType == ".qb"
+  sortedNodes = nodes <&> \pair@(node, bs) -> if node.nodeFileType == ".qb"
     -- this will just be an empty list if we can't parse the qb,
     -- such as some parts of gh3 disc .pak we don't care about
     then Right (pair, fromMaybe [] $ map (lookupQS mappingQS) <$> runGetM parseQB bs)
     else Left pair
-  sortedNodes' = flip map sortedNodes $ \case
+  sortedNodes' = sortedNodes <&> \case
     Left pair        -> Left pair
     Right (pair, qb) -> case getSonglistProps qb of
       []    -> Left pair
       songs -> Right songs
-  structs = concat $ flip map (concat $ rights sortedNodes') $ \case
+  structs = concat $ concat (rights sortedNodes') <&> \case
     QBStructItemStruct8A0000 k struct -> [(k, struct)] -- gh3
     QBStructItemStruct       k struct -> [(k, struct)] -- ghwt
     _                                 -> []
     -- known other things found here:
     -- QBStructItemQbKeyString9A0000 0 "download_songlist_props"  -- GH3 DEMO BUILD
     -- QBStructItemQbKeyString9A0000 0 "permanent_songlist_props" -- under gh3_songlist_props in final gh3 disc
-  game = listToMaybe $ do
+  game = listToMaybe do
     Right (_, qb) <- sortedNodes
     QBSectionStruct "GH3_Download_Songs" _ (QBStructHeader : meta) <- qb
     QBStructItemStruct8A0000 "tier1" (QBStructHeader : tier) <- meta
@@ -414,6 +416,7 @@ data SongInfoGH3 = SongInfoGH3
   , gh3UseCoopNotetracks    :: Bool
   , gh3HammerOnMeasureScale :: Maybe Float
   , gh3OriginalArtist       :: Bool
+  , gh3Countoff             :: Maybe B.ByteString
   -- lots of other fields ignored
   } deriving (Show)
 
@@ -426,8 +429,8 @@ parseSongInfoGH3 songEntries = do
         QBStructItemStringW       k s | k == crc -> [s]                 -- 360
         QBStructItemString830000  k s | k == crc -> [TE.decodeLatin1 s] -- PS2
         _                                        -> []
-  gh3Title <- maybe (Left $ "parseSongInfoGH3: couldn't get song title") Right $ getString "title"
-  gh3Artist <- maybe (Left $ "parseSongInfoGH3: couldn't get song artist") Right $ getString "artist"
+  gh3Title <- maybe (Left "parseSongInfoGH3: couldn't get song title") Right $ getString "title"
+  gh3Artist <- maybe (Left "parseSongInfoGH3: couldn't get song artist") Right $ getString "artist"
   -- tutorial songs don't have a year
   let gh3Year = getString "year"
   gh3Singer <- case [ s | QBStructItemQbKey8D0000 "singer" s <- songEntries ] of
@@ -444,7 +447,7 @@ parseSongInfoGH3 songEntries = do
       "false" -> Right False
       _       -> Left $ "parseSongInfoGH3: unrecognized key for keyboard (song " <> show gh3Name <> ", key " <> show s <> ")" -- should probably just be warning
     []    -> Right False
-  let findFloat key = listToMaybe $ flip mapMaybe songEntries $ \case
+  let findFloat key = listToMaybe $ flip mapMaybe songEntries \case
         QBStructItemInteger810000 k x | k == key -> Just $ fromIntegral x
         QBStructItemFloat820000   k x | k == key -> Just x
         _                                        -> Nothing
@@ -457,6 +460,7 @@ parseSongInfoGH3 songEntries = do
       gh3OriginalArtist = case [ n | QBStructItemInteger810000 "original_artist" n <- songEntries ] of
         b : _ -> b /= 0
         []    -> True
+      gh3Countoff = listToMaybe [ s | QBStructItemString830000 "countoff" s <- songEntries ]
   gh3RhythmTrack <- case [ n | QBStructItemInteger810000 "rhythm_track" n <- songEntries ] of
     0 : _ -> Right False
     1 : _ -> Right True
@@ -501,7 +505,7 @@ getGH3Dat :: Get GH3Dat
 getGH3Dat = do
   count <- getWord32be
   gh3DatLength <- getWord32be
-  gh3DatAudio <- replicateM (fromIntegral count) $ do
+  gh3DatAudio <- replicateM (fromIntegral count) do
     nameKey <- QBKey <$> getWord32be
     streamIndex <- getWord32be
     -- are these always zero?

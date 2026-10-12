@@ -1,4 +1,6 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
@@ -20,7 +22,6 @@ import           Data.Default.Class         (Default (..))
 import           Data.Fixed                 (Milli)
 import           Data.Foldable              (toList)
 import qualified Data.HashMap.Strict        as HM
-import           Data.List                  (stripPrefix)
 import           Data.Maybe                 (isNothing, mapMaybe)
 import qualified Data.Text                  as T
 import qualified Data.Text.Encoding         as TE
@@ -28,6 +29,8 @@ import           Onyx.StackTrace
 import           Onyx.Util.Handle           (Readable, handleToByteString,
                                              useHandle)
 import           Onyx.Util.Text.Decode      (decodeGeneral)
+import           Onyx.Util.Text.RichText    (RichText (..), Tag (..),
+                                             parseRichText)
 import           Text.Read                  (readMaybe)
 
 data Song = Song
@@ -151,24 +154,15 @@ showPSTuning t = T.unwords
   $ map (T.pack . show) t.offsets
   <> toList (T.pack . show <$> t.name)
 
--- | Strips <b>bold</b>, <i>italic</i>, and <color=red>colored</color>
--- which are supported by CH in metadata, lyrics, and sections.
--- Also replaces <br> with newline characters.
+-- | Strips Unity rich text tags which are supported by CH in metadata, lyrics,
+-- and sections. Replaces <br> with newline characters.
 stripTags :: T.Text -> T.Text
-stripTags = let
-  -- TODO also remove <size=3></size>
-  simple = ["<b>", "</b>", "<i>", "</i>", "</color>"]
-  go "" = ""
-  go s@(c:cs) = case mapMaybe (`stripPrefix` s) simple of
-    [] -> case stripPrefix "<color=" s of
-      Nothing -> case stripPrefix "<br>" s of
-        Nothing    -> c : go cs
-        Just after -> '\n' : go after
-      Just after -> case break (== '>') after of
-        (_, '>' : after') -> go after'
-        _                 -> c : go cs
-    after : _ -> go after
-  in T.pack . go . T.unpack
+stripTags = T.concat . map (\case
+  Plain s -> s
+  Markup tag -> if tag.name == "br" && not tag.closing
+    then "\n"
+    else ""
+  ) . parseRichText
 
 loadSong :: (MonadIO m, SendMessage m) => Readable -> StackTraceT m Song
 loadSong r = do
@@ -260,8 +254,8 @@ saveSong :: (MonadIO m) => FilePath -> Song -> m ()
 saveSong fp = writePSIni fp . songToIniContents
 
 songToIniContents :: Song -> [(T.Text, T.Text)]
-songToIniContents ini = execWriter $ do
-  let str k = maybe (return ()) $ \v -> tell [(k, v)]
+songToIniContents ini = execWriter do
+  let str k = maybe (return ()) \v -> tell [(k, v)]
       shown k = str k . fmap (T.pack . show)
       milli k = shown k . fmap ((floor :: Milli -> Int) . (* 1000))
       tuning k = str k . fmap showPSTuning

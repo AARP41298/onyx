@@ -1,7 +1,8 @@
-{-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE BlockArguments        #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE LambdaCase            #-}
+{-# LANGUAGE OverloadedRecordDot   #-}
+{-# LANGUAGE OverloadedStrings     #-}
 module Onyx.Build.PowerGig (pgRules) where
 
 import           Control.Monad.IO.Class
@@ -13,6 +14,7 @@ import qualified Data.ByteString                  as B
 import qualified Data.ByteString.Lazy             as BL
 import qualified Data.EventList.Absolute.TimeBody as ATB
 import qualified Data.EventList.Relative.TimeBody as RTB
+import           Data.Functor                     ((<&>))
 import qualified Data.Map                         as Map
 import           Data.Maybe                       (catMaybes, fromMaybe)
 import qualified Data.Text                        as T
@@ -34,7 +36,8 @@ import           Onyx.PowerGig.Crypt              (buildHeader, encryptE2,
 import qualified Onyx.PowerGig.GEV                as PG
 import qualified Onyx.PowerGig.Songs              as PG
 import           Onyx.Project                     hiding (Difficulty)
-import           Onyx.Reductions                  (completeFiveResult)
+import           Onyx.Reductions                  (completeFiveResult,
+                                                   loadFretLimit)
 import           Onyx.Resources                   (getResourcesPath,
                                                    powerGigThumbnail,
                                                    powerGigTitleThumbnail)
@@ -51,7 +54,7 @@ import           Text.Mustache                    (compileMustacheFile,
 pgRules :: BuildInfo -> FilePath -> TargetPG FilePath -> QueueLog Rules ()
 pgRules buildInfo dir pg = do
 
-  let songYaml      = biSongYaml buildInfo
+  let songYaml      = buildInfo.biSongYaml
       key           = fromMaybe "TodoAutoSongKey" pg.key -- TODO generate automatic
       k             = T.unpack key
       metadata      = getTargetMetadata songYaml $ PG pg
@@ -125,6 +128,7 @@ pgRules buildInfo dir pg = do
 
   objGEV %> \out -> do
     mid <- F.shakeMIDI $ planDir </> "processed.mid"
+    fretLimit <- loadFretLimit
     let _ = mid :: F.Song (F.OnyxFile U.Beats)
         (strh, strs, mapping) = PG.makeStringBank
           [ "guitar_1_expert"
@@ -139,8 +143,8 @@ pgRules buildInfo dir pg = do
             , pcmcMIDI = B.concat ["songs:", TE.encodeUtf8 key, "\\", TE.encodeUtf8 key, ".mid"]
             }
           , gevGELH = PG.GELH $ V.fromList $ catMaybes
-            [ flip fmap (getPart pg.guitar songYaml >>= anyFiveFret) $ \builder -> let
-              result = completeFiveResult False mid.timesigs $ builder FiveTypeGuitar ModeInput
+            [ (getPart pg.guitar songYaml >>= anyFiveFret) <&> \builder -> let
+              result = completeFiveResult fretLimit False mid.timesigs $ builder FiveTypeGuitar ModeInput
                 { tempo = mid.tempos
                 , events = mid.tracks.onyxEvents
                 , part = F.getFlexPart pg.guitar mid.tracks
@@ -155,7 +159,7 @@ pgRules buildInfo dir pg = do
                 , gelsUnk5      = 0 -- TODO unknown
                 , gelsUnk6      = 0 -- TODO unknown
                 , gelsUnk7      = 0 -- number of power chords
-                , gelsGEVT      = V.fromList $ do
+                , gelsGEVT      = V.fromList do
                   -- TODO hopos
                   (absBeats, (fretsSHT, mlen)) <- ATB.toPairList $ RTB.toAbsoluteEventList 0 notes
                   let startSecs = realToFrac $ U.applyTempoMap mid.tempos absBeats
@@ -285,7 +289,7 @@ pgRules buildInfo dir pg = do
               , ca_num_channels = 2
               }
             , audio_count_off      = Nothing
-            , audio_preview        = V.singleton $ let
+            , audio_preview        = V.singleton let
               (pstart, pend) = previewBounds metadata mid 0 False
               in PG.Preview
                 { preview_start_position   = Just $ fromIntegral pstart / 1000
@@ -441,7 +445,7 @@ pgRules buildInfo dir pg = do
   objAudio %> \out -> do
     let wav = planDir </> "everything.wav"
     shk $ need [wav]
-    xma <- mapStackTraceT (mapQueueLog $ liftIO . runResourceT) $ makeXMAPieces $ Left $ fileReadable wav
+    xma <- mapStackTraceT (mapQueueLog $ liftIO . runResourceT) $ makeXMAPieces $ fileReadable wav
     stackIO $ writeXMA2 out xma
   objAudioE2 %> \out -> do
     shk $ need [objAudio]

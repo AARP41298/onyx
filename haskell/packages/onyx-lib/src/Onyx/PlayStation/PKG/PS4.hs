@@ -2,6 +2,7 @@
 Ported from LibOrbis by Maxton
 https://github.com/maxton/LibOrbisPkg
 -}
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
@@ -31,6 +32,7 @@ import qualified Data.ByteString.Lazy     as BL
 import           Data.Foldable            (toList)
 import           Data.Int
 import           Data.IORef
+import qualified Data.Text                as T
 import           Data.Word
 import           Onyx.Rocksmith.Sng2014   (nullTerm)
 import           Onyx.Util.Binary         (runGetM)
@@ -168,7 +170,7 @@ readPKG h = do
   headerSignature <- B.hGet h 256
   hSeek h AbsoluteSeek $ fromIntegral header.entry_table_offset
   metasBytes      <- BL.hGet h $ 0x20 * fromIntegral header.entry_count
-  metasEmpty      <- flip runGetM metasBytes $ replicateM (fromIntegral header.entry_count) $ do
+  metasEmpty      <- flip runGetM metasBytes $ replicateM (fromIntegral header.entry_count) do
     id_ <- getWord32be
     nameTableOffset <- getWord32be
     flags1 <- getWord32be
@@ -177,7 +179,7 @@ readPKG h = do
     dataSize <- getWord32be
     skip 8
     return MetaEntry { entryContents = Nothing, .. }
-  metas <- forM metasEmpty $ \meta -> let
+  metas <- forM metasEmpty \meta -> let
     readStrict f = do
       hSeek h AbsoluteSeek $ fromIntegral meta.dataOffset
       bs <- B.hGet h $ fromIntegral meta.dataSize
@@ -228,7 +230,7 @@ data PkgEntryKey = PkgEntryKey
   } deriving (Show)
 
 imageKeyGetBytes :: MetaEntry a -> B.ByteString
-imageKeyGetBytes me = BL.toStrict $ runPut $ do
+imageKeyGetBytes me = BL.toStrict $ runPut do
   putWord32be me.id_
   putWord32be me.nameTableOffset
   putWord32be me.flags1
@@ -402,7 +404,7 @@ readPfs orig pkg = do
 
   let offset = subHandle (<> " | pfs image") (fromIntegral pkg.header0x400.pfs_image_offset) Nothing orig
 
-  (header, reader, flagSigned) <- useHandle offset $ \h -> do
+  (header, reader, flagSigned) <- useHandle offset \h -> do
     header <- BL.hGet h 0x400 >>= runGetM readPfsHeader
     let flagSigned    = (header.mode .&. 1) == 1
         flagEncrypted = (header.mode .&. 4) == 4
@@ -417,10 +419,10 @@ readPfs orig pkg = do
       else return offset
     return (header, reader, flagSigned)
 
-  useHandle reader $ \h -> do
+  useHandle reader \h -> do
     let readDinodes dinodeReader dinodeSize = do
           let maxPerSector = toInteger $ quot header.blockSize dinodeSize
-          fmap concat $ forM [0 .. fromIntegral header.dinodeBlockCount - 1] $ \i -> do
+          fmap concat $ forM [0 .. fromIntegral header.dinodeBlockCount - 1] \i -> do
             let dinodesInThisBlock = max maxPerSector $ toInteger header.dinodeCount - i * toInteger maxPerSector
             hSeek h AbsoluteSeek $ fromIntegral $ toInteger header.blockSize * (1 + i)
             bs <- BL.hGet h $ fromIntegral header.blockSize
@@ -482,7 +484,7 @@ pfsGenEncKey ekpfs seed newCrypt = let
 
 pfsGenCryptoKey :: B.ByteString -> B.ByteString -> Word32 -> B.ByteString
 pfsGenCryptoKey ekpfs seed index = let
-  d = BL.toStrict $ runPut $ do
+  d = BL.toStrict $ runPut do
     putWord32le index
     putByteString seed
   in convert $ hmacGetDigest (hmac ekpfs d :: HMAC SHA256)
@@ -490,7 +492,7 @@ pfsGenCryptoKey ekpfs seed index = let
 --------------------------------------------------------------------------------
 
 xtsReadable :: (B.ByteString, B.ByteString) -> Integer -> Integer -> Readable -> Readable
-xtsReadable (dataKey, tweakKey) xtsStartSector xtsSectorSize r = makeHandle "XTS decryption" $ do
+xtsReadable (dataKey, tweakKey) xtsStartSector xtsSectorSize r = makeHandle "XTS decryption" do
   dataCipher <- case cipherInit dataKey of
     CryptoPassed cipher -> return (cipher :: AES128)
     CryptoFailed e      -> fail $ "Couldn't set up data cipher for XTS: " <> show e
@@ -507,10 +509,10 @@ xtsReadable (dataKey, tweakKey) xtsStartSector xtsSectorSize r = makeHandle "XTS
         Just (n', sector) | n == n' -> return sector
         _ -> do
           -- IV is little endian sector number! ivAdd would be big endian
-          let ivBytes = BL.toStrict $ runPut $ do
+          let ivBytes = BL.toStrict $ runPut do
                 putWord64le $ fromIntegral n
                 putWord64le 0
-          iv <- maybe (fail $ "Couldn't make IV for XTS") return $ makeIV ivBytes
+          iv <- maybe (fail "Couldn't make IV for XTS") return $ makeIV ivBytes
           hSeek h AbsoluteSeek $ fromIntegral $ n * xtsSectorSize
           bs <- B.hGet h $ fromIntegral xtsSectorSize
           let sector = if n < xtsStartSector
@@ -528,11 +530,16 @@ xtsReadable (dataKey, tweakKey) xtsStartSector xtsSectorSize r = makeHandle "XTS
       writeIORef posn $ p + n
       let (firstSector, firstPosn) = quotRem p xtsSectorSize
           (lastSector, lastPosn) = quotRem (p + n) xtsSectorSize
-      sectors <- mapM getSector $ case lastPosn of
+      sectors <- mapM getSector case lastPosn of
         0 -> [firstSector .. lastSector - 1]
         _ -> [firstSector .. lastSector]
       return $ BL.toStrict $ BL.take (fromIntegral n) $ BL.drop (fromIntegral firstPosn) $ BL.fromChunks sectors
     }
+
+--------------------------------------------------------------------------------
+
+loadPkgFolder :: Readable -> IO (Folder T.Text Readable)
+loadPkgFolder = undefined -- TODO
 
 --------------------------------------------------------------------------------
 

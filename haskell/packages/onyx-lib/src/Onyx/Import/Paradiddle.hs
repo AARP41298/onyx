@@ -1,8 +1,9 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE MultiWayIf            #-}
+{-# LANGUAGE OverloadedLabels      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
-{-# OPTIONS_GHC -fno-warn-ambiguous-fields #-}
 module Onyx.Import.Paradiddle (importParadiddle, findParadiddle) where
 
 import           Control.Monad                    (forM, guard)
@@ -10,6 +11,7 @@ import           Control.Monad.IO.Class           (MonadIO)
 import qualified Data.EventList.Absolute.TimeBody as ATB
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Foldable                    (toList)
+import           Data.Function                    ((&))
 import qualified Data.HashMap.Strict              as HM
 import           Data.List.Extra                  (nubOrdOn, sort)
 import qualified Data.List.NonEmpty               as NE
@@ -29,6 +31,7 @@ import           Onyx.Paradiddle
 import           Onyx.Project                     hiding (Difficulty (..))
 import           Onyx.StackTrace
 import           Onyx.Util.Handle                 (fileReadable)
+import           Optics                           ((.~))
 import qualified Sound.MIDI.Util                  as U
 import           System.FilePath                  (takeDirectory, takeExtension,
                                                    (<.>), (</>))
@@ -45,7 +48,7 @@ paraToTrue tmap diff rlrr = let
     | maybe False (vel <=) ghostThreshold  = VelocityGhost
     | maybe False (vel >=) accentThreshold = VelocityAccent
     | otherwise                            = VelocityNormal
-  instMapping = Map.fromList $ do
+  instMapping = Map.fromList do
     inst <- rlrr.instruments
     let isRightSide = case inst.location of V3 _ y _ -> y >= 0
     gem <- if
@@ -53,16 +56,16 @@ paraToTrue tmap diff rlrr = let
       -- TODO "Tambourine"
       | "Kick"     `T.isInfixOf` inst.class_ -> return $ Kick RH -- TODO generate kick flams?
       | "Snare"    `T.isInfixOf` inst.class_ -> return Snare
-      | "Crash"    `T.isInfixOf` inst.class_ -> return $ if isRightSide then CrashR else CrashL
-      | "China"    `T.isInfixOf` inst.class_ -> return $ if isRightSide then CrashR else CrashL
+      | "Crash"    `T.isInfixOf` inst.class_ -> return if isRightSide then CrashR else CrashL
+      | "China"    `T.isInfixOf` inst.class_ -> return if isRightSide then CrashR else CrashL
       | "Tom1"     `T.isInfixOf` inst.class_ -> return Tom1
       | "Tom2"     `T.isInfixOf` inst.class_ -> return Tom2
       | "FloorTom" `T.isInfixOf` inst.class_ -> return Tom3
-      | "HiHat"    `T.isInfixOf` inst.class_ -> return $ if isRightSide then Ride else Hihat
-      | "Ride"     `T.isInfixOf` inst.class_ -> return $ if isRightSide then Ride else Hihat
+      | "HiHat"    `T.isInfixOf` inst.class_ -> return if isRightSide then Ride else Hihat
+      | "Ride"     `T.isInfixOf` inst.class_ -> return if isRightSide then Ride else Hihat
       | otherwise                            -> []
     return (inst.name, gem)
-  gems = RTB.fromAbsoluteEventList $ ATB.fromPairList $ sort $ do
+  gems = RTB.fromAbsoluteEventList $ ATB.fromPairList $ sort do
     event <- rlrr.events
     gem <- toList $ Map.lookup event.name instMapping
     return (realToFrac event.time :: U.Seconds, (gem, getVelocity event.vel))
@@ -71,18 +74,18 @@ paraToTrue tmap diff rlrr = let
   flams = RTB.mapMaybe (guard . hasDupe) $ RTB.collectCoincident $ RTB.filter (\(gem, _) -> gem /= Kick RH) gems
   hasDupe xs = nubOrdOn fst xs /= xs
   in mempty
-    { tdDifficulties = Map.singleton diff EliteDrumDifficulty
-      { tdGems             = blipEdgesRBNice
+    { difficulties = Map.singleton diff EliteDrumDifficulty
+      { gems             = blipEdgesRBNice
         $ U.unapplyTempoTrack tmap
         $ fmap (\(gem, vel) -> (vel, (gem, TBDefault), Nothing)) gemsNoDupe
-      , tdFlam             = U.unapplyTempoTrack tmap flams
-      , tdHihatIndifferent = RTB.empty
-      , tdDisco            = RTB.empty
+      , flam             = U.unapplyTempoTrack tmap flams
+      , hihatIndifferent = RTB.empty
+      , disco            = RTB.empty
       }
     }
 
 paraTempoMap :: RLRR -> U.TempoMap
-paraTempoMap rlrr = U.tempoMapFromSecondsBPS $ RTB.fromAbsoluteEventList $ ATB.fromPairList $ do
+paraTempoMap rlrr = U.tempoMapFromSecondsBPS $ RTB.fromAbsoluteEventList $ ATB.fromPairList do
   bpm <- rlrr.bpmEvents
   return (realToFrac bpm.time :: U.Seconds, realToFrac bpm.bpm / 60 :: U.BPS)
 
@@ -101,7 +104,7 @@ importParadiddle diffs level = do
           in Just $ SoftFile ("cover" <.> takeExtension f') $ SoftReadable $ fileReadable f'
       getAudio = case level of
         ImportQuick -> const $ return []
-        ImportFull  -> mapM $ \f -> do
+        ImportFull  -> mapM \f -> do
           let f' = dir </> T.unpack f
           chans <- audioChannels f' >>= maybe (fatal $ "Couldn't query audio channels for: " <> show f') return
           return (f, AudioFile AudioInfo
@@ -114,7 +117,7 @@ importParadiddle diffs level = do
             })
   lowerDiffs <- case level of
     ImportQuick -> return []
-    ImportFull  -> forM (NE.tail diffs) $ \(lowerDiff, lowerPath) -> do
+    ImportFull  -> forM (NE.tail diffs) \(lowerDiff, lowerPath) -> do
       lowerRLRR <- loadJSON lowerPath
       return $ paraToTrue tmap lowerDiff lowerRLRR
   songAudio <- getAudio rlrr.audioFileData.songTracks
@@ -122,7 +125,7 @@ importParadiddle diffs level = do
   -- TODO probably need to apply calibrationOffset somewhere
   let audioExpr auds = do
         auds' <- NE.nonEmpty $ map fst auds
-        Just $ case auds' of
+        Just case auds' of
           aud NE.:| [] -> Input $ Named aud
           _            -> Mix $ fmap (Input . Named) auds'
   return SongYaml
@@ -136,7 +139,7 @@ importParadiddle diffs level = do
     , global = def'
       { backgroundVideo = Nothing
       , fileBackgroundImage = Nothing
-      , fileMidi = SoftFile "notes.mid" $ SoftChart $ case level of
+      , fileMidi = SoftFile "notes.mid" $ SoftChart case level of
         ImportFull  -> F.Song
           { F.tempos = tmap
           , F.timesigs = U.measureMapFromTimeSigs U.Error RTB.empty
@@ -147,12 +150,13 @@ importParadiddle diffs level = do
             }
           }
         ImportQuick -> emptyChart
+      , fileMidiOriginal = Nothing
       , fileSongAnim = Nothing
       }
     , audio = HM.fromList $ songAudio <> drumAudio
     , plans = HM.singleton "plan" $ StandardPlan StandardPlanInfo
       { song = audioExpr songAudio
-      , parts = Parts $ HM.fromList $ do
+      , parts = Parts $ HM.fromList do
         drumExpr <- toList $ audioExpr drumAudio
         return (F.PartDrums, PartSingle drumExpr)
       , crowd = Nothing
@@ -161,9 +165,9 @@ importParadiddle diffs level = do
       , fileTempo = Nothing
       }
     , targets = HM.empty
-    , parts = Parts $ HM.singleton F.PartDrums (emptyPart :: Part SoftFile)
-      { drums = Just $ emptyPartDrums DrumsElite Kicks1x
-      }
+    , parts = Parts $ HM.singleton F.PartDrums
+      $ (emptyPart :: Part SoftFile)
+      & #drums .~ Just (emptyPartDrums DrumsElite Kicks1x)
     }
 
 findParadiddle :: [FilePath] -> [NE.NonEmpty (Difficulty, FilePath)]

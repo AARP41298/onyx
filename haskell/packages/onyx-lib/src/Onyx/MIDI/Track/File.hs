@@ -1,16 +1,19 @@
-{-# LANGUAGE DeriveFoldable      #-}
-{-# LANGUAGE DeriveFunctor       #-}
-{-# LANGUAGE DeriveGeneric       #-}
-{-# LANGUAGE DeriveTraversable   #-}
-{-# LANGUAGE DerivingStrategies  #-}
-{-# LANGUAGE DerivingVia         #-}
-{-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE NoFieldSelectors    #-}
-{-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE PatternSynonyms     #-}
-{-# LANGUAGE RecordWildCards     #-}
-{-# LANGUAGE ViewPatterns        #-}
+{-# LANGUAGE BlockArguments        #-}
+{-# LANGUAGE DeriveFoldable        #-}
+{-# LANGUAGE DeriveFunctor         #-}
+{-# LANGUAGE DeriveGeneric         #-}
+{-# LANGUAGE DeriveTraversable     #-}
+{-# LANGUAGE DerivingVia           #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE FlexibleInstances     #-}
+{-# LANGUAGE LambdaCase            #-}
+{-# LANGUAGE NoFieldSelectors      #-}
+{-# LANGUAGE OverloadedLabels      #-}
+{-# LANGUAGE OverloadedRecordDot   #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE PatternSynonyms       #-}
+{-# LANGUAGE RecordWildCards       #-}
+{-# LANGUAGE ViewPatterns          #-}
 module Onyx.MIDI.Track.File where
 
 import           Control.Monad                     (forM, forM_, guard, unless,
@@ -21,10 +24,12 @@ import           Control.Monad.Trans.Class         (lift)
 import           Control.Monad.Trans.State.Strict  (StateT, execState, get, put,
                                                     runStateT)
 import           Control.Monad.Trans.Writer.Strict (Writer, execWriter, tell)
+import           Data.Bifunctor                    (bimap)
 import qualified Data.ByteString                   as B
 import qualified Data.EventList.Relative.TimeBody  as RTB
 import           Data.Foldable                     (toList)
-import           Data.Functor                      (void)
+import           Data.Function                     ((&))
+import           Data.Functor                      (void, (<&>))
 import           Data.Functor.Identity             (Identity)
 import           Data.Hashable                     (Hashable (..))
 import           Data.List.Extra                   (nubOrd, nubSort, partition,
@@ -75,11 +80,14 @@ import           Onyx.Util.Handle                  (Readable (..), fileReadable,
                                                     handleToByteString,
                                                     useHandle)
 import           Onyx.Util.Text.Decode             (decodeGeneral, encodeLatin1)
+import           Optics                            (mapped, (%), (%~), (.~))
 import qualified Sound.MIDI.File                   as F
 import qualified Sound.MIDI.File.Event             as E
 import qualified Sound.MIDI.File.Event.Meta        as Meta
 import qualified Sound.MIDI.File.Save              as Save
+import qualified Sound.MIDI.Message.Channel.Voice  as V
 import qualified Sound.MIDI.Util                   as U
+import           Text.Read                         (readMaybe)
 
 type FileParser m t = StackTraceT (StateT [RTB.T t (E.T T.Text)] m)
 type FileBuilder t = Writer [RTB.T t (E.T T.Text)]
@@ -93,7 +101,7 @@ class ParseFile f where
 
 parseTrackReport :: (SendMessage m, ParseTrack trk) => RTB.T U.Beats (E.T T.Text) -> StackTraceT m (trk U.Beats)
 parseTrackReport trk = do
-  (parsedTrk, unrec) <- flip mapStackTraceT (codecIn parseTrack) $ \input -> do
+  (parsedTrk, unrec) <- flip mapStackTraceT (codecIn parseTrack) \input -> do
     (errorOrParsed, unrec) <- runStateT input
       $ fixZeroLengthNotes (1/480 :: U.Beats)
       $ mapMIDITrack RTB.fromAbsoluteEventList
@@ -102,7 +110,7 @@ parseTrackReport trk = do
       Left  msgs      -> return $ Left msgs
       Right parsedTrk -> return $ Right (parsedTrk, unrec)
   let unrec' = mapMIDITrack toList unrec
-  forM_ (nubSort $ putMIDITrack (++) unrec') $ \e -> case isNoteEdgeCPV e of
+  forM_ (nubSort $ putMIDITrack (++) unrec') \e -> case isNoteEdgeCPV e of
     Just (_, _, Nothing) -> return () -- don't clutter with note-off warnings
     _                    -> warn $ "Unrecognized MIDI event: " ++ show e
   return parsedTrk
@@ -121,7 +129,7 @@ fileTrack (name :| otherNames) = Codec
         name' = fromMaybe name $ U.trackName match'
     lift $ put rest
     inside ("Parsing track: " <> T.unpack name') $ parseTrackReport match'
-  , codecOut = fmapArg $ \trk -> let
+  , codecOut = fmapArg \trk -> let
     evs = showTrack trk
     in unless (RTB.null evs) $ tell [U.setTrackName name evs]
   } where
@@ -465,11 +473,11 @@ parseOnyxPart partName = do
       { codecIn = do
         trks <- lift get
         let maniaNames = nubOrd $ mapMaybe (U.trackName >=> T.stripPrefix prefix) trks
-        results <- forM maniaNames $ \maniaName -> do
+        results <- forM maniaNames \maniaName -> do
           trk <- codecIn $ fileTrack $ pure $ prefix <> maniaName
           return (maniaName, trk)
         return $ Map.fromList results
-      , codecOut = fmapArg $ \m -> forM_ (Map.toAscList m) $ \(maniaName, trk) -> let
+      , codecOut = fmapArg \m -> forM_ (Map.toAscList m) \(maniaName, trk) -> let
         name = prefix <> maniaName
         in codecOut (fileId $ fileTrack $ pure name) trk
       }
@@ -481,11 +489,11 @@ instance ParseFile OnyxFile where
       { codecIn = do
         trks <- lift get
         let partNames = nubOrd $ mapMaybe (U.trackName >=> identifyFlexTrack) trks
-        results <- forM partNames $ \partName -> do
+        results <- forM partNames \partName -> do
           part <- codecIn $ parseOnyxPart partName
           return (partName, part)
         return $ Map.fromList results
-      , codecOut = fmapArg $ \parts -> forM_ (Map.toAscList parts) $ \(partName, trk) ->
+      , codecOut = fmapArg \parts -> forM_ (Map.toAscList parts) \(partName, trk) ->
         codecOut (fileId $ parseOnyxPart partName) trk
       }
     onyxEvents   <- (.onyxEvents  ) =. fileTrack (pure "EVENTS"   )
@@ -500,23 +508,23 @@ instance ParseFile OnyxFile where
       { codecIn = do
         trks <- lift get
         let audioNames = nubOrd $ mapMaybe (U.trackName >=> T.stripPrefix "AUDIO ") trks
-        results <- forM audioNames $ \audioName -> do
+        results <- forM audioNames \audioName -> do
           trk <- codecIn $ fileTrack $ pure $ "AUDIO " <> audioName
           return (audioName, trk)
         return $ Map.fromList results
-      , codecOut = fmapArg $ \m -> forM_ (Map.toAscList m) $ \(audioName, trk) -> let
+      , codecOut = fmapArg \m -> forM_ (Map.toAscList m) \(audioName, trk) -> let
         name = "AUDIO " <> audioName
         in codecOut (fileId $ fileTrack $ pure name) trk
       }
     onyxRaw  <- (.onyxRaw) =. Codec
       { codecIn = do
         trks <- lift get
-        let (yes, no) = flip partitionMaybe trks $ \trk -> case U.trackName trk of
+        let (yes, no) = flip partitionMaybe trks \trk -> case U.trackName trk of
               Just (T.stripPrefix "RAW " -> Just name) -> Just (name, stripTrack trk)
               _                                        -> Nothing
         lift $ put no
         return $ Map.fromList yes
-      , codecOut = fmapArg $ \m -> tell
+      , codecOut = fmapArg \m -> tell
         $ map (\(name, trk) -> U.setTrackName ("RAW " <> name) trk)
         $ Map.toList m
       }
@@ -527,14 +535,14 @@ newtype RawFile t = RawFile { rawTracks :: [RTB.T t (E.T T.Text)] }
 
 instance ParseFile RawFile where
   parseFile = Codec
-    { codecIn = lift $ do
+    { codecIn = lift do
       trks <- get
       put []
       return $ RawFile trks
     , codecOut = fmapArg $ tell . (.rawTracks)
     }
 
-newtype RawTrack a t = RawTrack { rawTrack :: (RTB.T t a) }
+newtype RawTrack a t = RawTrack { rawTrack :: RTB.T t a }
 
 instance TraverseTrack (RawTrack a) where
   traverseTrack f (RawTrack trk) = RawTrack <$> f trk
@@ -543,7 +551,7 @@ data Song t = Song
   { tempos   :: U.TempoMap
   , timesigs :: U.MeasureMap
   , tracks   :: t
-  } deriving (Eq, Show, Functor, Foldable, Traversable)
+  } deriving (Eq, Show, Functor, Foldable, Traversable, Generic)
 
 {- |
 This is a hack because Moonscraper and thus Clone Hero currently don't
@@ -555,7 +563,7 @@ a non-255 byte and not the phrase ID of 1, but we happen to emit those in
 the working format already.)
 -}
 fixMoonTaps :: (NNC.C t) => RTB.T t (E.T s) -> RTB.T t (E.T s)
-fixMoonTaps = RTB.mapMaybe $ \e -> case parsePSSysEx e of
+fixMoonTaps = RTB.mapMaybe \e -> case parsePSSysEx e of
   Just (PSMessage diff TapNotes b) -> case diff of
     Nothing     -> Just $ unparsePSSysEx $ PSMessage Nothing TapNotes b
     Just Expert -> Just $ unparsePSSysEx $ PSMessage Nothing TapNotes b
@@ -604,7 +612,7 @@ readMIDIFile mid = do
           warn "Loading 'mixed' (type-0) MIDI file as single guitar track."
           let t = case trks of trk : _ -> trk; [] -> RTB.empty
           return (t, [U.setTrackName "PART GUITAR" t])
-        _ -> return $ case trks of
+        _ -> return case trks of
           t : ts -> (t, ts)
           []     -> (RTB.empty, [])
       return (U.makeTempoMap tempoTrk, U.makeMeasureMap U.Truncate tempoTrk, restTrks)
@@ -619,7 +627,7 @@ readMixedMIDI mid = case mid of
     Left [trk] -> let
       tempos = U.makeTempoMap trk
       timesigs = U.makeMeasureMap U.Truncate trk
-      tracks = flip RTB.filter trk $ \case
+      tracks = flip RTB.filter trk \case
         -- various events we don't need to look at
         E.MetaEvent Meta.TrackName{}      -> False
         E.MetaEvent Meta.SetTempo{}       -> False
@@ -643,7 +651,7 @@ showMixedMIDI s = let
 
 -- | Strips comments and track names from the track before handing it to a track parser.
 stripTrack :: (NNC.C t) => RTB.T t (E.T T.Text) -> RTB.T t (E.T T.Text)
-stripTrack = RTB.filter $ \e -> case e of
+stripTrack = RTB.filter \case
   E.MetaEvent (Meta.TextEvent (T.uncons -> Just ('#', _))) -> False
   E.MetaEvent (Meta.TrackName _                          ) -> False
   _                                                        -> True
@@ -654,12 +662,12 @@ data TrackOffset = TrackPad U.Seconds | TrackDrop U.Seconds
 -- | Copies tracks from the second file into the first, repositioning events by timestamp.
 mergeCharts :: TrackOffset -> Song (RawFile U.Beats) -> Song (RawFile U.Beats) -> Song (RawFile U.Beats)
 mergeCharts offset base new = let
-  newTracks = flip map new.tracks.rawTracks $ \trk -> let
+  newTracks = new.tracks.rawTracks <&> \trk -> let
     name = U.trackName trk
     applyOffset = case offset of
       TrackPad  t -> RTB.delay t
       TrackDrop t -> U.trackDrop t -- TODO should this instead shove events forward?
-    removeTrackName = RTB.filter $ \case E.MetaEvent (Meta.TrackName _) -> False; _ -> True
+    removeTrackName = RTB.filter \case E.MetaEvent (Meta.TrackName _) -> False; _ -> True
     -- TODO: need to ensure notes don't have 0 length
     in maybe id U.setTrackName name
       $ removeTrackName
@@ -670,8 +678,8 @@ mergeCharts offset base new = let
 
 parseTracks :: (SendMessage m, ParseTrack trk) => [RTB.T U.Beats (E.T T.Text)] -> T.Text -> StackTraceT m (trk U.Beats)
 parseTracks trks name = do
-  (file, _unrec) <- flip mapStackTraceT (codecIn $ fileTrack $ pure name) $ \f -> do
-    flip fmap (runStateT f trks) $ \case
+  (file, _unrec) <- flip mapStackTraceT (codecIn $ fileTrack $ pure name) \f -> do
+    runStateT f trks <&> \case
       (Left  err , _    ) -> Left  err
       (Right file, unrec) -> Right (file, unrec)
   return file
@@ -681,8 +689,8 @@ interpretMIDIFile
   => Song [RTB.T U.Beats (E.T T.Text)]
   -> StackTraceT m (Song (f U.Beats))
 interpretMIDIFile (Song tempos mmap trks) = do
-  (file, unrec) <- flip mapStackTraceT (codecIn parseFile) $ \f -> do
-    flip fmap (runStateT f trks) $ \case
+  (file, unrec) <- flip mapStackTraceT (codecIn parseFile) \f -> do
+    runStateT f trks <&> \case
       (Left  err , _    ) -> Left  err
       (Right file, unrec) -> Right (file, unrec)
   let mnames = map U.trackName unrec
@@ -705,7 +713,7 @@ loadRawMIDIReadable = fmap (fmap decodeGeneral) . loadMIDIBytes
 
 loadMIDIBytes :: (SendMessage m, MonadIO m) => Readable -> StackTraceT m (F.T B.ByteString)
 loadMIDIBytes r = do
-  maybe id (\f -> inside $ "loading MIDI: " <> f) (rFilePath r) $ do
+  maybe id (\f -> inside $ "loading MIDI: " <> f) (rFilePath r) do
     bs <- stackIO $ useHandle r handleToByteString
     (mid, warnings) <- runGetM getMIDI bs
     mapM_ warn warnings
@@ -745,8 +753,8 @@ padAnyFile seconds (Song temps sigs ff) = let
     $ U.tempoMapToBPS temps
   -- we only modify the first bar to have the extra time,
   -- so printed positions after that bar are unchanged from the source midi
-  sigs' = U.measureMapFromTimeSigs U.Error $ case U.measureMapToTimeSigs sigs of
-    Wait 0 sig@(U.TimeSig len unit) rest -> Wait 0 (U.TimeSig (len + beats) unit) $ case rest of
+  sigs' = U.measureMapFromTimeSigs U.Error case U.measureMapToTimeSigs sigs of
+    Wait 0 sig@(U.TimeSig len unit) rest -> Wait 0 (U.TimeSig (len + beats) unit) case rest of
       Wait dt next rest'
         | dt == len -> Wait (dt + beats) next rest'
         | otherwise -> Wait (len + beats) sig $ Wait (dt - len) next rest'
@@ -770,18 +778,18 @@ padFixedFile seconds song@(Song _ _ ff) = let
     . foldr (.) id (replicate (seconds * 2 - 1) $ RTB.cons 1 Beat)
     . RTB.delay 1
   in Song temps' sigs' ff'
-    { fixedBeat = BeatTrack $ if RTB.null ff.fixedBeat.beatLines
+    { fixedBeat = BeatTrack if RTB.null ff.fixedBeat.beatLines
       then RTB.empty
       else padBeat ff.fixedBeat.beatLines
     }
 
 wiiNoFills :: (NNC.C t) => Song (FixedFile t) -> Song (FixedFile t)
 wiiNoFills (Song temps sigs ff) = let
-  f drums = case RTB.viewL ff.fixedEvents.eventsCoda of
+  f drums = case RTB.viewL ff.fixedEvents.coda of
     Nothing           -> drums
-      { drumActivation = RTB.empty }
+      { activation = RTB.empty }
     Just ((dt, _), _) -> drums
-      { drumActivation = RTB.delay dt $ U.trackDrop dt drums.drumActivation }
+      { activation = RTB.delay dt $ U.trackDrop dt drums.activation }
   in Song temps sigs ff
     { fixedPartDrums       = f ff.fixedPartDrums
     , fixedPartDrums2x     = f ff.fixedPartDrums2x
@@ -801,37 +809,32 @@ wiiMustang22 (Song temps sigs ff) = let
 
 -- | Unmutes protar notes with a velocity above 22.
 wiiUnmute22 :: (NNC.C t) => Song (FixedFile t) -> Song (FixedFile t)
-wiiUnmute22 (Song temps sigs ff) = let
-  unmuteTrack pg = pg
-    { pgDifficulties = fmap unmuteDiff pg.pgDifficulties
-    }
-  unmuteDiff diff = diff
-    { pgNotes
-      = splitEdgesSimple
-      $ fmap (\case
+wiiUnmute22 = let
+  unmuteTrack :: (NNC.C t) => ProGuitarTrack t -> ProGuitarTrack t
+  unmuteTrack = #difficulties % mapped % #notes
+    %~ splitEdgesSimple
+    . fmap (\case
         (fret, (str, Muted), len) | fret > 22 -> (fret, (str, NormalNote), len)
         x                                     -> x
       )
-      $ joinEdgesSimple diff.pgNotes
-    }
-  in Song temps sigs ff
-    { fixedPartRealGuitar   = unmuteTrack ff.fixedPartRealGuitar
-    , fixedPartRealGuitar22 = unmuteTrack ff.fixedPartRealGuitar22
-    , fixedPartRealBass     = unmuteTrack ff.fixedPartRealBass
-    , fixedPartRealBass22   = unmuteTrack ff.fixedPartRealBass22
-    }
+    . joinEdgesSimple
+  in #tracks %~ \trks -> trks
+    & #fixedPartRealGuitar   %~ unmuteTrack
+    & #fixedPartRealGuitar22 %~ unmuteTrack
+    & #fixedPartRealBass     %~ unmuteTrack
+    & #fixedPartRealBass22   %~ unmuteTrack
 
 convertToVenueGen :: Song (OnyxFile U.Beats) -> Song (OnyxFile U.Beats)
 convertToVenueGen (Song temps sigs trks) = Song temps sigs trks
   { onyxLighting = trks.onyxLighting <> unbuildLighting 1 trks.onyxVenue
   , onyxCamera   = trks.onyxCamera   <> unbuildCamera   1 trks.onyxVenue
   , onyxVenue = trks.onyxVenue
-    { venueCameraRB3        = RTB.empty
-    , venuePostProcessRB3   = RTB.empty
-    , venueLighting         = RTB.empty
-    , venueLightingCommands = RTB.empty
-    , venueBonusFX          = RTB.empty
-    , venueBonusFXOptional  = RTB.empty
+    { cameraRB3        = RTB.empty
+    , postProcessRB3   = RTB.empty
+    , lighting         = RTB.empty
+    , lightingCommands = RTB.empty
+    , bonusFX          = RTB.empty
+    , bonusFXOptional  = RTB.empty
     }
   }
 
@@ -1027,8 +1030,8 @@ fixedToOnyx f = OnyxFile
       { onyxPartMania = danceToMania f.fixedPartDance
       })
     ]
-  , onyxEvents   = if RTB.null f.fixedEvents.eventsSections
-    then f.fixedEvents { eventsSections = convertEncoreSections f.fixedSection }
+  , onyxEvents   = if RTB.null f.fixedEvents.sections
+    then f.fixedEvents { sections = convertEncoreSections f.fixedSection }
     else f.fixedEvents
   , onyxBeat     = f.fixedBeat
   , onyxVenue    = f.fixedVenue
@@ -1042,7 +1045,7 @@ fixedToOnyx f = OnyxFile
   }
 
 songLengthBeats :: (HasEvents f) => Song (f U.Beats) -> U.Beats
-songLengthBeats s = case RTB.getTimes $ eventsEnd $ getEventsTrack s.tracks of
+songLengthBeats s = case RTB.getTimes (getEventsTrack s.tracks).end of
   [bts] -> bts
   _     -> 0 -- eh
 
@@ -1061,50 +1064,50 @@ shakeMIDI fp = lift (lift $ need [fp]) >> loadMIDI fp
 
 hasSolo :: (NNC.C t) => RB3Instrument -> Song (FixedFile t) -> Bool
 hasSolo Guitar song = any (not . null)
-  [ song.tracks.fixedPartGuitar.fiveSolo
-  , song.tracks.fixedPartRealGuitar.pgSolo
-  , song.tracks.fixedPartRealGuitar22.pgSolo
+  [ song.tracks.fixedPartGuitar.solo
+  , song.tracks.fixedPartRealGuitar.solo
+  , song.tracks.fixedPartRealGuitar22.solo
   ]
 hasSolo Bass song = any (not . null)
-  [ song.tracks.fixedPartBass.fiveSolo
-  , song.tracks.fixedPartRealBass.pgSolo
-  , song.tracks.fixedPartRealBass22.pgSolo
+  [ song.tracks.fixedPartBass.solo
+  , song.tracks.fixedPartRealBass.solo
+  , song.tracks.fixedPartRealBass22.solo
   ]
 hasSolo Drums song = any (not . null)
-  [ song.tracks.fixedPartDrums.drumSolo
+  [ song.tracks.fixedPartDrums.solo
   ]
 hasSolo Keys song = any (not . null)
-  [ song.tracks.fixedPartKeys.fiveSolo
-  , song.tracks.fixedPartRealKeysX.pkSolo
+  [ song.tracks.fixedPartKeys.solo
+  , song.tracks.fixedPartRealKeysX.solo
   ]
 hasSolo Vocal song = any (not . null)
-  [ song.tracks.fixedPartVocals.vocalPerc
-  , song.tracks.fixedHarm1.vocalPerc
+  [ song.tracks.fixedPartVocals.percussion
+  , song.tracks.fixedHarm1.percussion
   ]
 
 fixFreeformDrums :: DrumTrack U.Beats -> DrumTrack U.Beats
 fixFreeformDrums trk = trk
-  { drumSingleRoll = fixFreeform' gems trk.drumSingleRoll
-  , drumDoubleRoll = fixFreeform' gems trk.drumDoubleRoll
-  } where gems = maybe RTB.empty (void . (.drumGems)) $ Map.lookup Expert trk.drumDifficulties
+  & #singleRoll %~ fixFreeform' gems
+  & #doubleRoll %~ fixFreeform' gems
+  where gems = maybe RTB.empty (void . (.gems)) $ Map.lookup Expert trk.difficulties
 
 fixFreeformFive :: FiveTrack U.Beats -> FiveTrack U.Beats
 fixFreeformFive trk = trk
-  { fiveTremolo = fixFreeform' gems trk.fiveTremolo
-  , fiveTrill   = fixFreeform' gems trk.fiveTrill
-  } where gems = maybe RTB.empty (void . (.fiveGems)) $ Map.lookup Expert trk.fiveDifficulties
+  & #tremolo %~ fixFreeform' gems
+  & #trill   %~ fixFreeform' gems
+  where gems = maybe RTB.empty (void . (.gems)) $ Map.lookup Expert trk.difficulties
 
 fixFreeformPK :: ProKeysTrack U.Beats -> ProKeysTrack U.Beats
 fixFreeformPK trk = trk
-  { pkGlissando = fixFreeform gems trk.pkGlissando
-  , pkTrill     = fixFreeform gems trk.pkTrill
-  } where gems = void trk.pkNotes
+  & #glissando %~ fixFreeform gems
+  & #trill     %~ fixFreeform gems
+  where gems = void trk.notes
 
 fixFreeformPG :: ProGuitarTrack U.Beats -> ProGuitarTrack U.Beats
 fixFreeformPG trk = trk
-  { pgTremolo = fixFreeform' gems trk.pgTremolo
-  , pgTrill   = fixFreeform' gems trk.pgTrill
-  } where gems = maybe RTB.empty (void . (.pgNotes)) $ Map.lookup Expert trk.pgDifficulties
+  & #tremolo %~ fixFreeform' gems
+  & #trill   %~ fixFreeform' gems
+  where gems = maybe RTB.empty (void . (.notes)) $ Map.lookup Expert trk.difficulties
 
 -- | Adjusts instrument tracks so rolls on notes 126/127 end just a tick after
 --- their last gem note-on.
@@ -1127,67 +1130,62 @@ fixFreeform' initGems = go initGems . RTB.normalize where
     Nothing -> RTB.empty -- done
 
 getPercType :: (NNC.C t) => Song (FixedFile t) -> Maybe Percussion
-getPercType song = listToMaybe $ do
+getPercType song = listToMaybe do
   trk <-
     [ song.tracks.fixedPartVocals
     , song.tracks.fixedHarm1
     , song.tracks.fixedHarm2
     , song.tracks.fixedHarm3
     ]
-  (perc, _) <- RTB.getBodies $ vocalPercAnimation trk
+  (perc, _) <- RTB.getBodies trk.percussionAnimation
   return perc
 
 -- | Makes a dummy Basic Guitar/Bass track, for parts with only Pro Guitar/Bass charted.
 protarToGrybo :: ProGuitarTrack U.Beats -> FiveTrack U.Beats
 protarToGrybo pg = mempty
-  { fiveDifficulties = flip fmap pg.pgDifficulties $ \pgd -> mempty
-    { fiveGems
-      = blipEdgesRB_
-      $ fmap head
-      $ RTB.collectCoincident
-      $ noExtendedSustains' standardBlipThreshold standardSustainGap
-      $ fmap (\(_, _, len) -> (Just Five.Green, len))
-      $ edgeBlips minSustainLengthRB pgd.pgNotes
-    }
-  , fiveOverdrive    = pg.pgOverdrive
-  , fiveBRE          = fmap snd pg.pgBRE
-  , fiveSolo         = pg.pgSolo
-  }
+  & #difficulties .~ do
+    pg.difficulties <&> \pgd -> mempty & #gems .~ do
+      blipEdgesRB_
+        $ fmap head
+        $ RTB.collectCoincident
+        $ noExtendedSustains' standardBlipThreshold standardSustainGap
+        $ fmap (\(_, _, len) -> (Just Five.Green, len))
+        $ edgeBlips minSustainLengthRB pgd.notes
+  & #overdrive .~ pg.overdrive
+  & #bre       .~ fmap snd pg.bre
+  & #solo      .~ pg.solo
 
 -- | Makes a dummy Basic Keys track, for parts with only Pro Keys charted.
 expertProKeysToKeys :: ProKeysTrack U.Beats -> FiveTrack U.Beats
 expertProKeysToKeys pk = mempty
-  { fiveDifficulties = let
-    fd = mempty
-      { fiveGems
-        = blipEdgesRB_
-        $ fmap head
-        $ RTB.collectCoincident
-        $ noExtendedSustains' standardBlipThreshold standardSustainGap
-        $ fmap (\(_, len) -> (Just Five.Green, len))
-        $ edgeBlips_ minSustainLengthRB pk.pkNotes
-      }
-    in Map.fromList [ (diff, fd) | diff <- [minBound .. maxBound] ]
-  , fiveOverdrive    = pk.pkOverdrive
-  , fiveBRE          = pk.pkBRE
-  , fiveSolo         = pk.pkSolo
-  }
+  & #difficulties .~ do
+    let fd = mempty & #gems .~ do
+          blipEdgesRB_
+            $ fmap head
+            $ RTB.collectCoincident
+            $ noExtendedSustains' standardBlipThreshold standardSustainGap
+            $ fmap (\(_, len) -> (Just Five.Green, len))
+            $ edgeBlips_ minSustainLengthRB pk.notes
+    Map.fromList [ (diff, fd) | diff <- [minBound .. maxBound] ]
+  & #overdrive .~ pk.overdrive
+  & #bre       .~ pk.bre
+  & #solo      .~ pk.solo
 
 -- | Makes a Pro Keys track, for parts with only Basic Keys charted.
 keysToProKeys :: (NNC.C t) => Difficulty -> FiveTrack t -> ProKeysTrack t
 keysToProKeys d ft = ProKeysTrack
-  { pkLanes     = RTB.singleton NNC.zero RangeA
-  , pkTrainer   = RTB.empty
-  , pkMood      = RTB.empty
-  , pkSolo      = if d == Expert then ft.fiveSolo else RTB.empty
-  , pkGlissando = RTB.empty
-  , pkTrill     = case d of
-    Expert -> isJust <$> ft.fiveTrill
+  { lanes     = RTB.singleton NNC.zero RangeA
+  , trainer   = RTB.empty
+  , mood      = RTB.empty
+  , solo      = if d == Expert then ft.solo else RTB.empty
+  , glissando = RTB.empty
+  , trill     = case d of
+    Expert -> isJust <$> ft.trill
     -- TODO add Hard trills
     _      -> RTB.empty
-  , pkOverdrive = if d == Expert then ft.fiveOverdrive else RTB.empty
-  , pkBRE       = if d == Expert then ft.fiveBRE else RTB.empty
-  , pkNotes     = case Map.lookup d ft.fiveDifficulties of
+  , overdrive = if d == Expert then ft.overdrive else RTB.empty
+  , bre       = if d == Expert then ft.bre else RTB.empty
+  , notes     = case Map.lookup d ft.difficulties of
     Nothing -> RTB.empty
     Just fd -> let
       colorToKey = \case
@@ -1197,40 +1195,134 @@ keysToProKeys d ft = ProKeysTrack
         Just Five.Yellow -> BlueGreen E
         Just Five.Blue   -> BlueGreen F
         Just Five.Orange -> BlueGreen G
-      in fmap colorToKey <$> fd.fiveGems
+      in fmap colorToKey <$> fd.gems
   }
 
-newtype SamplesTrack t = SamplesTrack
-  { sampleTriggers :: RTB.T t SampleTrigger
+data SamplesTrack t = SamplesTrack
+  { sampleTriggers :: RTB.T t (SampleTrigger (Maybe Int))
+  , sampleNotes    :: RTB.T t (Edge () Int)
   } deriving (Eq, Ord, Show, Generic)
     deriving (Semigroup, Monoid, Mergeable) via GenericMerge (SamplesTrack t)
 
 instance TraverseTrack SamplesTrack where
-  traverseTrack fn (SamplesTrack a)
-    = SamplesTrack <$> fn a
+  traverseTrack fn (SamplesTrack a b)
+    = SamplesTrack <$> fn a <*> fn b
 
 instance ChopTrack SamplesTrack where
-  chopTake t = mapTrack $ U.trackTake t
-  chopDrop t = mapTrack $ U.trackDrop t
+  chopTake t st = SamplesTrack
+    { sampleTriggers = U.trackTake  t st.sampleTriggers
+    , sampleNotes    = chopTakeEdge t st.sampleNotes
+    }
+  chopDrop t st = SamplesTrack
+    { sampleTriggers = U.trackDrop  t st.sampleTriggers
+    , sampleNotes    = chopDropEdge t st.sampleNotes
+    }
 
 instance ParseTrack SamplesTrack where
   parseTrack = do
     sampleTriggers <- (.sampleTriggers) =. command
+    sampleNotes    <- (.sampleNotes   ) =. Codec
+      { codecIn = slurpTrack \mt -> let
+        applyPitchEdges (pitch, thisEdges) = thisEdges <&> bimap
+          (const ())
+          (\_chan -> V.fromPitch pitch)
+        notes
+          = foldr RTB.merge RTB.empty
+          $ map applyPitchEdges
+          $ Map.toList mt.midiNotes
+        mt' = mt { midiNotes = Map.empty }
+        in (notes, mt')
+      , codecOut = makeTrackBuilder $ fmap $ makeEdge' . bimap
+        (const 96)
+        (\k -> (0, k))
+      }
     return SamplesTrack{..}
 
-data SampleTrigger = SampleTrigger
-  { sampleGroup :: T.Text
-  , sampleAudio :: T.Text
-  } deriving (Eq, Ord, Show)
+data SampleTrigger a = SampleTrigger
+  { group     :: T.Text
+  , audio     :: T.Text
+  , pan       :: Double
+  , volume    :: Double
+  , transpose :: Double
+  , link      :: a -- starts as pitch of linked midi note, later computed duration
+  } deriving (Eq, Ord, Show, Read, Functor)
 
-instance Command SampleTrigger where
-  toCommand = \case
-    [x]    -> Just $ SampleTrigger "" x
-    [x, y] -> Just $ SampleTrigger x y
-    _      -> Nothing
-  fromCommand = \case
-    SampleTrigger "" x -> [x]
-    SampleTrigger x  y -> [x, y]
+simpleTrigger :: T.Text -> SampleTrigger (Maybe Int)
+simpleTrigger audio = SampleTrigger
+  { group     = ""
+  , audio     = audio
+  , pan       = 0
+  , volume    = 0
+  , transpose = 0
+  , link      = Nothing
+  }
+
+parseSampleTrigger :: [T.Text] -> Maybe (SampleTrigger (Maybe Int))
+parseSampleTrigger ts = let
+  isPrefixed t = case T.uncons t of
+    Just (c, _) -> c `elem` ("<>!+-=" :: [Char])
+    Nothing     -> False
+  goFields st [] = Just st
+  goFields st (t : rest) = case T.uncons t of
+    Just ('<', s) -> readMaybe (T.unpack s) >>= \v -> goFields st { pan       = negate v } rest
+    Just ('>', s) -> readMaybe (T.unpack s) >>= \v -> goFields st { pan       = v        } rest
+    Just ('!', s) -> readMaybe (T.unpack s) >>= \v -> goFields st { volume    = v        } rest
+    Just ('+', s) -> readMaybe (T.unpack s) >>= \v -> goFields st { transpose = v        } rest
+    Just ('-', _) -> readMaybe (T.unpack t) >>= \v -> goFields st { transpose = v        } rest
+    Just ('=', s) -> readMaybe (T.unpack s) >>= \v -> goFields st { link      = Just v   } rest
+    _             -> Nothing
+  in case ts of
+    t1 : t2 : rest
+      | not (isPrefixed t1) && not (isPrefixed t2)
+      -> goFields (simpleTrigger t2) { group = t1 } rest
+    t1 : rest
+      | not (isPrefixed t1)
+      -> goFields (simpleTrigger t1) rest
+    _ -> Nothing
+
+unparseSampleTrigger :: SampleTrigger (Maybe Int) -> [T.Text]
+unparseSampleTrigger st = concat
+  [ filter (not . T.null) [st.group]
+  , [st.audio]
+  , case compare st.pan 0 of
+    LT -> [T.pack $ '<' : show (negate st.pan)]
+    EQ -> []
+    GT -> [T.pack $ '>' : show st.pan]
+  , do
+    guard $ st.volume /= 0
+    [T.pack $ '!' : show st.volume]
+  , case compare st.transpose 0 of
+    LT -> [T.pack $ show st.transpose]
+    EQ -> []
+    GT -> [T.pack $ '+' : show st.transpose]
+  , case st.link of
+    Nothing -> []
+    Just p  -> [T.pack $ '=' : show p]
+  ]
+
+instance Command (SampleTrigger (Maybe Int)) where
+  toCommand = parseSampleTrigger
+  fromCommand = unparseSampleTrigger
+
+-- for sample triggers linked to midi notes, place the note durations in the triggers
+linkDurations :: (NNC.C t) => SamplesTrack t -> RTB.T t (SampleTrigger (Maybe t))
+linkDurations st = let
+  joined = RTB.merge
+    (Left  <$> st.sampleTriggers)
+    (Right <$> st.sampleNotes   )
+  go RNil = RNil
+  go (Wait dt instant rest) = let
+    linked = do
+      Left trigger <- instant
+      return trigger
+        { link = case trigger.link of
+          Nothing    -> Nothing
+          Just pitch -> case RTB.filter (== Right (EdgeOff pitch)) $ RTB.flatten rest of
+            RNil         -> Nothing
+            Wait dur _ _ -> Just dur
+        }
+    in Wait dt linked $ go rest
+  in RTB.flatten $ go $ RTB.collectCoincident joined
 
 displayPartName :: PartName -> T.Text
 displayPartName = \case

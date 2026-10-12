@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE DerivingVia           #-}
 {-# LANGUAGE DuplicateRecordFields #-}
@@ -71,7 +72,7 @@ instance Command CharInstrument where
 
 instance ParseTrack EncorePart where
   parseTrack = do
-    difficulties <- (=.) (.difficulties) $ eachKey each $ \diff -> fatBlips (1/8) $ do
+    difficulties <- (=.) (.difficulties) $ eachKey each \diff -> fatBlips (1/8) do
       let base = case diff of
             Easy   -> 60
             Medium -> 72
@@ -115,7 +116,7 @@ instance ParseTrack EncoreGuitar where
     handMap      <- (.handMap     ) =. command
     strumMap     <- (.strumMap    ) =. command
     fretPosition <- (.fretPosition) =. do
-      condenseMap $ eachKey each $ \posn -> edges $ fromEnum posn + 40
+      condenseMap $ eachKey each \posn -> edges $ fromEnum posn + 40
     return EncoreGuitar{..}
 
 data EncoreDrums t = EncoreDrums
@@ -175,8 +176,8 @@ encorePart fp = do
   let mania = encoreToMania fd
   guard $ not $ RTB.null mania
   return (name, ManiaTrack
-    { maniaNotes     = mania
-    , maniaOverdrive = fp.overdrive
+    { notes     = mania
+    , overdrive = fp.overdrive
     })
 
 encoreToMania :: EncoreDifficulty U.Beats -> RTB.T U.Beats (Edge () (Int, NoteType))
@@ -203,7 +204,7 @@ convertEncoreSections sectionTrack = fmap
       "solo_drums"  -> "drum_solo"
       "solo_bass"   -> "bass_solo"
       _             -> name
-    in simpleSection $ case num of
+    in simpleSection case num of
       Nothing -> name'
       Just n  -> T.unwords [name', T.pack $ show n]
   ) (addSectionNumbers sectionTrack.events)

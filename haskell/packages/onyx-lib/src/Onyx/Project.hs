@@ -1,24 +1,23 @@
-{-# OPTIONS_GHC -fno-warn-ambiguous-fields #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE CPP                   #-}
 {-# LANGUAGE DeriveAnyClass        #-}
 {-# LANGUAGE DeriveFoldable        #-}
 {-# LANGUAGE DeriveFunctor         #-}
 {-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE DeriveTraversable     #-}
-{-# LANGUAGE DerivingStrategies    #-}
 {-# LANGUAGE DerivingVia           #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
+{-# LANGUAGE OverloadedLabels      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE RecordWildCards       #-}
 {-# LANGUAGE StrictData            #-}
-{-# LANGUAGE TupleSections         #-}
 {-# LANGUAGE ViewPatterns          #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 module Onyx.Project where
 
 import           Control.Arrow                        (first)
@@ -33,6 +32,7 @@ import           Data.Default.Class
 import qualified Data.EventList.Relative.TimeBody     as RTB
 import           Data.Fixed                           (Centi, Milli)
 import           Data.Foldable                        (toList)
+import           Data.Function                        ((&))
 import           Data.Hashable                        (Hashable (..))
 import qualified Data.HashMap.Strict                  as HM
 import           Data.Int                             (Int32)
@@ -44,7 +44,7 @@ import qualified Data.Text                            as T
 import qualified Data.Vector                          as V
 import           GHC.Generics                         (Generic (..))
 import qualified Numeric.NonNegative.Class            as NNC
-import qualified Onyx.Amplitude.File                  as Amp
+import           Onyx.Amplitude.PS2.MIDI              (AmpInstrument (..))
 import           Onyx.Audio                           hiding (fadeEnd,
                                                        fadeStart)
 import           Onyx.Codec.Common
@@ -69,6 +69,7 @@ import           Onyx.Sections                        (Section (..),
                                                        parseSection,
                                                        simpleSection)
 import           Onyx.StackTrace
+import           Optics                               ((.~))
 import qualified Sound.Jammit.Base                    as J
 import qualified Sound.MIDI.Util                      as U
 import qualified Text.ParserCombinators.ReadP         as ReadP
@@ -93,7 +94,7 @@ parsePitch = Codec
 
 parseSongKey :: (SendMessage m) => ValueCodec m A.Value SongKey
 parseSongKey = Codec
-  { codecOut = makeOut $ \sk@(SongKey k t) -> A.toJSON $ T.concat
+  { codecOut = makeOut \sk@(SongKey k t) -> A.toJSON $ T.concat
     [ showKey (songKeyUsesFlats sk) k
     , case t of Major -> " major"; Minor -> " minor"
     ]
@@ -113,7 +114,7 @@ parseSongKey = Codec
   }
 
 parseJammitInstrument :: (Monad m) => ValueCodec m A.Value J.Instrument
-parseJammitInstrument = enumCodec "a jammit instrument name" $ \case
+parseJammitInstrument = enumCodec "a jammit instrument name" \case
   J.Guitar   -> "guitar"
   J.Bass     -> "bass"
   J.Drums    -> "drums"
@@ -121,7 +122,7 @@ parseJammitInstrument = enumCodec "a jammit instrument name" $ \case
   J.Vocal    -> "vocal"
 
 parseGender :: (Monad m) => ValueCodec m A.Value Magma.Gender
-parseGender = enumCodec "a gender (male or female)" $ \case
+parseGender = enumCodec "a gender (male or female)" \case
   Magma.Female -> "female"
   Magma.Male   -> "male"
 
@@ -141,7 +142,7 @@ data AudioFile f
   deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 instance (Eq f, StackJSON f) => StackJSON (AudioInfo f) where
-  stackJSON = asStrictObject "AudioInfo" $ do
+  stackJSON = asStrictObject "AudioInfo" do
     md5      <- (.md5     ) =. opt Nothing "md5"       stackJSON
     frames   <- (.frames  ) =. opt Nothing "frames"    stackJSON
     filePath <- (.filePath) =. opt Nothing "file-path" stackJSON
@@ -153,18 +154,18 @@ instance (Eq f, StackJSON f) => StackJSON (AudioInfo f) where
 instance (Eq f, StackJSON f) => StackJSON (AudioFile f) where
   stackJSON = Codec
     { codecIn = decideKey
-      [ ("expr", object $ do
+      [ ("expr", object do
         expr <- requiredKey "expr" fromJSON
         expectedKeys ["expr"]
         return $ AudioSnippet expr
         )
-      , ("samples", object $ do
+      , ("samples", object do
         info <- requiredKey "samples" fromJSON
         expectedKeys ["samples"]
         return $ AudioSamples info
         )
       ] $ AudioFile <$> codecIn stackJSON
-    , codecOut = makeOut $ \case
+    , codecOut = makeOut \case
       AudioFile    info -> makeValue stackJSON info
       AudioSnippet expr -> A.object
         [ "expr" .= toJSON expr
@@ -178,7 +179,7 @@ data SamplesInfo = SamplesInfo
   } deriving (Eq, Ord, Show)
 
 instance StackJSON SamplesInfo where
-  stackJSON = asStrictObject "SamplesInfo" $ do
+  stackJSON = asStrictObject "SamplesInfo" do
     groupPolyphony <- (.groupPolyphony) =. opt Nothing "group-polyphony" stackJSON
     groupCrossfade <- (.groupCrossfade) =. opt 0.002   "group-crossfade" stackJSON
     return SamplesInfo{..}
@@ -189,7 +190,7 @@ data JammitTrack = JammitTrack
   } deriving (Eq, Ord, Show)
 
 instance StackJSON JammitTrack where
-  stackJSON = asStrictObject "JammitTrack" $ do
+  stackJSON = asStrictObject "JammitTrack" do
     title  <- (.title ) =. opt Nothing "title"  stackJSON
     artist <- (.artist) =. opt Nothing "artist" stackJSON
     return JammitTrack{..}
@@ -207,7 +208,7 @@ data PartAudio a
 instance (StackJSON a) => StackJSON (PartAudio a) where
   stackJSON = Codec
     { codecIn = decideKey
-      [ ("kit", object $ do
+      [ ("kit", object do
         kick  <- optionalKey "kick"  fromJSON
         snare <- optionalKey "snare" fromJSON
         toms  <- optionalKey "toms"  fromJSON
@@ -216,7 +217,7 @@ instance (StackJSON a) => StackJSON (PartAudio a) where
         return PartDrumKit{..}
         )
       ] $ PartSingle <$> fromJSON
-    , codecOut = makeOut $ \case
+    , codecOut = makeOut \case
       PartSingle x -> toJSON x
       PartDrumKit{..} -> A.object $ concat
         [ map ("kick"  .=) $ toList kick
@@ -233,7 +234,7 @@ instance (StackJSON a) => StackJSON (Parts a) where
   stackJSON = Codec
     { codecIn = Parts . HM.fromList . map (first F.PartName) . HM.toList
       <$> mapping fromJSON
-    , codecOut = makeOut $ \(Parts hm) -> mappingToJSON $ HM.fromList
+    , codecOut = makeOut \(Parts hm) -> mappingToJSON $ HM.fromList
       $ map (first F.getPartName) $ HM.toList hm
     }
 
@@ -252,7 +253,7 @@ data StandardPlanInfo f = StandardPlanInfo
   } deriving (Eq, Show, Functor, Foldable, Traversable)
 
 instance (Eq f, StackJSON f) => StackJSON (StandardPlanInfo f) where
-  stackJSON = asStrictObject "StandardPlanInfo" $ do
+  stackJSON = asStrictObject "StandardPlanInfo" do
     song        <- (.song       ) =. opt Nothing          "song"         stackJSON
     parts       <- (.parts      ) =. opt (Parts HM.empty) "parts"        stackJSON
     crowd       <- (.crowd      ) =. opt Nothing          "crowd"        stackJSON
@@ -274,10 +275,10 @@ data MoggPlanInfo f = MoggPlanInfo
   , tuningCents   :: Int
   , fileTempo     :: Maybe f
   , decryptSilent :: Bool -- should encrypted audio just be treated as silent
-  } deriving (Eq, Show, Functor, Foldable, Traversable)
+  } deriving (Eq, Show, Functor, Foldable, Traversable, Generic)
 
 instance (Eq f, StackJSON f) => StackJSON (MoggPlanInfo f) where
-  stackJSON = asStrictObject "MoggPlanInfo" $ do
+  stackJSON = asStrictObject "MoggPlanInfo" do
     fileMOGG      <- (.fileMOGG     ) =. opt  Nothing       "file-mogg"      stackJSON
     moggMD5       <- (.moggMD5      ) =. opt  Nothing       "mogg-md5"       stackJSON
     parts         <- (.parts        ) =. req                "parts"          stackJSON
@@ -353,7 +354,7 @@ instance (Eq f, StackJSON f) => StackJSON (Plan f) where
       parseMogg     = MoggPlan     <$> fromJSON
       parseStandard = StandardPlan <$> fromJSON
       in decideKey [("mogg-md5", parseMogg), ("file-mogg", parseMogg)] parseStandard
-    , codecOut = makeOut $ \case
+    , codecOut = makeOut \case
       StandardPlan x -> toJSON x
       MoggPlan     x -> toJSON x
     }
@@ -388,7 +389,7 @@ instance StackJSON AudioInput where
           fromJSON
         )
       ] (Named <$> fromJSON)
-    , codecOut = makeOut $ \case
+    , codecOut = makeOut \case
       Named t -> toJSON t
       JammitSelect (J.Only p) t -> A.object
         [ "only" .= [toJSON $ jammitPartToTitle p, toJSON t]
@@ -416,12 +417,12 @@ jammitPartToTitle = \case
   J.PartBVocals -> "B Vocals"
 
 instance StackJSON Edge where
-  stackJSON = enumCodecFull "an audio edge (start or end)" $ \case
+  stackJSON = enumCodecFull "an audio edge (start or end)" \case
     Start -> is "start" |?> is "begin"
     End   -> is "end"
 
 algebraic1 :: (Monad m) => T.Text -> (a -> b) -> StackParser m A.Value a -> StackParser m A.Value b
-algebraic1 k f p1 = object $ onlyKey k $ do
+algebraic1 k f p1 = object $ onlyKey k do
   x <- lift ask
   fmap f $ inside "ADT field 1 of 1" $ parseFrom x p1
 
@@ -484,7 +485,7 @@ instance (StackJSON t, StackJSON a) => StackJSON (Audio t a) where
         , ("vol", algebraic2 "vol" (\volDB -> Gain $ 10 ** (volDB / 20)) fromJSON fromJSON)
         -- TODO samples? probably don't need
         ] (fmap Input fromJSON `catchError` \_ -> expected "an audio expression")
-    , codecOut = makeOut $ \case
+    , codecOut = makeOut \case
       Silence chans t -> A.object ["silence" .= [toJSON chans, toJSON t]]
       Input x -> toJSON x
       Mix auds -> A.object ["mix" .= auds]
@@ -509,14 +510,14 @@ k .= x = (k, toJSON x)
 
 instance (StackJSON t) => StackJSON (Seam t) where
   stackJSON = Codec
-    { codecIn = object $ do
+    { codecIn = object do
       seamCenter <- requiredKey "center" (codecIn stackJSON)
       valueFade <- fromMaybe (A.Number 0) <$> optionalKey "fade" (codecIn stackJSON)
       seamFade <- parseFrom valueFade (codecIn stackJSON)
       seamTag <- requiredKey "tag" (codecIn stackJSON)
       expectedKeys ["center", "fade", "tag"]
       return Seam{..}
-    , codecOut = makeOut $ \Seam{..} -> A.object
+    , codecOut = makeOut \Seam{..} -> A.object
       [ "center" .= seamCenter
       , "fade" .= seamFade
       , "tag" .= seamTag
@@ -549,7 +550,7 @@ instance StackJSON Duration where
       OneKey "seconds" v -> inside "seconds duration" $ Seconds . toRealFloat <$> parseFrom v parseMinutes
       _ -> inside "unitless (seconds) duration" (Seconds . toRealFloat <$> parseMinutes)
         `catchError` \_ -> expected "a duration in frames or seconds"
-    , codecOut = makeOut $ \case
+    , codecOut = makeOut \case
       Frames f  -> A.object ["frames" .= f]
       Seconds s -> showTimestamp $ realToFrac s
     }
@@ -567,7 +568,7 @@ data Difficulty
 
 instance StackJSON Difficulty where
   stackJSON = Codec
-    { codecOut = makeOut $ \case
+    { codecOut = makeOut \case
       Tier i -> A.object ["tier" .= i]
       Rank i -> A.object ["rank" .= i]
     , codecIn = lift ask >>= \case
@@ -584,10 +585,10 @@ data ModeFive = ModeFive
   , sustainGap       :: Int -- ticks, 480 per beat
   , smoothFrets      :: Bool -- should animation fret positions be smoothed out like pre-RB3
   , detectMutedOpens :: Bool -- if open notes are auto-removed, should we detect when opens are used as muted strums in between chords
-  } deriving (Eq, Ord, Show)
+  } deriving (Eq, Ord, Show, Generic)
 
 instance StackJSON ModeFive where
-  stackJSON = asStrictObject "ModeFive" $ do
+  stackJSON = asStrictObject "ModeFive" do
     difficulty       <- (.difficulty      ) =. fill (Tier 1) "difficulty"         stackJSON
     hopoThreshold    <- (.hopoThreshold   ) =. opt  170      "hopo-threshold"     stackJSON
     fixFreeform      <- (.fixFreeform     ) =. opt  True     "fix-freeform"       stackJSON
@@ -602,10 +603,10 @@ instance Default ModeFive where
 data ModeProKeys = ModeProKeys
   { difficulty  :: Difficulty
   , fixFreeform :: Bool
-  } deriving (Eq, Ord, Show)
+  } deriving (Eq, Ord, Show, Generic)
 
 instance StackJSON ModeProKeys where
-  stackJSON = asStrictObject "ModeProKeys" $ do
+  stackJSON = asStrictObject "ModeProKeys" do
     difficulty  <- (.difficulty ) =. fill (Tier 1) "difficulty"   stackJSON
     fixFreeform <- (.fixFreeform) =. opt  True     "fix-freeform" stackJSON
     return ModeProKeys{..}
@@ -618,7 +619,7 @@ data ModeProGuitar f = ModeProGuitar
   , fixFreeform   :: Bool
   , tones         :: Maybe (RSTones f)
   , pickedBass    :: Bool
-  } deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
+  } deriving (Eq, Ord, Show, Functor, Foldable, Traversable, Generic)
 
 tuningBaseFormat :: (SendMessage m) => ValueCodec m A.Value GtrBase
 tuningBaseFormat = Codec
@@ -632,7 +633,7 @@ tuningBaseFormat = Codec
     A.String "bass-6"   -> return Bass6
     A.Array _           -> GtrCustom <$> codecIn (listCodec stackJSON)
     _                   -> expected "a guitar/bass tuning base"
-  , codecOut = makeOut $ \case
+  , codecOut = makeOut \case
     Guitar6      -> "guitar-6"
     Guitar7      -> "guitar-7"
     Guitar8      -> "guitar-8"
@@ -643,7 +644,7 @@ tuningBaseFormat = Codec
   }
 
 tuningFormat :: (SendMessage m) => ValueCodec m A.Value GtrTuning
-tuningFormat = asStrictObject "GtrTuning" $ do
+tuningFormat = asStrictObject "GtrTuning" do
   gtrBase    <- (.gtrBase   ) =. opt Guitar6 "base"    tuningBaseFormat
   gtrOffsets <- (.gtrOffsets) =. opt []      "offsets" stackJSON
   gtrGlobal  <- (.gtrGlobal ) =. opt 0       "global"  stackJSON
@@ -652,7 +653,7 @@ tuningFormat = asStrictObject "GtrTuning" $ do
   return GtrTuning{..}
 
 instance (Eq f, StackJSON f) => StackJSON (ModeProGuitar f) where
-  stackJSON = asStrictObject "ModeProGuitar" $ do
+  stackJSON = asStrictObject "ModeProGuitar" do
     difficulty    <- (.difficulty   ) =. fill (Tier 1) "difficulty"     stackJSON
     hopoThreshold <- (.hopoThreshold) =. opt  170      "hopo-threshold" stackJSON
     tuning        <- (.tuning       ) =. opt  def      "tuning"         tuningFormat
@@ -674,7 +675,7 @@ data RSTones f = RSTones
   } deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 instance (Eq f, StackJSON f) => StackJSON (RSTones f) where
-  stackJSON = asStrictObject "RSTones" $ do
+  stackJSON = asStrictObject "RSTones" do
     fileToneBase <- (.fileToneBase) =. req         "file-tone-base" stackJSON
     fileToneA    <- (.fileToneA   ) =. opt Nothing "file-tone-a"    stackJSON
     fileToneB    <- (.fileToneB   ) =. opt Nothing "file-tone-b"    stackJSON
@@ -685,10 +686,10 @@ instance (Eq f, StackJSON f) => StackJSON (RSTones f) where
 data ModeSix = ModeSix
   { difficulty    :: Difficulty
   , hopoThreshold :: Int
-  } deriving (Eq, Ord, Show)
+  } deriving (Eq, Ord, Show, Generic)
 
 instance StackJSON ModeSix where
-  stackJSON = asStrictObject "ModeSix" $ do
+  stackJSON = asStrictObject "ModeSix" do
     difficulty    <- (.difficulty   ) =. fill (Tier 1) "difficulty"     stackJSON
     hopoThreshold <- (.hopoThreshold) =. opt  170      "hopo-threshold" stackJSON
     return ModeSix{..}
@@ -702,7 +703,7 @@ data DrumKit
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 instance StackJSON DrumKit where
-  stackJSON = enumCodecFull "the name of a drum kit or null" $ \case
+  stackJSON = enumCodecFull "the name of a drum kit or null" \case
     HardRockKit   -> is A.Null |?> fuzzy "Hard Rock Kit"
     ArenaKit      -> fuzzy "Arena Kit"
     VintageKit    -> fuzzy "Vintage Kit"
@@ -715,7 +716,7 @@ data DrumLayout
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 instance StackJSON DrumLayout where
-  stackJSON = enumCodecFull "the name of a drum kit layout or null" $ \case
+  stackJSON = enumCodecFull "the name of a drum kit layout or null" \case
     StandardLayout -> is A.Null |?> is "standard-layout"
     FlipYBToms     -> is "flip-yb-toms"
 
@@ -728,7 +729,7 @@ data DrumMode
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 instance StackJSON DrumMode where
-  stackJSON = enumCodec "a drum mode (4, 5, pro, real, elite)" $ \case
+  stackJSON = enumCodec "a drum mode (4, 5, pro, real, elite)" \case
     Drums4     -> A.Number 4
     Drums5     -> A.Number 5
     DrumsPro   -> "pro"
@@ -739,7 +740,7 @@ data OrangeFallback = FallbackBlue | FallbackGreen
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 instance StackJSON OrangeFallback where
-  stackJSON = enumCodec "an orange drum note fallback color (blue, green)" $ \case
+  stackJSON = enumCodec "an orange drum note fallback color (blue, green)" \case
     FallbackBlue  -> "blue"
     FallbackGreen -> "green"
 
@@ -747,7 +748,7 @@ data Kicks = Kicks1x | Kicks2x | KicksBoth
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 instance StackJSON Kicks where
-  stackJSON = enumCodecFull "number of bass pedals (1, 2, both)" $ \case
+  stackJSON = enumCodecFull "number of bass pedals (1, 2, both)" \case
     Kicks1x   -> is (A.Number 1) |?> is "1" |?> is A.Null
     Kicks2x   -> is (A.Number 2) |?> is "2"
     KicksBoth -> is "both"
@@ -763,10 +764,10 @@ data ModeDrums f = ModeDrums
   , fileDTXKit    :: Maybe f
   , eliteLayout   :: [EliteDrumLayoutHint]
   , difficultyDTX :: Maybe Centi
-  } deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
+  } deriving (Eq, Ord, Show, Functor, Foldable, Traversable, Generic)
 
 instance (Eq f, StackJSON f) => StackJSON (ModeDrums f) where
-  stackJSON = asStrictObject "ModeDrums" $ do
+  stackJSON = asStrictObject "ModeDrums" do
     difficulty    <- (.difficulty   ) =. fill    (Tier 1)       "difficulty"     stackJSON
     mode          <- (.mode         ) =. opt     DrumsPro       "mode"           stackJSON
     kicks         <- (.kicks        ) =. warning Kicks1x        "kicks"          stackJSON
@@ -797,7 +798,7 @@ data VocalCount = Vocal1 | Vocal2 | Vocal3
   deriving (Eq, Ord, Show, Read, Enum, Bounded)
 
 instance StackJSON VocalCount where
-  stackJSON = enumCodec "a vocal part count (1 to 3)" $ \case
+  stackJSON = enumCodec "a vocal part count (1 to 3)" \case
     Vocal1 -> A.Number 1
     Vocal2 -> A.Number 2
     Vocal3 -> A.Number 3
@@ -808,10 +809,10 @@ data ModeVocal f = ModeVocal
   , gender     :: Maybe Magma.Gender
   , key        :: Maybe Key
   , lipsyncRB3 :: Maybe (LipsyncRB3 f)
-  } deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
+  } deriving (Eq, Ord, Show, Functor, Foldable, Traversable, Generic)
 
 instance (Eq f, StackJSON f) => StackJSON (ModeVocal f) where
-  stackJSON = asStrictObject "ModeVocal" $ do
+  stackJSON = asStrictObject "ModeVocal" do
     difficulty <- (.difficulty) =. fill (Tier 1) "difficulty"  stackJSON
     count      <- (.count     ) =. opt  Vocal1   "count"       stackJSON
     gender     <- (.gender    ) =. opt  Nothing  "gender"      (maybeCodec parseGender)
@@ -824,7 +825,7 @@ newtype ModeMania = ModeMania
   } deriving (Eq, Ord, Show)
 
 instance StackJSON ModeMania where
-  stackJSON = asStrictObject "ModeMania" $ do
+  stackJSON = asStrictObject "ModeMania" do
     charts     <- (.charts)     =. req           "charts"     stackJSON
     return ModeMania{..}
 
@@ -836,7 +837,7 @@ data ManiaChart = ManiaChart
   } deriving (Eq, Ord, Show)
 
 instance StackJSON ManiaChart where
-  stackJSON = asStrictObject "ManiaChart" $ do
+  stackJSON = asStrictObject "ManiaChart" do
     name       <- (.name)       =. req              "name"       stackJSON
     keys       <- (.keys)       =. req              "keys"       stackJSON
     style      <- (.style)      =. opt ManiaDefault "style"      stackJSON
@@ -847,22 +848,23 @@ data ManiaStyle
   = ManiaDefault
   | ManiaArrows
   | ManiaTurntable
-  | ManiaAmplitude Amp.Instrument
+  | ManiaAmplitude AmpInstrument
   | ManiaEncore
   deriving (Eq, Ord, Show, Generic)
   deriving (Enum, Bounded) via GenericFullEnum ManiaStyle
 
 instance StackJSON ManiaStyle where
-  stackJSON = enumCodecFull "mania chart style" $ \case
-    ManiaDefault              -> is A.Null |?> is "default"
-    ManiaArrows               -> is "arrows"
-    ManiaTurntable            -> is "turntable"
-    ManiaAmplitude Amp.Drums  -> is "amp-drums"
-    ManiaAmplitude Amp.Bass   -> is "amp-bass"
-    ManiaAmplitude Amp.Synth  -> is "amp-synth"
-    ManiaAmplitude Amp.Vocal  -> is "amp-vocal"
-    ManiaAmplitude Amp.Guitar -> is "amp-guitar"
-    ManiaEncore               -> is "encore"
+  stackJSON = enumCodecFull "mania chart style" \case
+    ManiaDefault             -> is A.Null |?> is "default"
+    ManiaArrows              -> is "arrows"
+    ManiaTurntable           -> is "turntable"
+    ManiaAmplitude AmpDrums  -> is "amp-drums"
+    ManiaAmplitude AmpBass   -> is "amp-bass"
+    ManiaAmplitude AmpSynth  -> is "amp-synth"
+    ManiaAmplitude AmpVocal  -> is "amp-vocal"
+    ManiaAmplitude AmpGuitar -> is "amp-guitar"
+    ManiaAmplitude AmpFX     -> is "amp-fx"
+    ManiaEncore              -> is "encore"
 
 data Part f = Part
   { grybo     :: Maybe ModeFive
@@ -872,10 +874,10 @@ data Part f = Part
   , drums     :: Maybe (ModeDrums f)
   , vocal     :: Maybe (ModeVocal f)
   , mania     :: Maybe ModeMania
-  } deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
+  } deriving (Eq, Ord, Show, Functor, Foldable, Traversable, Generic)
 
 instance (Eq f, StackJSON f) => StackJSON (Part f) where
-  stackJSON = asStrictObject "Part" $ do
+  stackJSON = asStrictObject "Part" do
     grybo     <- (.grybo    ) =. opt Nothing "grybo"      stackJSON
     ghl       <- (.ghl      ) =. opt Nothing "ghl"        stackJSON
     proKeys   <- (.proKeys  ) =. opt Nothing "pro-keys"   stackJSON
@@ -889,7 +891,7 @@ emptyPart :: Part f
 emptyPart = Part Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 instance StackJSON Magma.AutogenTheme where
-  stackJSON = enumCodecFull "the name of an autogen theme or null" $ \case
+  stackJSON = enumCodecFull "the name of an autogen theme or null" \case
     Magma.DefaultTheme -> is A.Null |?> fuzzy "Default"
     theme              -> fuzzy $ T.pack $ show theme
 
@@ -901,7 +903,7 @@ data Rating
   deriving (Eq, Ord, Show, Enum, Bounded, Generic, Hashable)
 
 instance StackJSON Rating where
-  stackJSON = enumCodecFull "a valid content rating or null" $ \case
+  stackJSON = enumCodecFull "a valid content rating or null" \case
     FamilyFriendly         -> fuzzy "Family Friendly"         |?> fuzzy "FF"
     SupervisionRecommended -> fuzzy "Supervision Recommended" |?> fuzzy "SR"
     Mature                 -> fuzzy "Mature"                  |?> fuzzy "M"
@@ -933,7 +935,7 @@ instance StackJSON PreviewTime where
             p = parseFrom str $ either PreviewMIDI PreviewSeconds <$> parseTimestamp
             in p `catchError` \_ -> expected "a preview time: prc_something, timestamp, or measure|beats"
       in traceNum `catchError` \_ -> traceStr
-    , codecOut = makeOut $ \case
+    , codecOut = makeOut \case
       PreviewSection sect -> A.toJSON $ emitSection sect
       PreviewMIDI mb      -> A.toJSON $ showMeasureBeats mb
       PreviewSeconds secs -> showTimestamp $ realToFrac secs
@@ -970,7 +972,7 @@ data Metadata f = Metadata
 
 parseAnimTempo :: (SendMessage m) => ValueCodec m A.Value (Either AnimTempo Integer)
 parseAnimTempo = eitherCodec
-  (enumCodecFull "an animation speed" $ \case
+  (enumCodecFull "an animation speed" \case
     KTempoSlow   -> is "slow" |?> is A.Null
     KTempoMedium -> is "medium"
     KTempoFast   -> is "fast"
@@ -1017,16 +1019,18 @@ instance Default (Metadata f) where
 
 data Global f = Global
   { fileMidi            :: f
+  , fileMidiOriginal    :: Maybe f
   , fileSongAnim        :: Maybe f -- ^ venue format found in RB3 milos
   , autogenTheme        :: Maybe Magma.AutogenTheme -- ^ 'Nothing' means black venue
   , animTempo           :: Either AnimTempo Integer
   , backgroundVideo     :: Maybe (VideoInfo f)
   , fileBackgroundImage :: Maybe f
-  } deriving (Eq, Show, Functor, Foldable, Traversable)
+  } deriving (Eq, Show, Functor, Foldable, Traversable, Generic)
 
 instance (Eq f, IsString f, StackJSON f) => StackJSON (Global f) where
-  stackJSON = asStrictObject "Global" $ do
+  stackJSON = asStrictObject "Global" do
     fileMidi            <- (.fileMidi           ) =. opt "notes.mid"         "file-midi"             stackJSON
+    fileMidiOriginal    <- (.fileMidiOriginal   ) =. opt Nothing             "file-midi-original"    stackJSON
     fileSongAnim        <- (.fileSongAnim       ) =. opt Nothing             "file-song-anim"        stackJSON
     autogenTheme        <- (.autogenTheme       ) =. opt (Just Magma.DefaultTheme) "autogen-theme"   stackJSON
     animTempo           <- (.animTempo          ) =. opt (Left KTempoMedium) "anim-tempo"            parseAnimTempo
@@ -1045,7 +1049,7 @@ data VideoInfo f = VideoInfo
   } deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 instance (StackJSON f) => StackJSON (VideoInfo f) where
-  stackJSON = asStrictObject "VideoInfo" $ do
+  stackJSON = asStrictObject "VideoInfo" do
     fileVideo      <- (.fileVideo     ) =. req         "file-video" stackJSON
     videoStartTime <- (.videoStartTime) =. opt Nothing "start-time" stackJSON
     videoEndTime   <- (.videoEndTime  ) =. opt Nothing "end-time"   stackJSON
@@ -1106,7 +1110,7 @@ data SectionsStyle
   deriving (Eq, Ord, Show, Enum, Bounded, Generic, Hashable)
 
 instance StackJSON SectionsStyle where
-  stackJSON = enumCodecFull "full, minimal, or individual" $ \case
+  stackJSON = enumCodecFull "full, minimal, or individual" \case
     SectionsFull       -> is "full"
     SectionsMinimal    -> is "minimal"
     SectionsIndividual -> is "individual"
@@ -1143,7 +1147,7 @@ instance StackJSON RBSongID where
       A.String s             -> return $ SongIDSymbol s
       A.Number n             -> return $ SongIDInt $ round n
       _                      -> expected "a RB song ID, or {auto: symbol/int}"
-    , codecOut = makeOut $ \case
+    , codecOut = makeOut \case
       SongIDAutoSymbol -> OneKey "auto" "symbol"
       SongIDAutoInt    -> OneKey "auto" "int"
       SongIDSymbol s   -> A.String s
@@ -1187,13 +1191,13 @@ instance (Eq f, StackJSON f) => StackJSON (TargetRB3 f) where
   stackJSON = asStrictObject "TargetRB3" parseTargetRB3
 
 instance Default (TargetRB3 f) where
-  def = (fromEmptyObject :: TargetRB3 String) { common = def }
+  def = (fromEmptyObject :: TargetRB3 String) & #common .~ def
 
 data LipsyncMember = LipsyncGuitar | LipsyncBass | LipsyncDrums
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 instance StackJSON LipsyncMember where
-  stackJSON = enumCodecFull "guitar, bass, or drums" $ \case
+  stackJSON = enumCodecFull "guitar, bass, or drums" \case
     LipsyncGuitar -> is "guitar"
     LipsyncBass   -> is "bass"
     LipsyncDrums  -> is "drums"
@@ -1206,7 +1210,7 @@ data LipsyncRB3 f = LipsyncRB3
   } deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 instance (Eq f, StackJSON f) => StackJSON (LipsyncRB3 f) where
-  stackJSON = asStrictObject "LipsyncRB3" $ do
+  stackJSON = asStrictObject "LipsyncRB3" do
     sources <- (.sources) =. req "sources" stackJSON
     member2 <- (.member2) =. opt LipsyncGuitar "member-2" stackJSON
     member3 <- (.member3) =. opt LipsyncBass   "member-3" stackJSON
@@ -1235,7 +1239,7 @@ instance (Eq f, StackJSON f) => StackJSON (LipsyncSource f) where
       "harm3"                 -> return $ LipsyncVocal $ Just Vocal3
       OneKey "file-lipsync" x -> LipsyncFile <$> parseFrom x (codecIn stackJSON)
       _                       -> expected "a lipsync source"
-    , codecOut = makeOut $ \case
+    , codecOut = makeOut \case
       LipsyncTrack1 -> "track1"
       LipsyncTrack2 -> "track2"
       LipsyncTrack3 -> "track3"
@@ -1280,7 +1284,7 @@ instance (Eq f, StackJSON f) => StackJSON (TargetRB2 f) where
   stackJSON = asStrictObject "TargetRB2" parseTargetRB2
 
 instance Default (TargetRB2 f) where
-  def = (fromEmptyObject :: TargetRB2 String) { common = def }
+  def = (fromEmptyObject :: TargetRB2 String) & #common .~ def
 
 data TargetPS f = TargetPS
   { common        :: TargetCommon f
@@ -1315,7 +1319,7 @@ instance (Eq f, StackJSON f) => StackJSON (TargetPS f) where
   stackJSON = asStrictObject "TargetPS" parseTargetPS
 
 instance Default (TargetPS f) where
-  def = (fromEmptyObject :: TargetPS String) { common = def }
+  def = (fromEmptyObject :: TargetPS String) & #common .~ def
 
 data TargetGH1 f = TargetGH1
   { common :: TargetCommon f
@@ -1344,13 +1348,13 @@ instance (Eq f, StackJSON f) => StackJSON (TargetGH1 f) where
   stackJSON = asStrictObject "TargetGH1" parseTargetGH1
 
 instance Default (TargetGH1 f) where
-  def = (fromEmptyObject :: TargetGH1 String) { common = def }
+  def = (fromEmptyObject :: TargetGH1 String) & #common .~ def
 
 data GH2Coop = GH2Bass | GH2Rhythm
   deriving (Eq, Ord, Show, Enum, Bounded, Generic, Hashable)
 
 instance StackJSON GH2Coop where
-  stackJSON = enumCodecFull "bass or rhythm" $ \case
+  stackJSON = enumCodecFull "bass or rhythm" \case
     GH2Bass   -> is "bass" |?> is A.Null
     GH2Rhythm -> is "rhythm"
 
@@ -1395,7 +1399,7 @@ instance (Eq f, StackJSON f) => StackJSON (TargetGH2 f) where
   stackJSON = asStrictObject "TargetGH2" parseTargetGH2
 
 instance Default (TargetGH2 f) where
-  def = (fromEmptyObject :: TargetGH2 String) { common = def }
+  def = (fromEmptyObject :: TargetGH2 String) & #common .~ def
 
 -- gh5 or ghwor, mostly same formats
 data TargetGH5 f = TargetGH5
@@ -1425,7 +1429,7 @@ instance (Eq f, StackJSON f) => StackJSON (TargetGH5 f) where
   stackJSON = asStrictObject "TargetGH5" parseTargetGH5
 
 instance Default (TargetGH5 f) where
-  def = (fromEmptyObject :: TargetGH5 String) { common = def }
+  def = (fromEmptyObject :: TargetGH5 String) & #common .~ def
 
 data TargetGH3 f = TargetGH3
   { common :: TargetCommon f
@@ -1458,7 +1462,7 @@ instance (Eq f, StackJSON f) => StackJSON (TargetGH3 f) where
   stackJSON = asStrictObject "TargetGH3" parseTargetGH3
 
 instance Default (TargetGH3 f) where
-  def = (fromEmptyObject :: TargetGH3 String) { common = def }
+  def = (fromEmptyObject :: TargetGH3 String) & #common .~ def
 
 data TargetDTX f = TargetDTX
   { common      :: TargetCommon f
@@ -1481,7 +1485,7 @@ instance (Eq f, StackJSON f) => StackJSON (TargetDTX f) where
   stackJSON = asStrictObject "TargetDTX" parseTargetDTX
 
 instance Default (TargetDTX f) where
-  def = (fromEmptyObject :: TargetDTX String) { common = def }
+  def = (fromEmptyObject :: TargetDTX String) & #common .~ def
 
 data RSArrModifier
   = RSDefault
@@ -1534,7 +1538,7 @@ parseRSArr = let
         (inside "RS arrangement slot" $ parseFrom x $ codecIn slotCodec)
         (inside "RS arrangement part" $ parseFrom y $ codecIn partCodec)
       _ -> expected "2-element array for RS arrangement"
-    , codecOut = makeOut $ \case
+    , codecOut = makeOut \case
       (slot, fpart) -> A.toJSON [makeValue' slotCodec slot, makeValue' partCodec fpart]
     }
 
@@ -1551,7 +1555,7 @@ instance (Eq f, StackJSON f) => StackJSON (TargetRS f) where
   stackJSON = asStrictObject "TargetRS" parseTargetRS
 
 instance Default (TargetRS f) where
-  def = (fromEmptyObject :: TargetRS String) { common = def }
+  def = (fromEmptyObject :: TargetRS String) & #common .~ def
 
 data TargetPG f = TargetPG
   { common        :: TargetCommon f
@@ -1576,7 +1580,7 @@ instance (Eq f, StackJSON f) => StackJSON (TargetPG f) where
   stackJSON = asStrictObject "TargetPG" parseTargetPG
 
 instance Default (TargetPG f) where
-  def = (fromEmptyObject :: TargetPG String) { common = def }
+  def = (fromEmptyObject :: TargetPG String) & #common .~ def
 
 data TargetRR f = TargetRR
   { common        :: TargetCommon f
@@ -1607,7 +1611,7 @@ instance (Eq f, StackJSON f) => StackJSON (TargetRR f) where
   stackJSON = asStrictObject "TargetRR" parseTargetRR
 
 instance Default (TargetRR f) where
-  def = (fromEmptyObject :: TargetRR String) { common = def }
+  def = (fromEmptyObject :: TargetRR String) & #common .~ def
 
 data TargetPart f = TargetPart
   { common :: TargetCommon f
@@ -1624,7 +1628,7 @@ instance (Eq f, StackJSON f) => StackJSON (TargetPart f) where
   stackJSON = asStrictObject "TargetPart" parseTargetPart
 
 instance Default (TargetPart f) where
-  def = (fromEmptyObject :: TargetPart String) { common = def }
+  def = (fromEmptyObject :: TargetPart String) & #common .~ def
 
 data Target f
   = RB3 (TargetRB3 f)
@@ -1659,10 +1663,10 @@ addKey codec k v x = A.Object $ KM.fromHashMapText $ HM.insert k v $ HM.fromList
 
 instance (Eq f, StackJSON f) => StackJSON (Target f) where
   stackJSON = Codec
-    { codecIn = object $ do
+    { codecIn = object do
       target <- requiredKey "game" fromJSON
       hm <- lift ask
-      parseFrom (A.Object $ KM.fromHashMapText $ HM.delete "game" hm) $ case target :: T.Text of
+      parseFrom (A.Object $ KM.fromHashMapText $ HM.delete "game" hm) case target :: T.Text of
         "rb3" -> fmap RB3    fromJSON
         "rb2" -> fmap RB2    fromJSON
         "ps"  -> fmap PS     fromJSON
@@ -1674,7 +1678,7 @@ instance (Eq f, StackJSON f) => StackJSON (Target f) where
         "pg"  -> fmap PG     fromJSON
         "rr"  -> fmap RR     fromJSON
         _     -> fatal $ "Unrecognized target game: " ++ show target
-    , codecOut = makeOut $ \case
+    , codecOut = makeOut \case
       RB3    rb3 -> addKey parseTargetRB3  "game" "rb3"    rb3
       RB2    rb2 -> addKey parseTargetRB2  "game" "rb2"    rb2
       PS     ps  -> addKey parseTargetPS   "game" "ps"     ps
@@ -1696,10 +1700,10 @@ data SongYaml f = SongYaml
   , plans    :: HM.HashMap T.Text (Plan f)
   , targets  :: HM.HashMap T.Text (Target f)
   , parts    :: Parts (Part f)
-  } deriving (Eq, Show, Functor, Foldable, Traversable)
+  } deriving (Eq, Show, Functor, Foldable, Traversable, Generic)
 
 instance (Eq f, IsString f, StackJSON f) => StackJSON (SongYaml f) where
-  stackJSON = asStrictObject "SongYaml" $ do
+  stackJSON = asStrictObject "SongYaml" do
     metadata <- (.metadata) =. opt def      "metadata" stackJSON
     global   <- (.global  ) =. opt def      "global"   stackJSON
     audio    <- (.audio   ) =. opt HM.empty "audio"    (dict stackJSON)
@@ -1757,5 +1761,7 @@ evalPreviewTime leadin getEvents song padding prepadded = \case
         findSection sect = let
           sectDisplay = makeDisplaySection sect
           in getEvents >>= \f ->
-            fmap (fst . fst) $ RTB.viewL $ RTB.filter ((== sectDisplay) . makeDisplaySection)
-              $ eventsSections $ f song.tracks
+            fmap (fst . fst)
+              $ RTB.viewL
+              $ RTB.filter ((== sectDisplay) . makeDisplaySection)
+                (f song.tracks).sections

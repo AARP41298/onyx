@@ -1,12 +1,13 @@
 {- |
 TRIGGERS
 -}
-{-# LANGUAGE DeriveGeneric      #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE DerivingVia        #-}
-{-# LANGUAGE LambdaCase         #-}
-{-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE DerivingVia         #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE RecordWildCards     #-}
 module Onyx.Harmonix.GH2.Triggers where
 
 import           Control.Monad.Codec
@@ -32,14 +33,15 @@ instance TraverseTrack TriggersTrack where
 
 instance ParseTrack TriggersTrack where
   parseTrack = do
-    triggersBacking <- (triggersBacking =.) $ fatBlips (1/8) $ condenseMap_ $ eachKey each $ blip . \case
-      BackingKick  -> 24
-      BackingSnare -> 25
-      BackingHihat -> 26
-    triggersUnknown48 <- triggersUnknown48 =. blip 48
-    triggersUnknown49 <- triggersUnknown49 =. blip 49
-    triggersUnknown50 <- triggersUnknown50 =. blip 50
-    triggersUnknown52 <- triggersUnknown52 =. edges 52
+    triggersBacking   <- (.triggersBacking  ) =. do
+      fatBlips (1/8) $ condenseMap_ $ eachKey each $ blip . \case
+        BackingKick  -> 24
+        BackingSnare -> 25
+        BackingHihat -> 26
+    triggersUnknown48 <- (.triggersUnknown48) =. blip 48
+    triggersUnknown49 <- (.triggersUnknown49) =. blip 49
+    triggersUnknown50 <- (.triggersUnknown50) =. blip 50
+    triggersUnknown52 <- (.triggersUnknown52) =. edges 52
     -- Trogdor has pitches 36 and 38
     -- Tonight I'm Gonna Rock You Tonight has pitch 60
     return TriggersTrack{..}

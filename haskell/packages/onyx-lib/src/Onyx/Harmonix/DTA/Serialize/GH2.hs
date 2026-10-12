@@ -1,8 +1,11 @@
-{-# LANGUAGE DeriveAnyClass    #-}
-{-# LANGUAGE DeriveGeneric     #-}
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE DeriveAnyClass      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
 module Onyx.Harmonix.DTA.Serialize.GH2 where
 
 import           Control.Monad.Codec                  ((=.))
@@ -28,14 +31,14 @@ data Song = Song
   } deriving (Eq, Show)
 
 instance StackChunks Song where
-  stackChunks = asWarnAssoc "Song" $ do
-    songName      <- songName      =. req         "name"           (single chunkString)
-    tracks        <- tracks        =. req         "tracks"         (chunksParens $ chunksDictList chunkSym channelList)
-    pans          <- pans          =. req         "pans"           (chunksParens stackChunks)
-    vols          <- vols          =. req         "vols"           (chunksParens stackChunks)
-    cores         <- cores         =. req         "cores"          (chunksParens stackChunks)
-    midiFile      <- midiFile      =. req         "midi_file"      stackChunks
-    hopoThreshold <- hopoThreshold =. opt Nothing "hopo_threshold" stackChunks
+  stackChunks = asWarnAssoc "Song" do
+    songName      <- (.songName)      =. req         "name"           (single chunkString)
+    tracks        <- (.tracks)        =. req         "tracks"         (chunksParens $ chunksDictList chunkSym channelList)
+    pans          <- (.pans)          =. req         "pans"           (chunksParens stackChunks)
+    vols          <- (.vols)          =. req         "vols"           (chunksParens stackChunks)
+    cores         <- (.cores)         =. req         "cores"          (chunksParens stackChunks)
+    midiFile      <- (.midiFile)      =. req         "midi_file"      stackChunks
+    hopoThreshold <- (.hopoThreshold) =. opt Nothing "hopo_threshold" stackChunks
     return Song{..}
 
 data CharacterOutfit
@@ -107,10 +110,10 @@ data Quickplay = Quickplay
   } deriving (Eq, Ord, Show, Generic, Hashable)
 
 instance StackChunks Quickplay where
-  stackChunks = asWarnAssoc "Quickplay" $ do
-    characterOutfit <- characterOutfit =. req "character_outfit" stackChunks
-    guitar          <- guitar          =. req "guitar"           stackChunks
-    venue           <- venue           =. req "venue"            stackChunks
+  stackChunks = asWarnAssoc "Quickplay" do
+    characterOutfit <- (.characterOutfit) =. req "character_outfit" stackChunks
+    guitar          <- (.guitar)          =. req "guitar"           stackChunks
+    venue           <- (.venue)           =. req "venue"            stackChunks
     return Quickplay{..}
 
 -- For now, limiting to what's in 80s so it doesn't crash.
@@ -156,19 +159,19 @@ data SongPackage = SongPackage
   } deriving (Eq, Show)
 
 instance StackChunks SongPackage where
-  stackChunks = asWarnAssoc "SongPackage" $ do
-    name           <- name           =. req         "name"            (single chunkString)
-    artist         <- artist         =. req         "artist"          (single chunkString)
-    caption        <- caption        =. opt Nothing "caption"         (chunksMaybe $ single chunkSym)
-    song           <- song           =. req         "song"            stackChunks
-    song_vs        <- song_vs        =. opt Nothing "song_vs"         stackChunks
-    animTempo      <- animTempo      =. req         "anim_tempo"      stackChunks
-    preview        <- preview        =. req         "preview"         stackChunks
-    quickplay      <- quickplay      =. req         "quickplay"       stackChunks
-    practiceSpeeds <- practiceSpeeds =. opt Nothing "practice_speeds" (chunksParens stackChunks)
-    songCoop       <- songCoop       =. opt Nothing "song_coop"       stackChunks
-    songPractice1  <- songPractice1  =. opt Nothing "song_practice_1" stackChunks
-    songPractice2  <- songPractice2  =. opt Nothing "song_practice_2" stackChunks
-    songPractice3  <- songPractice3  =. opt Nothing "song_practice_3" stackChunks
-    band           <- band           =. opt Nothing "band"            stackChunks
+  stackChunks = asWarnAssoc "SongPackage" do
+    name           <- (.name)           =. req         "name"            (single chunkString)
+    artist         <- (.artist)         =. req         "artist"          (single chunkString)
+    caption        <- (.caption)        =. opt Nothing "caption"         (chunksMaybe $ single chunkSym)
+    song           <- (.song)           =. req         "song"            stackChunks
+    song_vs        <- (.song_vs)        =. opt Nothing "song_vs"         stackChunks
+    animTempo      <- (.animTempo)      =. req         "anim_tempo"      stackChunks
+    preview        <- (.preview)        =. req         "preview"         stackChunks
+    quickplay      <- (.quickplay)      =. req         "quickplay"       stackChunks
+    practiceSpeeds <- (.practiceSpeeds) =. opt Nothing "practice_speeds" (chunksParens stackChunks)
+    songCoop       <- (.songCoop)       =. opt Nothing "song_coop"       stackChunks
+    songPractice1  <- (.songPractice1)  =. opt Nothing "song_practice_1" stackChunks
+    songPractice2  <- (.songPractice2)  =. opt Nothing "song_practice_2" stackChunks
+    songPractice3  <- (.songPractice3)  =. opt Nothing "song_practice_3" stackChunks
+    band           <- (.band)           =. opt Nothing "band"            stackChunks
     return SongPackage{..}

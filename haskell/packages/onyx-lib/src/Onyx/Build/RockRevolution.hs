@@ -1,10 +1,10 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE PatternSynonyms       #-}
-{-# LANGUAGE TupleSections         #-}
 module Onyx.Build.RockRevolution (rrRules, intToRRSongID) where
 
 import           Control.Monad.Codec
@@ -20,9 +20,11 @@ import qualified Data.ByteString.Char8             as B8
 import qualified Data.ByteString.Lazy              as BL
 import           Data.Char                         (toUpper)
 import qualified Data.Conduit.Audio                as CA
+import           Data.Conduit.Audio.LAME           (sinkMP3WithHandle)
 import qualified Data.Conduit.Audio.LAME.Binding   as L
 import qualified Data.EventList.Relative.TimeBody  as RTB
 import           Data.Foldable                     (toList)
+import           Data.Functor                      ((<&>))
 import           Data.Functor.Identity             (Identity)
 import           Data.Hashable                     (hash)
 import           Data.Int                          (Int16)
@@ -37,8 +39,7 @@ import           Data.Word                         (Word32)
 import           Development.Shake                 hiding (phony, (%>))
 import           Development.Shake.FilePath
 import qualified Numeric.NonNegative.Class         as NNC
-import           Onyx.Audio                        (clampIfSilent,
-                                                    sinkMP3PadWithHandle)
+import           Onyx.Audio                        (clampIfSilent)
 import           Onyx.Audio.FSB
 import           Onyx.Audio.FSB.FEV
 import           Onyx.Background
@@ -75,12 +76,13 @@ import           Onyx.PlayStation.NPData           (npdContentID, packNPData,
 import           Onyx.PlayStation.PKG
 import           Onyx.Project                      hiding (Difficulty)
 import           Onyx.Reductions                   (completeDrumResult,
-                                                    completeFiveResult)
+                                                    completeFiveResult,
+                                                    loadFretLimit)
 import           Onyx.Resources                    (getResourcesPath)
 import           Onyx.RockRevolution.MIDI
 import           Onyx.StackTrace
 import           Onyx.Util.Files                   (shortWindowsPath)
-import           Onyx.Util.Handle                  (singleFolder)
+import           Onyx.Util.Handle                  (fileReadable, singleFolder)
 import           Onyx.Util.Text.Decode             (encodeLatin1)
 import           Onyx.Util.Text.Transform          (replaceCharsRB)
 import           Onyx.WebPlayer                    (findTremolos, findTrills,
@@ -100,8 +102,8 @@ intToRRSongID n = T.pack $ reverse $ take 4 $ reverse (show n) <> repeat '0'
 rrRules :: BuildInfo -> FilePath -> TargetRR FilePath -> QueueLog Rules ()
 rrRules buildInfo dir rr = do
 
-  let songYaml = biSongYaml buildInfo
-      _rel = biRelative buildInfo
+  let songYaml = buildInfo.biSongYaml
+      _rel = buildInfo.biRelative
       gen = biGen buildInfo
       metadata = getTargetMetadata songYaml $ RR rr
       key = intToRRSongID $ fromMaybe 2000 rr.songID
@@ -133,7 +135,7 @@ rrRules buildInfo dir rr = do
   let sFevSeq = file $ "s" <> str <> ".fev.seq"
       sFsbSeq = file $ "s" <> str <> ".fsb.seq"
       sDrumsFsbSeq = file $ "s" <> str <> "_Drums.fsb.seq"
-  forM_ [sFevSeq, sFsbSeq, sDrumsFsbSeq] $ \f -> do
+  forM_ [sFevSeq, sFsbSeq, sDrumsFsbSeq] \f -> do
     f %> \out -> stackIO $ B.writeFile out (B.pack [1, 0, 0, 0])
 
   let rrPartDrums  = getPart rr.drums  songYaml >>= anyDrums
@@ -175,20 +177,21 @@ rrRules buildInfo dir rr = do
 
   (songBinEnglish : maxScores : pathPad : allMidis) %> \_ -> do
     mid <- applyTargetMIDI rr.common <$> loadOnyxMidi
-    endTime <- case mid.tracks.onyxEvents.eventsEnd of
+    endTime <- case mid.tracks.onyxEvents.end of
       Wait dt _ _ -> return dt
       RNil        -> fatal "panic! no [end] in processed midi"
+    fretLimit <- loadFretLimit
     let input partName = ModeInput
           { tempo  = mid.tempos
           , events = mid.tracks.onyxEvents
           , part   = F.getFlexPart partName mid.tracks
           }
-        guitar = flip fmap rrPartGuitar $ \builder ->
-          completeFiveResult False mid.timesigs $ builder FiveTypeGuitar $ input rr.guitar
-        bass   = flip fmap rrPartBass $ \builder ->
-          completeFiveResult False mid.timesigs $ builder FiveTypeGuitar $ input rr.bass
-        drums  = flip fmap rrPartDrums $ \builder ->
-          completeDrumResult mid.timesigs mid.tracks.onyxEvents.eventsSections $ builder drumTarget $ input rr.drums
+        guitar = rrPartGuitar <&> \builder ->
+          completeFiveResult fretLimit False mid.timesigs $ builder FiveTypeGuitar $ input rr.guitar
+        bass   = rrPartBass <&> \builder ->
+          completeFiveResult fretLimit False mid.timesigs $ builder FiveTypeGuitar $ input rr.bass
+        drums  = rrPartDrums <&> \builder ->
+          completeDrumResult mid.timesigs mid.tracks.onyxEvents.sections $ builder drumTarget $ input rr.drums
         drumTarget = if rr.is2xBassPedal then DrumTargetRB1x else DrumTargetRB2x
 
     let startNotes = concat
@@ -200,10 +203,7 @@ rrRules buildInfo dir rr = do
           n : ns -> U.applyTempoMap mid.tempos $ foldr min n ns
           []     -> 10 -- shouldn't happen
         padSeconds = max 0 $ ceiling $ 3 - (realToFrac firstNoteSeconds :: Rational)
-        adjustMidiTiming
-          -- decrease tempo at start of midi to account for weird delay in our encoded mp3s
-          = (\m -> m { F.tempos = applyMIDIOffsetMS rrMP3HackAmountMS m.tempos })
-          . F.padRawTrackFile padSeconds
+        adjustMidiTiming = F.padRawTrackFile padSeconds
     stackIO $ B.writeFile pathPad $ B8.pack $ show (padSeconds :: Int)
 
     let toTrackMidi :: (ParseTrack f) => f U.Beats -> F.Song (RTB.T U.Beats (Event.T B.ByteString))
@@ -227,7 +227,7 @@ rrRules buildInfo dir rr = do
             = length (RTB.collectCoincident rrDiff.rrfStrums)
             + length (RTB.collectCoincident rrDiff.rrfHOPOs )
           in (F.showMixedMIDI $ toTrackMidi rrDiff
-            { rrfSolo = result.other.fiveSolo
+            { rrfSolo = result.other.solo
             }, numNotes)
 
         makeDrums :: Difficulty -> (File.T B.ByteString, Int)
@@ -245,7 +245,7 @@ rrRules buildInfo dir rr = do
               _ -> nonElite
             _ -> nonElite
           in (F.showMixedMIDI $ toTrackMidi rrDiff
-            { rrdSolo = maybe RTB.empty (\res -> res.other.drumSolo) drums
+            { rrdSolo = maybe RTB.empty (\res -> res.other.solo) drums
             }, length rrDiff.rrdGems)
 
         venue = flip evalRand (mkStdGen $ hash key) $ getVenue
@@ -261,11 +261,11 @@ rrRules buildInfo dir rr = do
         camera = RTB.mapMaybe (listToMaybe . catMaybes)
           $ flip evalRand (mkStdGen $ hash key)
           $ mapM (\cuts -> mapM rrCameraCut $ reverse $ sort cuts)
-          $ RTB.collectCoincident venue.venueCameraRB3
+          $ RTB.collectCoincident venue.cameraRB3
         moodFor part = maybe RTB.empty (getMoods mid.tempos endTime)
           $ Map.lookup part mid.tracks.onyxParts
 
-        (sections, customSections) = makeRRSections mid.tracks.onyxEvents.eventsSections
+        (sections, customSections) = makeRRSections mid.tracks.onyxEvents.sections
 
     makeStringsBin
       ( artist
@@ -303,7 +303,7 @@ rrRules buildInfo dir rr = do
 
     stackIO $ Save.toFile control $ F.showMixedMIDI $ adjustMidiTiming mid
       { F.tracks = showRRControl RRControl
-        { rrcAnimDrummer   = flip fmap (moodFor rr.drums) $ \case
+        { rrcAnimDrummer   = moodFor rr.drums <&> \case
           -- obviously not great, need to instead translate from drum animations
           Mood_idle          -> 109 -- Drummer_NoPlay
           Mood_idle_realtime -> 109
@@ -312,7 +312,7 @@ rrRules buildInfo dir rr = do
           Mood_mellow        -> 52
           Mood_intense       -> 52
           Mood_play_solo     -> 52
-        , rrcAnimGuitarist = flip fmap (moodFor rr.guitar) $ \case
+        , rrcAnimGuitarist = moodFor rr.guitar <&> \case
           Mood_idle          -> 0 -- Guitar_NoPlay
           Mood_idle_realtime -> 0
           Mood_idle_intense  -> 0
@@ -320,7 +320,7 @@ rrRules buildInfo dir rr = do
           Mood_play          -> 2 -- Guitar_TempoB_Rock
           Mood_intense       -> 3 -- Guitar_TempoB_Metal
           Mood_play_solo     -> 3
-        , rrcAnimBassist   = flip fmap (moodFor rr.guitar) $ \case
+        , rrcAnimBassist   = moodFor rr.guitar <&> \case
           Mood_idle          -> 0 -- Bass_NoPlay
           Mood_idle_realtime -> 0
           Mood_idle_intense  -> 0
@@ -329,22 +329,22 @@ rrRules buildInfo dir rr = do
           Mood_intense       -> 3 -- Bass_TempoB_Metal
           Mood_play_solo     -> 3
         , rrcAnimVocalist  = RTB.empty
-        , rrcGemsDrums     = fmap fst $ rrdGems $ makeRRDrumDifficulty4Lane
+        , rrcGemsDrums     = fmap fst $ (.rrdGems) $ makeRRDrumDifficulty4Lane
           Expert
           (fromMaybe RTB.empty $ drums >>= \res -> Map.lookup Expert res.notes)
           (maybe mempty (.other) drums)
           mid.tracks.onyxEvents
-        , rrcGemsGuitar    = fromMaybe RTB.empty $ do
+        , rrcGemsGuitar    = fromMaybe RTB.empty do
           res <- guitar
           makeRRFiveControl res <$> Map.lookup Expert res.notes
-        , rrcGemsBass      = fromMaybe RTB.empty $ do
+        , rrcGemsBass      = fromMaybe RTB.empty do
           res <- bass
           makeRRFiveControl res <$> Map.lookup Expert res.notes
         , rrcVenue         = camera
-        , rrcEnd           = mid.tracks.onyxEvents.eventsEnd
+        , rrcEnd           = mid.tracks.onyxEvents.end
         , rrcSections      = sections
         -- TODO add half-beats (do these even do anything?)
-        , rrcBeat          = fmap Just $ mid.tracks.onyxBeat.beatLines
+        , rrcBeat          = Just <$> mid.tracks.onyxBeat.beatLines
         }
       }
 
@@ -366,7 +366,7 @@ rrRules buildInfo dir rr = do
           (minutes, afterMinutes) = quotRem ms 60000
           (seconds, milliseconds) = quotRem afterMinutes 1000
           in T.pack $ "{ " <> show minutes <> ", " <> show seconds <> ", " <> show milliseconds <> " }"
-    endMS <- case mid.tracks.onyxEvents.eventsEnd of
+    endMS <- case mid.tracks.onyxEvents.end of
       Wait dt _ _ -> return $ floor $ U.applyTempoMap mid.tempos dt * 1000
       RNil        -> fatal "panic! no [end] in processed midi"
     shk $ need [maxScores]
@@ -445,9 +445,6 @@ rrRules buildInfo dir rr = do
           , ""
           , "Quantise = QuantiseLevel.kNone"
           , ""
-          -- put this in so we can reimport later and undo the midi sync hack
-          , rrMP3HackString <> T.pack (show rrMP3HackAmountMS)
-          , ""
           ]
 
     stackIO $ B.writeFile out $ TE.encodeUtf8 lua
@@ -458,29 +455,33 @@ rrRules buildInfo dir rr = do
       pathSong    = dir </> "song.mp3"
       pathFE      = dir </> "fe.mp3"
       rrParts = [rr.guitar, rr.bass, rr.drums]
-      setup lame = liftIO $ do
+      setup lame = liftIO do
         L.check $ L.setBrate lame 128
         L.check $ L.setQuality lame 5
-        L.check $ L.setOutSamplerate lame 44100 -- TODO should we use 48k? maybe avoid the weird sync problems
+        L.check $ L.setOutSamplerate lame 48000
+
+        -- PS3 Rock Revolution does not have Info frames (unlike GH3),
+        -- it may mess up sync if you do have them
+        L.check $ L.setBWriteVbrTag lame False
 
   pathGuitar %> \out -> do
     mid <- loadOnyxMidi
     s <- sourceStereoParts buildInfo rrParts rr.common mid 0 planName plan
       [(rr.guitar, 1)]
     pad <- readPad
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setup $ padAudio pad $ clampIfSilent s
+    stackIO $ runResourceT $ sinkMP3WithHandle out setup $ padAudio pad $ clampIfSilent s
   pathBass %> \out -> do
     mid <- loadOnyxMidi
     s <- sourceStereoParts buildInfo rrParts rr.common mid 0 planName plan
       [(rr.bass, 1)]
     pad <- readPad
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setup $ padAudio pad $ clampIfSilent s
+    stackIO $ runResourceT $ sinkMP3WithHandle out setup $ padAudio pad $ clampIfSilent s
   pathDrums %> \out -> do
     mid <- loadOnyxMidi
     s <- sourceStereoParts buildInfo rrParts rr.common mid 0 planName plan
       [(rr.drums, 1)]
     pad <- readPad
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setup $ padAudio pad $ clampIfSilent s
+    stackIO $ runResourceT $ sinkMP3WithHandle out setup $ padAudio pad $ clampIfSilent s
   pathSong %> \out -> do
     mid <- loadOnyxMidi
     s <- sourceBacking buildInfo rr.common mid 0 planName plan
@@ -489,12 +490,12 @@ rrRules buildInfo dir rr = do
       , (rr.drums , 1)
       ]
     pad <- readPad
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setup $ padAudio pad $ clampIfSilent s
+    stackIO $ runResourceT $ sinkMP3WithHandle out setup $ padAudio pad $ clampIfSilent s
   pathFE %> \out -> do
     mid <- loadOnyxMidi
     s <- sourceBacking buildInfo rr.common mid 0 planName plan []
     pad <- readPad
-    stackIO $ runResourceT $ sinkMP3PadWithHandle out setup $ padAudio pad $ clampIfSilent s
+    stackIO $ runResourceT $ sinkMP3WithHandle out setup $ padAudio pad $ clampIfSilent s
 
   let songFev = file $ "s" <> str <> ".fev" -- makeMainFEV
       songFsb = file $ "s" <> str <> ".fsb"
@@ -507,7 +508,7 @@ rrRules buildInfo dir rr = do
         False -> return Nothing
         True  -> Just <$> do
           bs <- stackIO $ BL.readFile path
-          src <- stackIO $ ffSource $ Right path
+          src <- stackIO $ ffSource $ fileReadable path
           let _ = src :: CA.AudioSource (ResourceT IO) Int16
               size = round $ CA.framesToSeconds (CA.frames src) (CA.rate src) * 1000
           return (bs, size)
@@ -562,7 +563,7 @@ rrRules buildInfo dir rr = do
   let edatConfig = rockRevolutionEdatConfig "CUSTOMSONGS"
       contentID = npdContentID edatConfig
 
-  rrPS3Files <- forM rrBuildFiles $ \f -> do
+  rrPS3Files <- forM rrBuildFiles \f -> do
     let ps3 = dir </> "files-ps3" </> map toUpper (takeFileName f) <.> "EDAT"
     ps3 %> \_ -> do
       -- can't actually get it to work on console yet, so just make unencrypted files for RPCS3
@@ -575,7 +576,7 @@ rrRules buildInfo dir rr = do
         else shk $ copyFile' f ps3
     return ps3
 
-  phony (dir </> "files-ps3") $ do
+  phony (dir </> "files-ps3") do
     shk $ need rrPS3Files
 
   dir </> "rr.pkg" %> \out -> do
@@ -587,10 +588,10 @@ rrRules buildInfo dir rr = do
 
 makeRRFiveDifficulty :: FiveResult -> RTB.T U.Beats ((Maybe Five.Color, StrumHOPOTap), Maybe U.Beats) -> RRFiveDifficulty U.Beats
 makeRRFiveDifficulty result gems = RRFiveDifficulty
-  { rrfStrums = blipEdgesRB_ $ flip RTB.mapMaybe processed $ \case
+  { rrfStrums = blipEdgesRB_ $ flip RTB.mapMaybe processed \case
     ((color, Strum), len) -> Just (color, len)
     _                     -> Nothing
-  , rrfHOPOs = blipEdgesRB_ $ flip RTB.mapMaybe processed $ \case
+  , rrfHOPOs = blipEdgesRB_ $ flip RTB.mapMaybe processed \case
     ((_    , Strum), _  ) -> Nothing
     ((color, _    ), len) -> Just (color, len)
   , rrfSolo = RTB.empty -- added later
@@ -612,12 +613,12 @@ makeRRFiveControl result gems = let
 
 removeGemsUnderFreestyle :: (NNC.C t) => RRDrumDifficulty t -> RRDrumDifficulty t
 removeGemsUnderFreestyle rrd = let
-  laneBools = flip fmap rrd.rrdFreestyle $ \case
+  laneBools = rrd.rrdFreestyle <&> \case
     EdgeOn _ (_, rrc) -> (rrc, True )
     EdgeOff  (_, rrc) -> (rrc, False)
   in rrd
     { rrdGems = flip RTB.mapMaybe (applyStatus laneBools rrd.rrdGems)
-      $ \(currentLanes, pair@(_perc, chan)) -> do
+      \(currentLanes, pair@(_perc, chan)) -> do
         guard $ notElem chan currentLanes
         return pair
     }
@@ -647,7 +648,7 @@ data RRDrumInput t = RRDrumInput
 
 makeRRDrumDifficulty :: (NNC.C t) => RRDrumInput t -> RRDrumDifficulty t
 makeRRDrumDifficulty input = removeGemsUnderFreestyle RRDrumDifficulty
-  { rrdGems = RTB.flatten $ flip fmap (RTB.collectCoincident input.notes) $ \gems -> concat
+  { rrdGems = RTB.flatten $ RTB.collectCoincident input.notes <&> \gems -> concat
     [ [ (RR_Kick     , RRC_Kick   ) | elem (E.Kick ()) gems ]
     , [ (RR_Snare    , RRC_Snare  ) | elem E.Snare     gems ]
     , [ (RR_HihatOpen, RRC_Hihat  ) | elem E.Hihat     gems ]
@@ -658,7 +659,7 @@ makeRRDrumDifficulty input = removeGemsUnderFreestyle RRDrumDifficulty
     ]
   , rrdHidden    = RTB.empty
   , rrdFreestyle = let
-    lanesNormal = flip RTB.mapMaybe input.lanes $ mapM $ \case
+    lanesNormal = flip RTB.mapMaybe input.lanes $ mapM \case
       E.Kick ()   -> Just RRC_Kick
       E.Snare     -> Just RRC_Snare
       E.Hihat     -> Just RRC_Hihat
@@ -669,7 +670,7 @@ makeRRDrumDifficulty input = removeGemsUnderFreestyle RRDrumDifficulty
       E.Ride      -> Just RRC_CrashR
       E.CrashR    -> Just RRC_CrashR
       E.HihatFoot -> Nothing
-    lanesBRE = case input.events.eventsCoda of
+    lanesBRE = case input.events.coda of
       RNil -> RTB.empty
       Wait codaTime _ _
         -> RTB.flatten
@@ -678,7 +679,7 @@ makeRRDrumDifficulty input = removeGemsUnderFreestyle RRDrumDifficulty
         $ U.trackDrop codaTime input.activation
     breEdge b = map (if b then EdgeOn () else EdgeOff)
       [RRC_Kick, RRC_Snare, RRC_Hihat, RRC_CrashL, RRC_HighTom, RRC_LowTom, RRC_CrashR]
-    withPerc = fmap $ fmap $ \chan -> let
+    withPerc = fmap $ fmap \chan -> let
       perc = case chan of
         RRC_Kick    -> RR_Kick
         RRC_Snare   -> RR_Snare
@@ -700,9 +701,9 @@ makeRRDrumDifficultyElite
   -> EventsTrack t
   -> RRDrumDifficulty t
 makeRRDrumDifficultyElite trk elite events = makeRRDrumDifficulty RRDrumInput
-  { notes      = (.tdn_gem) <$> trk
-  , lanes      = elite.tdLanes
-  , activation = elite.tdActivation
+  { notes      = (.gem) <$> trk
+  , lanes      = elite.lanes
+  , activation = elite.activation
   , events     = events
   }
 
@@ -714,8 +715,8 @@ legacyLanes
   -> RTB.T t (Edge () (D.Gem D.ProType))
 legacyLanes diff gems trk = let
   hands = RTB.filter (/= D.Kick) $ fmap fst gems
-  single = findTremolos hands $ laneDifficulty diff trk.drumSingleRoll
-  double = findTrills   hands $ laneDifficulty diff trk.drumDoubleRoll
+  single = findTremolos hands $ laneDifficulty diff trk.singleRoll
+  double = findTrills   hands $ laneDifficulty diff trk.doubleRoll
   in splitEdgesSimple $ fmap (\(gem, len) -> ((), gem, len)) $ RTB.merge single double
 
 makeRRDrumDifficulty6Lane, makeRRDrumDifficulty4Lane
@@ -739,7 +740,7 @@ makeRRDrumDifficulty6Lane diff gems trk events = let
   in makeRRDrumDifficulty RRDrumInput
     { notes      = gemTranslate . fst <$> gems
     , lanes      = fmap gemTranslate <$> legacyLanes diff gems trk
-    , activation = trk.drumActivation
+    , activation = trk.activation
     , events     = events
     }
 makeRRDrumDifficulty4Lane diff gems trk events = let
@@ -753,7 +754,7 @@ makeRRDrumDifficulty4Lane diff gems trk events = let
   in makeRRDrumDifficulty RRDrumInput
     { notes      = gemTranslate . fst <$> gems
     , lanes      = fmap gemTranslate <$> legacyLanes diff gems trk
-    , activation = trk.drumActivation
+    , activation = trk.activation
     , events     = events
     }
 
@@ -941,7 +942,7 @@ makeMainFEV songID timeGuitar timeBass timeDrums timeBacking = FEV
       , waveforms = []
       }
     in catMaybes
-      [ flip fmap timeGuitar $ \playtime -> blankDef
+      [ timeGuitar <&> \playtime -> blankDef
         { name = "s" <> songID <> "_guitar"
         , waveforms =
           [ Waveform
@@ -954,7 +955,7 @@ makeMainFEV songID timeGuitar timeBass timeDrums timeBacking = FEV
             }
           ]
         }
-      , flip fmap timeBass $ \playtime -> blankDef
+      , timeBass <&> \playtime -> blankDef
         { name = "s" <> songID <> "_bass"
         , waveforms =
           [ Waveform
@@ -967,7 +968,7 @@ makeMainFEV songID timeGuitar timeBass timeDrums timeBacking = FEV
             }
           ]
         }
-      , flip fmap timeDrums $ \playtime -> blankDef
+      , timeDrums <&> \playtime -> blankDef
         { name = "s" <> songID <> "_drums"
         , waveforms =
           [ Waveform
@@ -980,7 +981,7 @@ makeMainFEV songID timeGuitar timeBass timeDrums timeBacking = FEV
             }
           ]
         }
-      , flip fmap timeBacking $ \playtime -> blankDef
+      , timeBacking <&> \playtime -> blankDef
         { name = "s" <> songID <> "_MixMinus"
         , waveforms =
           [ Waveform

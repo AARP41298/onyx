@@ -1,6 +1,9 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
-{-# LANGUAGE TupleSections     #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE TupleSections       #-}
 module Onyx.Amplitude.File where
 
 import           Control.Monad                    (forM, forM_)
@@ -11,6 +14,7 @@ import           Data.Char                        (isDigit)
 import qualified Data.Map                         as Map
 import           Data.Maybe                       (catMaybes, fromMaybe)
 import qualified Data.Text                        as T
+import           Onyx.Amplitude.PS2.MIDI          (AmpInstrument (..))
 import           Onyx.Amplitude.Track
 import           Onyx.MIDI.Read
 import           Onyx.MIDI.Track.File             (ParseFile (..), fileTrack)
@@ -23,7 +27,7 @@ data AmplitudeFile t = AmplitudeFile
   } deriving (Eq, Show)
 
 data AmplitudeTrack t
-  = Catch Instrument T.Text (CatchTrack t)
+  = Catch AmpInstrument T.Text (CatchTrack t)
   | Freestyle (FreestyleTrack t)
   deriving (Eq, Show)
 
@@ -41,23 +45,15 @@ instance TraverseTrack FreestyleTrack where
 instance ParseTrack FreestyleTrack where
   parseTrack = return FreestyleTrack
 
-data Instrument
-  = Drums
-  | Bass
-  | Synth
-  | Vocal
-  | Guitar
-  deriving (Eq, Ord, Show, Enum, Bounded)
-
 instance TraverseTrack AmplitudeFile where
   traverseTrack fn (AmplitudeFile trks) = AmplitudeFile <$> traverse (traverseTrack fn) trks
 
 instance ParseFile AmplitudeFile where
   parseFile = do
-    ampTracks <- ampTracks =. Codec
-      { codecIn = fmap Map.fromList $ do
+    ampTracks <- (.ampTracks) =. Codec
+      { codecIn = fmap Map.fromList do
         trks <- lift get
-        fmap catMaybes $ forM trks $ \trk -> let
+        fmap catMaybes $ forM trks \trk -> let
           trackName = fromMaybe "" $ U.trackName trk
           parseName = do
             _ <- P.char 'T'
@@ -70,11 +66,11 @@ instance ParseFile AmplitudeFile where
               , do
                 _ <- P.string " CATCH:"
                 inst <- P.choice
-                  [ P.char 'D' >> return Drums
-                  , P.char 'B' >> return Bass
-                  , P.char 'S' >> return Synth
-                  , P.char 'V' >> return Vocal
-                  , P.char 'G' >> return Guitar
+                  [ P.char 'D' >> return AmpDrums
+                  , P.char 'B' >> return AmpBass
+                  , P.char 'S' >> return AmpSynth
+                  , P.char 'V' >> return AmpVocal
+                  , P.char 'G' >> return AmpGuitar
                   ]
                 _ <- P.char ':'
                 name <- T.pack <$> P.munch (const True)
@@ -86,6 +82,6 @@ instance ParseFile AmplitudeFile where
               Left  n               -> (n,) . Freestyle       <$> codecIn (fileTrack $ pure trackName)
               Right (n, inst, name) -> (n,) . Catch inst name <$> codecIn (fileTrack $ pure trackName)
             _ -> return Nothing
-      , codecOut = fmapArg $ \parts -> forM_ (Map.toAscList parts) $ \(ix, trk) -> undefined ix trk
+      , codecOut = fmapArg \parts -> forM_ (Map.toAscList parts) \(ix, trk) -> undefined ix trk
       }
     return AmplitudeFile{..}

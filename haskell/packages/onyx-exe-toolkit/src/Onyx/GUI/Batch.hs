@@ -1,92 +1,109 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImplicitParams        #-}
 {-# LANGUAGE LambdaCase            #-}
+{-# LANGUAGE OverloadedLabels      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE QuasiQuotes           #-}
 {-# LANGUAGE RecordWildCards       #-}
-{-# OPTIONS_GHC -fno-warn-ambiguous-fields #-}
+{-# LANGUAGE TemplateHaskell       #-}
 {-# OPTIONS_GHC -fno-warn-incomplete-uni-patterns #-}
 module Onyx.GUI.Batch where
 
+import           Control.Applicative   ((<|>))
+import           Control.Monad         ((>=>))
+import           Data.Default.Class    (def)
+import           Data.Function         ((&))
+import qualified Data.HashMap.Strict   as HM
+import           Data.List             (find)
+import           Data.Maybe            (fromMaybe, isJust)
+import qualified Data.Text             as T
+import           Foreign               (Ptr)
+import qualified Language.C.Inline.Cpp as C
+import           Onyx.GUI.Binding
 import           Onyx.GUI.Core
-import           Onyx.GUI.Util                      (askFolder)
-
-import           Control.Applicative                ((<|>))
-import           Control.Monad.Extra                ((>=>))
-import           Data.Default.Class                 (def)
-import qualified Data.HashMap.Strict                as HM
-import           Data.List                          (find)
-import           Data.Maybe                         (fromMaybe, isJust)
-import qualified Data.Text                          as T
-import           Graphics.UI.FLTK.LowLevel.FLTKHS   (Height (..),
-                                                     Rectangle (..), Size (..),
-                                                     Width (..))
-import qualified Graphics.UI.FLTK.LowLevel.FLTKHS   as FL
-import           Graphics.UI.FLTK.LowLevel.GlWindow ()
-import           Onyx.Harmonix.Ark.GH2              (GH2InstallLocation (..))
+import           Onyx.GUI.Util         (askFolder, checkValue, setCallback,
+                                        setLabelTooltip)
+import           Onyx.Harmonix.Ark.GH2 (GH2InstallLocation (..))
 import           Onyx.Import
-import qualified Onyx.MIDI.Track.File               as F
-import           Onyx.Mode                          (anyDrums, anyFiveFret)
-import           Onyx.Preferences                   (Preferences (..),
-                                                     getDefaultPS3Dir,
-                                                     readPreferences)
+import           Onyx.Localization     (L, l10n, l10nFull)
+import qualified Onyx.MIDI.Track.File  as F
+import           Onyx.Mode             (anyDrums, anyFiveFret)
+import           Onyx.Preferences      (Preferences (..), getDefaultPS3Dir,
+                                        readPreferences)
 import           Onyx.Project
 import           Onyx.StackTrace
-import           System.FilePath                    (takeDirectory)
+import           Optics                (mapped, (%), (%~), (.~))
+import           System.FilePath       (takeDirectory)
+
+C.context flContext
+
+C.include "FL/Fl.H"
+C.include "FL/Fl_Group.H"
+C.include "FL/Fl_Button.H"
+C.include "FL/Fl_Check_Button.H"
+C.include "FL/Fl_Input.H"
+C.include "FL/Fl_Pack.H"
 
 batchPagePreview
-  :: (?preferences :: Preferences)
+  :: (?preferences :: Preferences, ?loc :: L)
   => (Event -> IO ())
   -> Rectangle
-  -> FL.Ref FL.Group
+  -> Ptr Fl_Group
   -> ((Project -> FilePath) -> IO ())
   -> IO ()
 batchPagePreview sink rect tab build = do
-  pack <- FL.packNew rect Nothing
+  pack <- withRect rect \px py pw ph ->
+    [C.exp| Fl_Pack* { new Fl_Pack($(int px), $(int py), $(int pw), $(int ph)) } |]
   makeTemplateRunner
     sink
-    "Build web previews"
+    (l10n "batch-task-preview")
     (maybe "%input_dir%" T.pack ?preferences.prefDirPreview <> "/%input_base%_player")
-    (\template -> build $ \proj -> T.unpack $ templateApplyInput proj Nothing template)
-  FL.end pack
-  FL.setResizable tab $ Just pack
+    (\template -> build \proj -> T.unpack $ templateApplyInput proj Nothing template)
+  [C.block| void { $(Fl_Pack* pack)->end(); } |]
+  [C.block| void { $(Fl_Group* tab)->resizable($(Fl_Pack* pack)); } |]
   return ()
 
 batchButtonLoosePS3
-  :: (Event -> IO ())
+  :: (?loc :: L)
+  => (Event -> IO ())
   -> (FilePath -> IO ())
   -> IO ()
-batchButtonLoosePS3 sink usePath = padded 5 10 10 10 (Size (Width 800) (Height 35)) $ \rect -> do
+batchButtonLoosePS3 sink usePath = padded 5 10 10 10 (Size (Width 800) (Height 35)) \rect -> do
   let (rect', _) = chopLeft 250 rect
-  button <- FL.buttonNew rect' $ Just "Create PS3/RPCS3 folders"
-  taskColor >>= FL.setColor button
-  FL.setCallback button $ \_ -> sink $ EventOnyx $ do
+  button <- withRect rect' \bx by bw bh ->
+    [C.exp| Fl_Button* { new Fl_Button($(int bx), $(int by), $(int bw), $(int bh)) } |]
+  setLabelTooltip (l10nFull "batch-task-ps3-folder" []) button
+  [C.block| void { $(Fl_Button* button)->color($(Fl_Color taskColor)); } |]
+  setCallback button $ sink $ EventOnyx do
     defDir <- getDefaultPS3Dir
     stackIO $ askFolder defDir usePath
 
 batchPageRB3
-  :: (?preferences :: Preferences)
+  :: (?preferences :: Preferences, ?loc :: L)
   => (Event -> IO ())
   -> Rectangle
-  -> FL.Ref FL.Group
+  -> Ptr Fl_Group
   -> (Bool -> (Project -> ([(TargetRB3 FilePath, RB3Create)], SongYaml FilePath)) -> IO ())
   -> IO ()
 batchPageRB3 sink rect tab build = do
-  pack <- FL.packNew rect Nothing
-  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) $ \rect' -> let
-    centerRect = trimClock 0 250 0 250 rect'
-    in centerFixed rect' $ speedPercent True centerRect
-  getToms <- padded 5 10 5 10 (Size (Width 800) (Height 35)) $ \rect' -> do
-    box <- FL.checkButtonNew rect' (Just "Convert non-Pro Drums to all toms")
-    FL.setTooltip box "When importing from a FoF/PS/CH chart where no Pro Drums are detected, tom markers will be added over the whole drum chart if this box is checked."
-    return $ FL.getValue box
-  getPreset <- padded 5 10 5 10 (Size (Width 800) (Height 35)) $ \rect' -> do
+  pack <- withRect rect \px py pw ph ->
+    [C.exp| Fl_Pack* { new Fl_Pack($(int px), $(int py), $(int pw), $(int ph)) } |]
+  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) \rect' ->
+    centerFixed rect' $ speedPercent True (trimClock 0 250 0 250 rect')
+  getToms <- padded 5 10 5 10 (Size (Width 800) (Height 35)) \rect' -> do
+    box <- withRect rect' \cx cy cw ch ->
+      [C.exp| Fl_Check_Button* { new Fl_Check_Button($(int cx), $(int cy), $(int cw), $(int ch)) } |]
+    setLabelTooltip (l10nFull "batch-tab-rb3-all-toms" []) box
+    return $ checkValue box
+  getPreset <- padded 5 10 5 10 (Size (Width 800) (Height 35)) \rect' -> do
     makePresetDropdown rect' batchPartPresetsRB3
-  getKicks <- padded 5 10 5 10 (Size (Width 800) (Height 35)) $ \rect' -> do
+  getKicks <- padded 5 10 5 10 (Size (Width 800) (Height 35)) \rect' -> do
     fn <- horizRadio rect'
-      [ ("1x Bass Pedal", Kicks1x, False)
-      , ("2x Bass Pedal", Kicks2x, False)
-      , ("Both", KicksBoth, True)
+      [ (l10n "bass-pedal-1x", Kicks1x, False)
+      , (l10n "bass-pedal-2x", Kicks2x, False)
+      , (l10n "bass-pedal-both-output", KicksBoth, True)
       ]
     return $ fromMaybe KicksBoth <$> fn
   let getTargetSong isXbox usePath template = do
@@ -120,7 +137,7 @@ batchPageRB3 sink rect tab build = do
             [ templateApplyInput proj $ Just $ RB3 tgt
             , let
               modifiers = T.concat
-                [ T.pack $ case tgt.common.speed of
+                [ T.pack case tgt.common.speed of
                   Just n | n /= 1 -> "_" <> show (round $ n * 100 :: Int)
                   _               -> ""
                 , kicksLabel
@@ -129,9 +146,9 @@ batchPageRB3 sink rect tab build = do
             ]
           yaml
             = (if toms then id else forceProDrums)
-            $ projectSongYaml proj
+            $ proj.projectSongYaml
           in
-            ( [ ((tgt :: TargetRB3 FilePath) { is2xBassPedal = is2x }, usePath $ fout kicksLabel)
+            ( [ ((tgt :: TargetRB3 FilePath) & #is2xBassPedal .~ is2x, usePath $ fout kicksLabel)
               | (is2x, kicksLabel) <- kicksConfigs
               ]
             , yaml
@@ -139,41 +156,41 @@ batchPageRB3 sink rect tab build = do
           )
   makeTemplateRunner
     sink
-    "Create Xbox 360 CON files"
+    (l10n "batch-task-360-con")
     (maybe "%input_dir%" T.pack ?preferences.prefDirRB <> "/%input_base%%modifiers%_rb3con")
     (\template -> sink $ EventOnyx $ getTargetSong True RB3CON template >>= \(qcPossible, x) -> stackIO $ build qcPossible x)
   makeTemplateRunner
     sink
-    "Create PS3 PKG files"
+    (l10n "batch-task-ps3-pkg")
     (maybe "%input_dir%" T.pack ?preferences.prefDirRB <> "/%input_base%%modifiers%.pkg")
     (\template -> sink $ EventOnyx $ getTargetSong False RB3PKG template >>= \(qcPossible, x) -> stackIO $ build qcPossible x)
-  batchButtonLoosePS3 sink $ \dout -> do
+  batchButtonLoosePS3 sink \dout -> do
     sink $ EventOnyx $ getTargetSong False (const $ RB3LoosePS3 dout) "" >>= \(qcPossible, x) -> stackIO $ build qcPossible x
   makeTemplateRunner
     sink
-    "Create Magma projects"
+    (l10n "batch-task-magma")
     (maybe "%input_dir%" T.pack ?preferences.prefDirRB <> "/%input_base%%modifiers%_project")
     (\template -> sink $ EventOnyx $ getTargetSong False RB3Magma template >>= \(_, x) -> stackIO $ build False x)
-  FL.end pack
-  FL.setResizable tab $ Just pack
+  [C.block| void { $(Fl_Pack* pack)->end(); } |]
+  [C.block| void { $(Fl_Group* tab)->resizable($(Fl_Pack* pack)); } |]
   return ()
 
 batchPageGH1
-  :: (?preferences :: Preferences)
+  :: (?preferences :: Preferences, ?loc :: L)
   => (Event -> IO ())
   -> Rectangle
-  -> FL.Ref FL.Group
+  -> Ptr Fl_Group
   -> ((Project -> (TargetGH1 FilePath, GH1Create)) -> IO ())
   -> IO ()
 batchPageGH1 sink rect tab build = do
-  pack <- FL.packNew rect Nothing
-  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) $ \rect' -> let
-    centerRect = trimClock 0 250 0 250 rect'
-    in centerFixed rect' $ speedPercent True centerRect
-  let getTargetSong usePath template go = sink $ EventOnyx $ readPreferences >>= \newPrefs -> stackIO $ do
+  pack <- withRect rect \px py pw ph ->
+    [C.exp| Fl_Pack* { new Fl_Pack($(int px), $(int py), $(int pw), $(int ph)) } |]
+  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) \rect' ->
+    centerFixed rect' $ speedPercent True (trimClock 0 250 0 250 rect')
+  let getTargetSong usePath template go = sink $ EventOnyx $ readPreferences >>= \newPrefs -> stackIO do
         speed <- getSpeed
-        go $ \proj -> let
-          leadPart = find (hasPartWith anyFiveFret $ projectSongYaml proj)
+        go \proj -> let
+          leadPart = find (hasPartWith anyFiveFret proj.projectSongYaml)
             [ F.PartGuitar
             , F.PartName "rhythm"
             , F.PartKeys
@@ -182,63 +199,55 @@ batchPageGH1 sink rect tab build = do
             , F.PartName "dance"
             ]
           tgt = (def :: TargetGH1 FilePath)
-            { common = (def :: TargetGH1 FilePath).common
-              { speed = Just speed
-              }
-            , guitar = fromMaybe (F.PartName "undefined") leadPart
-            , offset = newPrefs.prefGH2Offset
-            }
+            & #common % #speed .~ Just speed
+            & #guitar          .~ fromMaybe (F.PartName "undefined") leadPart
+            & #offset          .~ newPrefs.prefGH2Offset
           fout = T.unpack $ foldr ($) template
             [ templateApplyInput proj $ Just $ GH1 tgt
             , let
-              modifiers = T.pack $ case tgt.common.speed of
+              modifiers = T.pack case tgt.common.speed of
                 Just n | n /= 1 -> "_" <> show (round $ n * 100 :: Int)
                 _               -> ""
               in T.intercalate modifiers . T.splitOn "%modifiers%"
             ]
           in (tgt, usePath fout)
-  padded 5 10 5 10 (Size (Width 500) (Height 35)) $ \r -> do
-    btn <- FL.buttonNew r $ Just "Add to PS2 ARK as Bonus Songs"
-    color <- taskColor
-    FL.setColor btn color
-    FL.setCallback btn $ \_ -> do
-      picker <- FL.nativeFileChooserNew $ Just FL.BrowseFile
-      FL.setTitle picker "Select .HDR file"
-      FL.showWidget picker >>= \case
-        FL.NativeFileChooserPicked -> (fmap T.unpack <$> FL.getFilename picker) >>= \case
-          Nothing -> return ()
-          Just f  -> let
-            gen = takeDirectory f
-            in getTargetSong id "" $ \song -> do
-              build $ \proj -> let
-                (tgt, _) = song proj
-                in (tgt, GH1ARK gen)
-        _ -> return ()
+  padded 5 10 5 10 (Size (Width 500) (Height 35)) \r -> do
+    btn <- withRect r \bx by bw bh ->
+      [C.exp| Fl_Button* { new Fl_Button($(int bx), $(int by), $(int bw), $(int bh)) } |]
+    setLabelTooltip (l10nFull "batch-task-ps2-add" []) btn
+    [C.block| void { $(Fl_Button* btn)->color($(Fl_Color taskColor)); } |]
+    setCallback btn do
+      browseFileChooser (l10n "file-picker-load-hdr") \f -> let
+        gen = takeDirectory f
+        in getTargetSong id "" \song -> do
+          build \proj -> let
+            (tgt, _) = song proj
+            in (tgt, GH1ARK gen)
   makeTemplateRunner
     sink
-    "Create PS2 DIY folders"
+    (l10n "batch-task-ps2-diy")
     "%input_dir%/%input_base%%modifiers%_gh1"
     (\template -> getTargetSong GH1DIYPS2 template build)
-  FL.end pack
-  FL.setResizable tab $ Just pack
+  [C.block| void { $(Fl_Pack* pack)->end(); } |]
+  [C.block| void { $(Fl_Group* tab)->resizable($(Fl_Pack* pack)); } |]
   return ()
 
 batchPageGH3
-  :: (?preferences :: Preferences)
+  :: (?preferences :: Preferences, ?loc :: L)
   => (Event -> IO ())
   -> Rectangle
-  -> FL.Ref FL.Group
+  -> Ptr Fl_Group
   -> ((Project -> (TargetGH3 FilePath, GH3Create)) -> IO ())
   -> IO ()
 batchPageGH3 sink rect tab build = do
-  pack <- FL.packNew rect Nothing
-  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) $ \rect' -> let
-    centerRect = trimClock 0 250 0 250 rect'
-    in centerFixed rect' $ speedPercent True centerRect
-  let getTargetSong xbox usePath template go = sink $ EventOnyx $ readPreferences >>= \newPrefs -> stackIO $ do
+  pack <- withRect rect \px py pw ph ->
+    [C.exp| Fl_Pack* { new Fl_Pack($(int px), $(int py), $(int pw), $(int ph)) } |]
+  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) \rect' ->
+    centerFixed rect' $ speedPercent True (trimClock 0 250 0 250 rect')
+  let getTargetSong xbox usePath template go = sink $ EventOnyx $ readPreferences >>= \newPrefs -> stackIO do
         speed <- getSpeed
-        go $ \proj -> let
-          hasPart = hasPartWith anyFiveFret $ projectSongYaml proj
+        go \proj -> let
+          hasPart = hasPartWith anyFiveFret proj.projectSongYaml
           leadPart = find hasPart
             [ F.PartGuitar
             , F.PartName "rhythm"
@@ -256,24 +265,21 @@ batchPageGH3 sink rect tab build = do
             , (F.PartName "dance" , GH2Rhythm)
             ]
           tgt = (def :: TargetGH3 FilePath)
-            { common = (def :: TargetGH3 FilePath).common
-              { speed = Just speed
-              }
-            , guitar = fromMaybe (F.PartName "undefined") leadPart
-            , bass = case coopPart of
-              Just (x, GH2Bass) -> x
-              _                 -> (def :: TargetGH3 FilePath).bass
-            , rhythm = case coopPart of
-              Just (x, GH2Rhythm) -> x
-              _                   -> (def :: TargetGH3 FilePath).rhythm
-            , coop = case coopPart of
-              Just (_, coop) -> coop
-              _              -> (def :: TargetGH3 FilePath).coop
-            }
+            & #common % #speed .~ Just speed
+            & #guitar .~ fromMaybe (F.PartName "undefined") leadPart
+            & #bass %~ case coopPart of
+              Just (x, GH2Bass) -> const x
+              _                 -> id
+            & #rhythm %~ case coopPart of
+              Just (x, GH2Rhythm) -> const x
+              _                   -> id
+            & #coop %~ case coopPart of
+              Just (_, coop) -> const coop
+              _              -> id
           fout = (if xbox then trimXbox newPrefs else id) $ T.unpack $ foldr ($) template
             [ templateApplyInput proj $ Just $ GH3 tgt
             , let
-              modifiers = T.pack $ case tgt.common.speed of
+              modifiers = T.pack case tgt.common.speed of
                 Just n | n /= 1 -> "_" <> show (round $ n * 100 :: Int)
                 _               -> ""
               in T.intercalate modifiers . T.splitOn "%modifiers%"
@@ -281,44 +287,46 @@ batchPageGH3 sink rect tab build = do
           in (tgt, usePath fout)
   makeTemplateRunner
     sink
-    "Create Xbox 360 LIVE files"
+    (l10n "batch-task-360-live")
     (maybe "%input_dir%" T.pack ?preferences.prefDirRB <> "/%input_base%%modifiers%_gh3live")
     (\template -> getTargetSong True GH3LIVE template build)
   makeTemplateRunner
     sink
-    "Create PS3 PKG files"
+    (l10n "batch-task-ps3-pkg")
     (maybe "%input_dir%" T.pack ?preferences.prefDirRB <> "/%input_base%%modifiers%.pkg")
     (\template -> getTargetSong False GH3PKG template build)
-  batchButtonLoosePS3 sink $ \dout -> do
+  batchButtonLoosePS3 sink \dout -> do
     sink $ EventIO $ getTargetSong False (const $ GH3LoosePS3 dout) "" build
-  FL.end pack
-  FL.setResizable tab $ Just pack
+  [C.block| void { $(Fl_Pack* pack)->end(); } |]
+  [C.block| void { $(Fl_Group* tab)->resizable($(Fl_Pack* pack)); } |]
   return ()
 
 batchPageGH2
-  :: (?preferences :: Preferences)
+  :: (?preferences :: Preferences, ?loc :: L)
   => (Event -> IO ())
   -> Rectangle
-  -> FL.Ref FL.Group
+  -> Ptr Fl_Group
   -> ((Project -> (TargetGH2 FilePath, GH2Create)) -> IO ())
   -> IO ()
 batchPageGH2 sink rect tab build = do
-  pack <- FL.packNew rect Nothing
-  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) $ \rect' -> let
-    centerRect = trimClock 0 250 0 250 rect'
-    in centerFixed rect' $ speedPercent True centerRect
-  (getPracticeAudio, getDeluxe) <- padded 5 10 5 10 (Size (Width 800) (Height 35)) $ \rect' -> do
+  pack <- withRect rect \px py pw ph ->
+    [C.exp| Fl_Pack* { new Fl_Pack($(int px), $(int py), $(int pw), $(int ph)) } |]
+  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) \rect' ->
+    centerFixed rect' $ speedPercent True (trimClock 0 250 0 250 rect')
+  (getPracticeAudio, getDeluxe) <- padded 5 10 5 10 (Size (Width 800) (Height 35)) \rect' -> do
     let [rectA, rectB] = splitHorizN 2 rect'
-    boxA <- FL.checkButtonNew rectA $ Just "Make practice mode audio for PS2"
+    boxA <- withRect rectA \cx cy cw ch ->
+      [C.exp| Fl_Check_Button* { new Fl_Check_Button($(int cx), $(int cy), $(int cw), $(int ch)) } |]
+    setLabelTooltip (l10nFull "toggle-ps2-practice-audio" []) boxA
     getDeluxe <- gh2DeluxeSelector sink rectB
-    return (FL.getValue boxA, getDeluxe)
-  let getTargetSong xbox usePath template go = sink $ EventOnyx $ readPreferences >>= \newPrefs -> stackIO $ do
+    return (checkValue boxA, getDeluxe)
+  let getTargetSong xbox usePath template go = sink $ EventOnyx $ readPreferences >>= \newPrefs -> stackIO do
         speed <- getSpeed
         practiceAudio <- getPracticeAudio
         deluxe2x <- getDeluxe
-        go $ \proj -> let
+        go \proj -> let
           defGH2 = def :: TargetGH2 FilePath
-          hasPart = hasPartWith anyFiveFret $ projectSongYaml proj
+          hasPart = hasPartWith anyFiveFret proj.projectSongYaml
           leadPart = find hasPart
             [ F.PartGuitar
             , F.PartName "rhythm"
@@ -357,67 +365,62 @@ batchPageGH2 sink rect tab build = do
           fout = (if xbox then trimXbox newPrefs else id) $ T.unpack $ foldr ($) template
             [ templateApplyInput proj $ Just $ GH2 tgt
             , let
-              modifiers = T.pack $ case tgt.common.speed of
+              modifiers = T.pack case tgt.common.speed of
                 Just n | n /= 1 -> "_" <> show (round $ n * 100 :: Int)
                 _               -> ""
               in T.intercalate modifiers . T.splitOn "%modifiers%"
             ]
           in (tgt, usePath fout)
-  padded 5 10 5 10 (Size (Width 500) (Height 35)) $ \r -> do
-    btn <- FL.buttonNew r $ Just "Add to PS2 ARK as Bonus Songs"
-    color <- taskColor
-    FL.setColor btn color
-    FL.setCallback btn $ \_ -> do
-      picker <- FL.nativeFileChooserNew $ Just FL.BrowseFile
-      FL.setTitle picker "Select .HDR file"
-      FL.showWidget picker >>= \case
-        FL.NativeFileChooserPicked -> (fmap T.unpack <$> FL.getFilename picker) >>= \case
-          Nothing -> return ()
-          Just f  -> let
-            gen = takeDirectory f
-            in getTargetSong False id "" $ \song -> do
-              build $ \proj -> let
-                (tgt, _) = song proj
-                in (tgt, GH2ARK gen GH2AddBonus)
-        _ -> return ()
+  padded 5 10 5 10 (Size (Width 500) (Height 35)) \r -> do
+    btn <- withRect r \bx by bw bh ->
+      [C.exp| Fl_Button* { new Fl_Button($(int bx), $(int by), $(int bw), $(int bh)) } |]
+    setLabelTooltip (l10nFull "batch-task-ps2-add" []) btn
+    [C.block| void { $(Fl_Button* btn)->color($(Fl_Color taskColor)); } |]
+    setCallback btn do
+      browseFileChooser (l10n "file-picker-load-hdr") \f -> let
+        gen = takeDirectory f
+        in getTargetSong False id "" \song -> do
+          build \proj -> let
+            (tgt, _) = song proj
+            in (tgt, GH2ARK gen GH2AddBonus)
   makeTemplateRunner
     sink
-    "Create PS2 DIY folders"
+    (l10n "batch-task-ps2-diy")
     "%input_dir%/%input_base%%modifiers%_gh2"
     (\template -> getTargetSong False GH2DIYPS2 template build)
   makeTemplateRunner
     sink
-    "Create Xbox 360 LIVE files"
+    (l10n "batch-task-360-live")
     (maybe "%input_dir%" T.pack ?preferences.prefDirRB <> "/%input_base%%modifiers%_gh2live")
     (\template -> warnCombineXboxGH2 sink $ getTargetSong True GH2LIVE template build)
-  FL.end pack
-  FL.setResizable tab $ Just pack
+  [C.block| void { $(Fl_Pack* pack)->end(); } |]
+  [C.block| void { $(Fl_Group* tab)->resizable($(Fl_Pack* pack)); } |]
   return ()
 
 batchPageGHWOR
-  :: (?preferences :: Preferences)
+  :: (?preferences :: Preferences, ?loc :: L)
   => (Event -> IO ())
   -> Rectangle
-  -> FL.Ref FL.Group
+  -> Ptr Fl_Group
   -> ((Project -> ((TargetGH5 FilePath, GHWORCreate), SongYaml FilePath)) -> IO ())
   -> IO ()
 batchPageGHWOR sink rect tab build = do
-  pack <- FL.packNew rect Nothing
-  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) $ \rect' -> let
-    centerRect = trimClock 0 250 0 250 rect'
-    in centerFixed rect' $ speedPercent True centerRect
-  getProTo4 <- padded 5 10 5 10 (Size (Width 800) (Height 35)) $ \rect' -> do
+  pack <- withRect rect \px py pw ph ->
+    [C.exp| Fl_Pack* { new Fl_Pack($(int px), $(int py), $(int pw), $(int ph)) } |]
+  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) \rect' ->
+    centerFixed rect' $ speedPercent True (trimClock 0 250 0 250 rect')
+  getProTo4 <- padded 5 10 5 10 (Size (Width 800) (Height 35)) \rect' -> do
     fn <- horizRadio rect'
-      [ ("Pro Drums to 5 lane", False, not ?preferences.prefGH4Lane)
-      , ("Pro Drums to 4 lane", True, ?preferences.prefGH4Lane)
+      [ (l10n "batch-tab-gh-drums-5lane", False, not ?preferences.prefGH4Lane)
+      , (l10n "batch-tab-gh-drums-4lane", True, ?preferences.prefGH4Lane)
       ]
     return $ fromMaybe False <$> fn
   let getTargetSong isXbox usePath template = do
         speed <- stackIO getSpeed
         proTo4 <- stackIO getProTo4
         newPreferences <- readPreferences
-        return $ \proj -> let
-          hasPart p = isJust $ HM.lookup p (projectSongYaml proj).parts.getParts >>= anyFiveFret
+        return \proj -> let
+          hasPart p = isJust $ HM.lookup p proj.projectSongYaml.parts.getParts >>= anyFiveFret
           pickedGuitar = find hasPart
             [ F.PartGuitar
             , F.PartName "rhythm"
@@ -432,65 +435,62 @@ batchPageGHWOR sink rect tab build = do
             ]
           defGH5 = def :: TargetGH5 FilePath
           tgt = (defGH5 :: TargetGH5 FilePath)
-            { common = defGH5.common
-              { speed = Just speed
-              }
-            , guitar = fromMaybe defGH5.guitar pickedGuitar
-            , bass = fromMaybe defGH5.bass $ pickedBass <|> pickedGuitar
-            , drums = getDrumsOrDance $ projectSongYaml proj
-            , proTo4 = proTo4
-            }
+            & #common % #speed .~ Just speed
+            & #guitar          .~ fromMaybe defGH5.guitar pickedGuitar
+            & #bass            .~ fromMaybe defGH5.bass (pickedBass <|> pickedGuitar)
+            & #drums           .~ getDrumsOrDance proj.projectSongYaml
+            & #proTo4          .~ proTo4
           fout = (if isXbox then trimXbox newPreferences else id) $ T.unpack $ foldr ($) template
             [ templateApplyInput proj $ Just $ GH5 tgt
             , let
               modifiers = T.concat
-                [ T.pack $ case tgt.common.speed of
+                [ T.pack case tgt.common.speed of
                   Just n | n /= 1 -> "_" <> show (round $ n * 100 :: Int)
                   _               -> ""
                 ]
               in T.intercalate modifiers . T.splitOn "%modifiers%"
             ]
-          in ((tgt, usePath fout), projectSongYaml proj)
+          in ((tgt, usePath fout), proj.projectSongYaml)
   makeTemplateRunner
     sink
-    "Create Xbox 360 LIVE files"
+    (l10n "batch-task-360-live")
     (maybe "%input_dir%" T.pack ?preferences.prefDirRB <> "/%input_base%%modifiers%_ghwor")
     (\template -> warnXboxGHWoR sink $ getTargetSong True GHWORLIVE template >>= stackIO . build)
   makeTemplateRunner
     sink
-    "Create PS3 PKG files"
+    (l10n "batch-task-ps3-pkg")
     (maybe "%input_dir%" T.pack ?preferences.prefDirRB <> "/%input_base%%modifiers%.pkg")
     (\template -> warnXboxGHWoR sink $ getTargetSong False GHWORPKG template >>= stackIO . build)
-  batchButtonLoosePS3 sink $ \dout -> do
+  batchButtonLoosePS3 sink \dout -> do
     warnXboxGHWoR sink $ getTargetSong False (const $ GHWORLoosePS3 dout) "" >>= stackIO . build
-  FL.end pack
-  FL.setResizable tab $ Just pack
+  [C.block| void { $(Fl_Pack* pack)->end(); } |]
+  [C.block| void { $(Fl_Group* tab)->resizable($(Fl_Pack* pack)); } |]
   return ()
 
 batchPageRR
-  :: (?preferences :: Preferences)
+  :: (?preferences :: Preferences, ?loc :: L)
   => (Event -> IO ())
   -> Rectangle
-  -> FL.Ref FL.Group
+  -> Ptr Fl_Group
   -> ((Project -> ((TargetRR FilePath, RRCreate), SongYaml FilePath)) -> IO ())
   -> IO ()
 batchPageRR sink rect tab build = do
-  pack <- FL.packNew rect Nothing
-  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) $ \rect' -> let
-    centerRect = trimClock 0 250 0 250 rect'
-    in centerFixed rect' $ speedPercent True centerRect
-  getProTo4 <- padded 5 10 5 10 (Size (Width 800) (Height 35)) $ \rect' -> do
+  pack <- withRect rect \px py pw ph ->
+    [C.exp| Fl_Pack* { new Fl_Pack($(int px), $(int py), $(int pw), $(int ph)) } |]
+  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) \rect' ->
+    centerFixed rect' $ speedPercent True (trimClock 0 250 0 250 rect')
+  getProTo4 <- padded 5 10 5 10 (Size (Width 800) (Height 35)) \rect' -> do
     fn <- horizRadio rect'
-      [ ("Pro Drums to 6 pad", False, False)
-      , ("Pro Drums to 4 pad", True, True)
+      [ (l10n "batch-tab-rr-drums-6pad", False, False)
+      , (l10n "batch-tab-rr-drums-4pad", True, True)
       ]
     return $ fromMaybe False <$> fn
   let getTargetSong isXbox usePath template = do
         speed <- stackIO getSpeed
         proTo4 <- stackIO getProTo4
         newPreferences <- readPreferences
-        return $ \proj -> let
-          hasPart p = isJust $ HM.lookup p (projectSongYaml proj).parts.getParts >>= anyFiveFret
+        return \proj -> let
+          hasPart p = isJust $ HM.lookup p proj.projectSongYaml.parts.getParts >>= anyFiveFret
           pickedGuitar = find hasPart
             [ F.PartGuitar
             , F.PartName "rhythm"
@@ -505,58 +505,55 @@ batchPageRR sink rect tab build = do
             ]
           defRR = def :: TargetRR FilePath
           tgt = (defRR :: TargetRR FilePath)
-            { common = defRR.common
-              { speed = Just speed
-              }
-            , guitar = fromMaybe defRR.guitar pickedGuitar
-            , bass = fromMaybe defRR.bass $ pickedBass <|> pickedGuitar
-            , drums = getDrumsOrDance $ projectSongYaml proj
-            , proTo4 = proTo4
-            }
+            & #common % #speed .~ Just speed
+            & #guitar          .~ fromMaybe defRR.guitar pickedGuitar
+            & #bass            .~ fromMaybe defRR.bass (pickedBass <|> pickedGuitar)
+            & #drums           .~ getDrumsOrDance proj.projectSongYaml
+            & #proTo4          .~ proTo4
           fout = (if isXbox then trimXbox newPreferences else id) $ T.unpack $ foldr ($) template
             [ templateApplyInput proj $ Just $ RR tgt
             , let
               modifiers = T.concat
-                [ T.pack $ case tgt.common.speed of
+                [ T.pack case tgt.common.speed of
                   Just n | n /= 1 -> "_" <> show (round $ n * 100 :: Int)
                   _               -> ""
                 ]
               in T.intercalate modifiers . T.splitOn "%modifiers%"
             ]
-          in ((tgt, usePath fout), projectSongYaml proj)
+          in ((tgt, usePath fout), proj.projectSongYaml)
   makeTemplateRunner
     sink
-    "Create Xbox 360 LIVE files"
+    (l10n "batch-task-360-live")
     (maybe "%input_dir%" T.pack ?preferences.prefDirRB <> "/%input_base%%modifiers%_rr")
     (\template -> sink $ EventOnyx $ getTargetSong True RRLIVE template >>= stackIO . build)
   makeTemplateRunner
     sink
-    "Create RPCS3 PKG files"
+    (l10n "batch-task-rpcs3-pkg")
     (maybe "%input_dir%" T.pack ?preferences.prefDirRB <> "/%input_base%%modifiers%.pkg")
     (\template -> sink $ EventOnyx $ getTargetSong False RRPKG template >>= stackIO . build)
-  FL.end pack
-  FL.setResizable tab $ Just pack
+  [C.block| void { $(Fl_Pack* pack)->end(); } |]
+  [C.block| void { $(Fl_Group* tab)->resizable($(Fl_Pack* pack)); } |]
   return ()
 
 batchPageRB2
-  :: (?preferences :: Preferences)
+  :: (?preferences :: Preferences, ?loc :: L)
   => (Event -> IO ())
   -> Rectangle
-  -> FL.Ref FL.Group
+  -> Ptr Fl_Group
   -> ((Project -> ([(TargetRB2 FilePath, RB2Create)], SongYaml FilePath)) -> IO ())
   -> IO ()
 batchPageRB2 sink rect tab build = do
-  pack <- FL.packNew rect Nothing
-  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) $ \rect' -> let
-    centerRect = trimClock 0 250 0 250 rect'
-    in centerFixed rect' $ speedPercent True centerRect
-  getPreset <- padded 5 10 5 10 (Size (Width 800) (Height 35)) $ \rect' -> do
+  pack <- withRect rect \px py pw ph ->
+    [C.exp| Fl_Pack* { new Fl_Pack($(int px), $(int py), $(int pw), $(int ph)) } |]
+  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) \rect' ->
+    centerFixed rect' $ speedPercent True (trimClock 0 250 0 250 rect')
+  getPreset <- padded 5 10 5 10 (Size (Width 800) (Height 35)) \rect' -> do
     makePresetDropdown rect' batchPartPresetsRB2
-  getKicks <- padded 5 10 5 10 (Size (Width 800) (Height 35)) $ \rect' -> do
+  getKicks <- padded 5 10 5 10 (Size (Width 800) (Height 35)) \rect' -> do
     fn <- horizRadio rect'
-      [ ("1x Bass Pedal", Kicks1x, False)
-      , ("2x Bass Pedal", Kicks2x, False)
-      , ("Both", KicksBoth, True)
+      [ (l10n "bass-pedal-1x", Kicks1x, False)
+      , (l10n "bass-pedal-2x", Kicks2x, False)
+      , (l10n "bass-pedal-both-output", KicksBoth, True)
       ]
     return $ fromMaybe KicksBoth <$> fn
   let getTargetSong isXbox usePath template = do
@@ -564,19 +561,17 @@ batchPageRB2 sink rect tab build = do
         preset <- stackIO getPreset
         kicks <- stackIO getKicks
         newPreferences <- readPreferences
-        return $ \proj -> let
-          tgt = preset yaml def
-            { common      = (def :: TargetRB2 FilePath).common
-              { speed   = Just speed
-              , label2x = newPreferences.prefLabel2x
-              }
-            , legalTempos = newPreferences.prefLegalTempos
-            , magma       = newPreferences.prefMagma
-            , songID      = if newPreferences.prefRBNumberID
-              then SongIDAutoInt
-              else SongIDAutoSymbol
-            , ps3Encrypt  = newPreferences.prefPS3Encrypt
-            }
+        return \proj -> let
+          tgt = preset yaml $ def
+            & #common % #speed   .~ Just speed
+            & #common % #label2x .~ newPreferences.prefLabel2x
+            & #legalTempos       .~ newPreferences.prefLegalTempos
+            & #magma             .~ newPreferences.prefMagma
+            & #songID            .~ do
+              if newPreferences.prefRBNumberID
+                then SongIDAutoInt
+                else SongIDAutoSymbol
+            & #ps3Encrypt        .~ newPreferences.prefPS3Encrypt
           -- TODO need to use anyDrums
           kicksConfigs = case (kicks, maybe Kicks1x (.kicks) $ getPart F.PartDrums yaml >>= (.drums)) of
             (_        , Kicks1x) -> [(False, ""   )]
@@ -587,66 +582,61 @@ batchPageRB2 sink rect tab build = do
             [ templateApplyInput proj $ Just $ RB2 tgt
             , let
               modifiers = T.concat
-                [ T.pack $ case tgt.common.speed of
+                [ T.pack case tgt.common.speed of
                   Just n | n /= 1 -> "_" <> show (round $ n * 100 :: Int)
                   _               -> ""
                 , kicksLabel
                 ]
               in T.intercalate modifiers . T.splitOn "%modifiers%"
             ]
-          yaml
-            = forceProDrums
-            $ projectSongYaml proj
+          yaml = forceProDrums proj.projectSongYaml
           in
-            ( [ ((tgt :: TargetRB2 FilePath) { is2xBassPedal = is2x }, usePath $ fout kicksLabel)
+            ( [ ((tgt :: TargetRB2 FilePath) & #is2xBassPedal .~ is2x, usePath $ fout kicksLabel)
               | (is2x, kicksLabel) <- kicksConfigs
               ]
             , yaml
             )
   makeTemplateRunner
     sink
-    "Create Xbox 360 CON files"
+    (l10n "batch-task-360-con")
     (maybe "%input_dir%" T.pack ?preferences.prefDirRB <> "/%input_base%%modifiers%_rb2con")
     (\template -> sink $ EventOnyx $ getTargetSong True RB2CON template >>= stackIO . build)
   makeTemplateRunner
     sink
-    "Create PS3 PKG files"
+    (l10n "batch-task-ps3-pkg")
     (maybe "%input_dir%" T.pack ?preferences.prefDirRB <> "/%input_base%%modifiers%.pkg")
     (\template -> sink $ EventOnyx $ getTargetSong False RB2PKG template >>= stackIO . build)
-  batchButtonLoosePS3 sink $ \dout -> do
+  batchButtonLoosePS3 sink \dout -> do
     sink $ EventOnyx $ getTargetSong False (const $ RB2LoosePS3 dout) "" >>= stackIO . build
-  FL.end pack
-  FL.setResizable tab $ Just pack
+  [C.block| void { $(Fl_Pack* pack)->end(); } |]
+  [C.block| void { $(Fl_Group* tab)->resizable($(Fl_Pack* pack)); } |]
   return ()
 
 batchPagePS
-  :: (?preferences :: Preferences)
+  :: (?preferences :: Preferences, ?loc :: L)
   => (Event -> IO ())
   -> Rectangle
-  -> FL.Ref FL.Group
+  -> Ptr Fl_Group
   -> ((Project -> (TargetPS FilePath, PSCreate)) -> IO ())
   -> IO ()
 batchPagePS sink rect tab build = do
-  pack <- FL.packNew rect Nothing
-  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) $ \rect' -> let
-    centerRect = trimClock 0 250 0 250 rect'
-    in centerFixed rect' $ speedPercent True centerRect
-  getPreset <- padded 5 10 5 10 (Size (Width 800) (Height 35)) $ \rect' -> do
+  pack <- withRect rect \px py pw ph ->
+    [C.exp| Fl_Pack* { new Fl_Pack($(int px), $(int py), $(int pw), $(int ph)) } |]
+  getSpeed <- padded 10 0 5 0 (Size (Width 800) (Height 35)) \rect' ->
+    centerFixed rect' $ speedPercent True (trimClock 0 250 0 250 rect')
+  getPreset <- padded 5 10 5 10 (Size (Width 800) (Height 35)) \rect' -> do
     makePresetDropdown rect' batchPartPresetsCH
   let getTargetSong usePath template = do
         speed <- getSpeed
         preset <- getPreset
-        return $ \proj -> let
+        return \proj -> let
           defPS = def :: TargetPS FilePath
-          tgt = preset (projectSongYaml proj) defPS
-            { common = defPS.common
-              { speed = Just speed
-              }
-            }
+          tgt = preset proj.projectSongYaml
+            $ defPS & #common % #speed .~ Just speed
           fout = T.unpack $ foldr ($) template
             [ templateApplyInput proj $ Just $ PS tgt
             , let
-              modifiers = T.pack $ case tgt.common.speed of
+              modifiers = T.pack case tgt.common.speed of
                 Just n | n /= 1 -> "_" <> show (round $ n * 100 :: Int)
                 _               -> ""
               in T.intercalate modifiers . T.splitOn "%modifiers%"
@@ -654,35 +644,27 @@ batchPagePS sink rect tab build = do
           in (tgt, usePath fout)
   makeTemplateRunner
     sink
-    "Create CH folders"
+    (l10n "batch-task-ch-folder")
     (maybe "%input_dir%" T.pack ?preferences.prefDirCH <> "/%artist% - %title%")
     (getTargetSong PSDir >=> build)
   makeTemplateRunner
     sink
-    "Create CH .sng files"
+    (l10n "batch-task-ch-sng")
     (maybe "%input_dir%" T.pack ?preferences.prefDirCH <> "/%artist% - %title%.sng")
     (getTargetSong PSSng >=> build)
   makeTemplateRunner
     sink
-    "Create CH zips"
+    (l10n "batch-task-ch-zip")
     (maybe "%input_dir%" T.pack ?preferences.prefDirCH <> "/%input_base%%modifiers%_ps.zip")
     (getTargetSong PSZip >=> build)
-  FL.end pack
-  FL.setResizable tab $ Just pack
+  [C.block| void { $(Fl_Pack* pack)->end(); } |]
+  [C.block| void { $(Fl_Group* tab)->resizable($(Fl_Pack* pack)); } |]
   return ()
 
 forceProDrums :: SongYaml f -> SongYaml f
-forceProDrums song = song
-  { parts = flip fmap song.parts $ \part -> case part.drums of
-    Nothing    -> part
-    Just drums -> part
-      { drums = Just drums
-        { mode = case drums.mode of
-          Drums4 -> DrumsPro
-          mode   -> mode
-        }
-      }
-  }
+forceProDrums = #parts % mapped % #drums % mapped % #mode %~ \case
+  Drums4 -> DrumsPro
+  mode   -> mode
 
 -- Batch mode presets for changing parts around
 
@@ -695,123 +677,120 @@ getDrumsOrDance song
     = F.PartName "dance"
   | otherwise = F.PartDrums
 
-batchPartPresetsRB3 :: [(T.Text, (Bool, SongYaml f -> TargetRB3 f -> TargetRB3 f))]
+batchPartPresetsRB3 :: (?loc :: L) => [(T.Text, (Bool, SongYaml f -> TargetRB3 f -> TargetRB3 f))]
 batchPartPresetsRB3 =
-  [ ("Default part configuration", (True, \song tgt -> tgt
-    { drums = getDrumsOrDance song
-    }))
-  , ("Fill empty parts with first guitar, then drums", (False, \song tgt -> let
+  [ (l10n "batch-configuration-default", (True, \song tgt -> tgt
+    & #drums .~ getDrumsOrDance song
+    ))
+  , (l10n "batch-configuration-rb3-fill-guitar-drums", (False, \song tgt -> let
     fillPart p defPart parts = case filter (hasPartWith p song) (defPart : parts) of
       part : _ -> part
       []       -> defPart
     in tgt
-      { guitar = fillPart anyFiveFret F.PartGuitar [F.PartDrums, F.PartName "dance"]
-      , bass = fillPart anyFiveFret F.PartBass [F.PartGuitar, F.PartDrums, F.PartName "dance"]
-      , keys = fillPart anyFiveFret F.PartKeys [F.PartGuitar, F.PartDrums, F.PartName "dance"]
-      , drums = fillPart anyDrums F.PartDrums [F.PartGuitar, F.PartName "dance"]
-      }))
-  , ("Copy guitar to bass/keys/drums", (False, \_song tgt -> tgt
-    { bass = F.PartGuitar
-    , keys = F.PartGuitar
-    , drums = F.PartGuitar
-    }))
-  , ("Copy drums/dance to guitar/bass/keys", (False, \song tgt -> let
+      & #guitar .~ fillPart anyFiveFret F.PartGuitar [F.PartDrums, F.PartName "dance"]
+      & #bass   .~ fillPart anyFiveFret F.PartBass [F.PartGuitar, F.PartDrums, F.PartName "dance"]
+      & #keys   .~ fillPart anyFiveFret F.PartKeys [F.PartGuitar, F.PartDrums, F.PartName "dance"]
+      & #drums  .~ fillPart anyDrums F.PartDrums [F.PartGuitar, F.PartName "dance"]
+      ))
+  , (l10n "batch-configuration-rb3-fill-guitar", (False, \_song tgt -> tgt
+    & #bass  .~ F.PartGuitar
+    & #keys  .~ F.PartGuitar
+    & #drums .~ F.PartGuitar
+    ))
+  , (l10n "batch-configuration-rb3-fill-drums", (False, \song tgt -> let
     dod = getDrumsOrDance song
     in tgt
-      { guitar = dod
-      , bass   = dod
-      , keys   = dod
-      , drums  = dod
-      }
+      & #guitar .~ dod
+      & #bass   .~ dod
+      & #keys   .~ dod
+      & #drums  .~ dod
     ))
   ]
 
-batchPartPresetsRB2 :: [(T.Text, SongYaml f -> TargetRB2 f -> TargetRB2 f)]
+batchPartPresetsRB2 :: (?loc :: L) => [(T.Text, SongYaml f -> TargetRB2 f -> TargetRB2 f)]
 batchPartPresetsRB2 =
-  [ ("Default part configuration", \song tgt -> tgt
-    { drums = getDrumsOrDance song
-    })
-  , ("Copy guitar to bass if empty", \song tgt -> tgt
-    { bass = if hasPartWith anyFiveFret song F.PartBass then F.PartBass else F.PartGuitar
-    , drums = getDrumsOrDance song
-    })
-  , ("Copy guitar to bass", \song tgt -> tgt
-    { bass = F.PartGuitar
-    , drums = getDrumsOrDance song
-    })
-  , ("Keys on guitar/bass if empty", \song tgt -> tgt
-    { guitar = if hasPartWith anyFiveFret song F.PartGuitar then F.PartGuitar else F.PartKeys
-    , bass   = if hasPartWith anyFiveFret song F.PartBass   then F.PartBass   else F.PartKeys
-    , drums = getDrumsOrDance song
-    })
-  , ("Keys on guitar", \song tgt -> tgt
-    { guitar = F.PartKeys
-    , drums = getDrumsOrDance song
-    })
-  , ("Keys on bass", \song tgt -> tgt
-    { bass = F.PartKeys
-    , drums = getDrumsOrDance song
-    })
-  , ("Copy drums/dance to guitar/bass if empty", \song tgt -> let
-    dod = getDrumsOrDance song
-    in tgt
-      { guitar = if hasPartWith anyFiveFret song F.PartGuitar then F.PartGuitar else dod
-      , bass   = if hasPartWith anyFiveFret song F.PartBass   then F.PartBass   else dod
-      , drums  = dod
-      }
+  [ (l10n "batch-configuration-default", \song tgt -> tgt
+    & #drums .~ getDrumsOrDance song
     )
-  , ("Copy drums/dance to guitar/bass", \song tgt -> let
+  , (l10n "batch-configuration-rb2-guitar-to-bass-empty", \song tgt -> tgt
+    & #bass .~ do
+      if hasPartWith anyFiveFret song F.PartBass then F.PartBass else F.PartGuitar
+    & #drums .~ getDrumsOrDance song
+    )
+  , (l10n "batch-configuration-rb2-guitar-to-bass", \song tgt -> tgt
+    & #bass .~ F.PartGuitar
+    & #drums .~ getDrumsOrDance song
+    )
+  , (l10n "batch-configuration-rb2-keys-to-guitar-bass-empty", \song tgt -> tgt
+    & #guitar .~ do
+      if hasPartWith anyFiveFret song F.PartGuitar then F.PartGuitar else F.PartKeys
+    & #bass   .~ do
+      if hasPartWith anyFiveFret song F.PartBass   then F.PartBass   else F.PartKeys
+    & #drums  .~ getDrumsOrDance song
+    )
+  , (l10n "batch-configuration-rb2-keys-to-guitar", \song tgt -> tgt
+    & #guitar .~ F.PartKeys
+    & #drums .~ getDrumsOrDance song
+    )
+  , (l10n "batch-configuration-rb2-keys-to-bass", \song tgt -> tgt
+    & #bass .~ F.PartKeys
+    & #drums .~ getDrumsOrDance song
+    )
+  , (l10n "batch-configuration-rb2-drums-to-guitar-bass-empty", \song tgt -> let
     dod = getDrumsOrDance song
     in tgt
-      { guitar = dod
-      , bass   = dod
-      , drums  = dod
-      }
+      & #guitar .~ do
+        if hasPartWith anyFiveFret song F.PartGuitar then F.PartGuitar else dod
+      & #bass   .~ do
+        if hasPartWith anyFiveFret song F.PartBass   then F.PartBass   else dod
+      & #drums  .~ dod
+    )
+  , (l10n "batch-configuration-rb2-drums-to-guitar-bass", \song tgt -> let
+    dod = getDrumsOrDance song
+    in tgt
+      & #guitar .~ dod
+      & #bass   .~ dod
+      & #drums  .~ dod
     )
   ]
 
-batchPartPresetsCH :: [(T.Text, SongYaml f -> TargetPS f -> TargetPS f)]
+batchPartPresetsCH :: (?loc :: L) => [(T.Text, SongYaml f -> TargetPS f -> TargetPS f)]
 batchPartPresetsCH =
-  [ ("Default part configuration", \song tgt -> tgt
-    { drums = getDrumsOrDance song
-    })
-  , ("Copy drums/dance to guitar if empty", \song tgt -> let
+  [ (l10n "batch-configuration-default", \song tgt -> tgt
+    & #drums .~ getDrumsOrDance song
+    )
+  , (l10n "batch-configuration-ch-drums-to-guitar-empty", \song tgt -> let
     dod = getDrumsOrDance song
     in tgt
-      { guitar = if hasPartWith anyFiveFret song F.PartGuitar then F.PartGuitar else dod
-      , drums = dod
-      }
+      & #guitar .~ do
+        if hasPartWith anyFiveFret song F.PartGuitar then F.PartGuitar else dod
+      & #drums .~ dod
     )
-  , ("Copy drums/dance to guitar", \song tgt -> let
+  , (l10n "batch-configuration-ch-drums-to-guitar", \song tgt -> let
     dod = getDrumsOrDance song
     in tgt
-      { guitar = dod
-      , drums = dod
-      }
+      & #guitar .~ dod
+      & #drums .~ dod
     )
-  , ("Copy drums/dance to rhythm if empty", \song tgt -> let
+  , (l10n "batch-configuration-ch-drums-to-rhythm-empty", \song tgt -> let
     dod = getDrumsOrDance song
     in tgt
-      { rhythm = if hasPartWith anyFiveFret song $ F.PartName "rhythm" then F.PartName "rhythm" else dod
-      , drums = dod
-      }
+      & #rhythm .~ do
+        if hasPartWith anyFiveFret song $ F.PartName "rhythm" then F.PartName "rhythm" else dod
+      & #drums .~ dod
     )
-  , ("Copy drums/dance to rhythm", \song tgt -> let
+  , (l10n "batch-configuration-ch-drums-to-rhythm", \song tgt -> let
     dod = getDrumsOrDance song
     in tgt
-      { rhythm = dod
-      , drums = dod
-      }
+      & #rhythm .~ dod
+      & #drums .~ dod
     )
-  , ("Copy guitar and drums to each other if one is missing", \song tgt -> let
+  , (l10n "batch-configuration-ch-guitar-drums-fill", \song tgt -> let
     fillPart p defPart parts = case filter (hasPartWith p song) (defPart : parts) of
       part : _ -> part
       []       -> defPart
-    TargetPS{..} = tgt
-    in TargetPS
-      { guitar = fillPart anyFiveFret F.PartGuitar [F.PartDrums]
-      , drums = fillPart anyDrums F.PartDrums [F.PartGuitar]
-      , ..
-      }
+    in tgt
+      & #guitar .~ fillPart anyFiveFret F.PartGuitar [F.PartDrums]
+      & #drums .~ fillPart anyDrums F.PartDrums [F.PartGuitar]
     )
   ]

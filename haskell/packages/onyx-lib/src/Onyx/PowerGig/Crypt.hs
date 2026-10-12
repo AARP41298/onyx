@@ -1,6 +1,10 @@
-{-# LANGUAGE MultiWayIf        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE MultiWayIf          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
 module Onyx.PowerGig.Crypt where
 
 import           Control.Monad
@@ -76,7 +80,7 @@ encryptE2 input = do
   let ivBytes       = B.pack [0xf1,0xad,0x72,0x5b,0xc7,0xee,0x83,0x20,0xbf,0xab,0xbb,0xf7,0xf2,0x91,0x5a,0xc0]
       cipherBytes   = B.pack [0x17,0x96,0x1,0xfa,0x33,0xb1,0xee,0x2a,0xd,0x20,0xea,0xed,0xc8,0x37,0xc8,0x12,0xf1,0x1,0x4d,0xb5,0x20,0x57,0x54,0x1e,0xac,0xc,0x22,0xe8,0xd6,0x94,0xd8,0x7c]
       headerIVBytes = B.pack [0x67,0xe9,0x85,0xe1,0x24,0x5e,0xb7,0x98,0x6e,0xec,0xee,0x0c,0x55,0xf9,0xb2,0x2c]
-      line4         = BL.toStrict $ runPut $ do
+      line4         = BL.toStrict $ runPut do
         putWord32le $ fromIntegral $ B.length input
         putWord32le 0
         putWord32le 2
@@ -113,17 +117,17 @@ data PGHeader = PGHeader
 
 instance Bin PGHeader where
   bin = do
-    h_Magic             <- h_Magic             =. word32le
-    h_Version           <- h_Version           =. word32le
-    h_BlockSize         <- h_BlockSize         =. word32le
-    h_NumFiles          <- h_NumFiles          =. word32le
-    h_FilesOffset       <- h_FilesOffset       =. word32le
-    h_NumDirs           <- h_NumDirs           =. word32le
-    h_DirsOffset        <- h_DirsOffset        =. word32le
-    h_NumStrings        <- h_NumStrings        =. word32le
-    h_StringTableOffset <- h_StringTableOffset =. word32le
-    h_StringTableSize   <- h_StringTableSize   =. word32le
-    h_NumOffsets        <- h_NumOffsets        =. word32le
+    h_Magic             <- (.h_Magic)             =. word32le
+    h_Version           <- (.h_Version)           =. word32le
+    h_BlockSize         <- (.h_BlockSize)         =. word32le
+    h_NumFiles          <- (.h_NumFiles)          =. word32le
+    h_FilesOffset       <- (.h_FilesOffset)       =. word32le
+    h_NumDirs           <- (.h_NumDirs)           =. word32le
+    h_DirsOffset        <- (.h_DirsOffset)        =. word32le
+    h_NumStrings        <- (.h_NumStrings)        =. word32le
+    h_StringTableOffset <- (.h_StringTableOffset) =. word32le
+    h_StringTableSize   <- (.h_StringTableSize)   =. word32le
+    h_NumOffsets        <- (.h_NumOffsets)        =. word32le
     return PGHeader{..}
 
 data PGFileEntry = PGFileEntry
@@ -139,14 +143,14 @@ data PGFileEntry = PGFileEntry
 
 instance Bin PGFileEntry where
   bin = do
-    fe_Lua       <- fe_Lua       =. word16le
-    fe_PathHash  <- fe_PathHash  =. word32le
-    fe_DirNum    <- fe_DirNum    =. word16le
-    fe_StringNum <- fe_StringNum =. word32le
-    fe_OffsetNum <- fe_OffsetNum =. word32le
-    fe_Size      <- fe_Size      =. int64le
-    fe_FileHash  <- fe_FileHash  =. byteString 16
-    fe_Time      <- fe_Time      =. int64le
+    fe_Lua       <- (.fe_Lua)       =. word16le
+    fe_PathHash  <- (.fe_PathHash)  =. word32le
+    fe_DirNum    <- (.fe_DirNum)    =. word16le
+    fe_StringNum <- (.fe_StringNum) =. word32le
+    fe_OffsetNum <- (.fe_OffsetNum) =. word32le
+    fe_Size      <- (.fe_Size)      =. int64le
+    fe_FileHash  <- (.fe_FileHash)  =. byteString 16
+    fe_Time      <- (.fe_Time)      =. int64le
     return PGFileEntry{..}
 
 data PGDirEntry = PGDirEntry
@@ -157,9 +161,9 @@ data PGDirEntry = PGDirEntry
 
 instance Bin PGDirEntry where
   bin = do
-    de_PathHash  <- de_PathHash  =. word32le
-    de_Parent    <- de_Parent    =. int32le
-    de_StringNum <- de_StringNum =. word32le
+    de_PathHash  <- (.de_PathHash)  =. word32le
+    de_Parent    <- (.de_Parent)    =. int32le
+    de_StringNum <- (.de_StringNum) =. word32le
     return PGDirEntry{..}
 
 data PGOffsetEntry = PGOffsetEntry
@@ -170,9 +174,9 @@ data PGOffsetEntry = PGOffsetEntry
 
 instance Bin PGOffsetEntry where
   bin = do
-    oe_PKOffset <- oe_PKOffset =. word32le
-    oe_PKNum    <- oe_PKNum    =. word16le
-    oe_Copies   <- oe_Copies   =. word16le
+    oe_PKOffset <- (.oe_PKOffset) =. word32le
+    oe_PKNum    <- (.oe_PKNum)    =. word16le
+    oe_Copies   <- (.oe_Copies)   =. word16le
     return PGOffsetEntry{..}
 
 data FullHeader = FullHeader
@@ -191,11 +195,11 @@ readHeader :: (MonadFail m) => BL.ByteString -> m FullHeader
 readHeader bs = let
   getter = do
     hdr <- codecIn bin
-    hc_Files   <- V.fromList <$> replicateM (fromIntegral $ h_NumFiles hdr) (codecIn bin)
-    hc_Dirs    <- V.fromList <$> replicateM (fromIntegral $ h_NumDirs hdr) (codecIn bin)
-    hc_Strings <- V.fromList . take (fromIntegral $ h_NumStrings hdr) . B.split 0
-      <$> getByteString (fromIntegral $ h_StringTableSize hdr)
-    hc_Offsets <- V.fromList <$> replicateM (fromIntegral $ h_NumOffsets hdr) (codecIn bin)
+    hc_Files   <- V.fromList <$> replicateM (fromIntegral hdr.h_NumFiles) (codecIn bin)
+    hc_Dirs    <- V.fromList <$> replicateM (fromIntegral hdr.h_NumDirs) (codecIn bin)
+    hc_Strings <- V.fromList . take (fromIntegral hdr.h_NumStrings) . B.split 0
+      <$> getByteString (fromIntegral hdr.h_StringTableSize)
+    hc_Offsets <- V.fromList <$> replicateM (fromIntegral hdr.h_NumOffsets) (codecIn bin)
     return FullHeader { fh_Header = hdr, fh_Contents = HeaderContents{..} }
   in case runGetOrFail getter bs of
     Right (_, _, x) -> return x
@@ -203,22 +207,22 @@ readHeader bs = let
 
 buildHeader :: HeaderContents -> BL.ByteString
 buildHeader hc = let
-  files = runPut $ mapM_ (codecOut bin) $ V.toList $ hc_Files hc
-  dirs  = runPut $ mapM_ (codecOut bin) $ V.toList $ hc_Dirs hc
-  strings = BL.fromChunks $ concatMap (\b -> [b, "\0"]) $ V.toList $ hc_Strings hc
-  offsets = runPut $ mapM_ (codecOut bin) $ V.toList $ hc_Offsets hc
+  files = runPut $ mapM_ (codecOut bin) $ V.toList hc.hc_Files
+  dirs  = runPut $ mapM_ (codecOut bin) $ V.toList hc.hc_Dirs
+  strings = BL.fromChunks $ concatMap (\b -> [b, "\0"]) $ V.toList hc.hc_Strings
+  offsets = runPut $ mapM_ (codecOut bin) $ V.toList hc.hc_Offsets
   newHeader = PGHeader
     { h_Magic             = 0x745
     , h_Version           = 1
     , h_BlockSize         = 1
-    , h_NumFiles          = fromIntegral $ V.length $ hc_Files hc
+    , h_NumFiles          = fromIntegral $ V.length hc.hc_Files
     , h_FilesOffset       = 44
-    , h_NumDirs           = fromIntegral $ V.length $ hc_Dirs hc
-    , h_DirsOffset        = 44 + 0x30 * fromIntegral (V.length $ hc_Files hc)
-    , h_NumStrings        = fromIntegral $ V.length $ hc_Strings hc
+    , h_NumDirs           = fromIntegral $ V.length hc.hc_Dirs
+    , h_DirsOffset        = 44 + 0x30 * fromIntegral (V.length hc.hc_Files)
+    , h_NumStrings        = fromIntegral $ V.length hc.hc_Strings
     , h_StringTableOffset = fromIntegral $ 44 + BL.length files + BL.length dirs
     , h_StringTableSize   = fromIntegral $ BL.length strings
-    , h_NumOffsets        = fromIntegral $ V.length $ hc_Offsets hc
+    , h_NumOffsets        = fromIntegral $ V.length hc.hc_Offsets
     }
   in runPut (void $ codecOut bin newHeader) <> files <> dirs <> strings <> offsets
 
@@ -228,32 +232,32 @@ data PKReference = PKReference
   } deriving (Eq, Show)
 
 pkArchive :: PKReference -> Int
-pkArchive = fromIntegral . oe_PKNum . NE.head . pkOffsetEntries
+pkArchive = fromIntegral . (.oe_PKNum) . NE.head . (.pkOffsetEntries)
 
 pkOffset :: PKReference -> Integer
-pkOffset = fromIntegral . oe_PKOffset . NE.head . pkOffsetEntries
+pkOffset = fromIntegral . (.oe_PKOffset) . NE.head . (.pkOffsetEntries)
 
 pkLength :: PKReference -> Integer
-pkLength = fromIntegral . fe_Size . pkFileEntry
+pkLength = fromIntegral . (.fe_Size) . (.pkFileEntry)
 
 getFolder :: HeaderContents -> Folder B.ByteString PKReference
-getFolder hc = fromFiles $ do
-  f <- V.toList $ hc_Files hc
-  let offset = hc_Offsets hc V.! fromIntegral (fe_OffsetNum f)
-      getString i = hc_Strings hc V.! fromIntegral i
-      path = getParents (fromIntegral $ fe_DirNum f) (return $ getString $ fe_StringNum f)
+getFolder hc = fromFiles do
+  f <- V.toList hc.hc_Files
+  let offset = hc.hc_Offsets V.! fromIntegral f.fe_OffsetNum
+      getString i = hc.hc_Strings V.! fromIntegral i
+      path = getParents (fromIntegral f.fe_DirNum) (return $ getString f.fe_StringNum)
       getParents (-1) cur = cur
       getParents dirNum cur = let
-        dir = hc_Dirs hc V.! dirNum
-        newPath = case getString $ de_StringNum dir of
+        dir = hc.hc_Dirs V.! dirNum
+        newPath = case getString dir.de_StringNum of
           ""  -> cur -- should be at top
           str -> NE.cons str cur
-        in getParents (fromIntegral $ de_Parent dir) newPath
+        in getParents (fromIntegral dir.de_Parent) newPath
       ref = PKReference
         { pkFileEntry = f
         , pkOffsetEntries = offset :| do
-          i <- take (fromIntegral $ oe_Copies offset) [fromIntegral (fe_OffsetNum f) + 1 ..]
-          return $ hc_Offsets hc V.! i
+          i <- take (fromIntegral offset.oe_Copies) [fromIntegral f.fe_OffsetNum + 1 ..]
+          return $ hc.hc_Offsets V.! i
         }
   return (path, ref)
 
@@ -287,34 +291,34 @@ rebuildFullHeader dir = let
     let newDirEntry = PGDirEntry
           { de_PathHash  = hashPath curName
           , de_Parent    = fromIntegral curParentIndex
-          , de_StringNum = stringToIndex $ case curName of
+          , de_StringNum = stringToIndex case curName of
             []    -> ""
             x : _ -> x
           }
-    dirIndex <- gets $ Seq.length . rbsDirs
-    modify $ \rbs -> rbs { rbsDirs = rbsDirs rbs |> newDirEntry }
+    dirIndex <- gets $ Seq.length . (.rbsDirs)
+    modify \rbs -> rbs { rbsDirs = rbs.rbsDirs |> newDirEntry }
     -- then add new file entries
-    forM_ (folderFiles curDir) $ \(fileName, pkref) -> do
-      offsetIndex <- gets $ Seq.length . rbsOffsets
-      let fileEntry = (pkFileEntry pkref)
+    forM_ (folderFiles curDir) \(fileName, pkref) -> do
+      offsetIndex <- gets $ Seq.length . (.rbsOffsets)
+      let fileEntry = pkref.pkFileEntry
             { fe_PathHash  = hashPath $ fileName : curName
             , fe_DirNum    = fromIntegral dirIndex
             , fe_StringNum = stringToIndex fileName
             , fe_OffsetNum = fromIntegral offsetIndex
             }
-      modify $ \rbs -> rbs
-        { rbsOffsets = rbsOffsets rbs >< Seq.fromList (NE.toList $ pkOffsetEntries pkref)
-        , rbsFiles   = rbsFiles rbs |> fileEntry
+      modify \rbs -> rbs
+        { rbsOffsets = rbs.rbsOffsets >< Seq.fromList (NE.toList pkref.pkOffsetEntries)
+        , rbsFiles   = rbs.rbsFiles |> fileEntry
         }
     -- then recurse into subfolders
-    forM_ (folderSubfolders curDir) $ \(folderName, subDir) -> do
+    forM_ (folderSubfolders curDir) \(folderName, subDir) -> do
       go subDir dirIndex (folderName : curName)
   finalState = execState (go dir (-1) []) $ RebuildState Seq.empty Seq.empty Seq.empty
   in HeaderContents
-    { hc_Files = V.fromList $ toList $ rbsFiles finalState
-    , hc_Dirs = V.fromList $ toList $ rbsDirs finalState
+    { hc_Files   = V.fromList $ toList finalState.rbsFiles
+    , hc_Dirs    = V.fromList $ toList finalState.rbsDirs
     , hc_Strings = V.fromList allStrings
-    , hc_Offsets = V.fromList $ toList $ rbsOffsets finalState
+    , hc_Offsets = V.fromList $ toList finalState.rbsOffsets
     }
 
 makeNewPK :: Int -> Folder T.Text Readable -> IO (Folder B.ByteString PKReference, BL.ByteString)
@@ -361,7 +365,7 @@ withPKFiles
 withPKFiles base dir inner = do
   let pkNums = nubOrd $ map pkArchive $ toList dir
       pkPaths = [ base <> ".pk" <> show i | i <- pkNums ]
-  withMany (`withBinaryFile` ReadMode) pkPaths $ \pks -> do
+  withMany (`withBinaryFile` ReadMode) pkPaths \pks -> do
     let pkMapping = Map.fromList $ zip pkNums pks
         getPK i = fromMaybe (error "panic! .pk not loaded") $ Map.lookup i pkMapping
         getReadable ref = subHandle' id (pkOffset ref) (Just $ pkLength ref)
@@ -396,7 +400,7 @@ connectPKFiles extTree base pkTree = let
 decryptPKContents
   :: Folder T.Text Readable
   -> Folder T.Text Readable
-decryptPKContents = modifyFiles $ \(name, r) -> case T.stripSuffix ".e.2" name of
+decryptPKContents = modifyFiles \(name, r) -> case T.stripSuffix ".e.2" name of
   Just name' -> (name', transformBytes (fromMaybe (error "Couldn't decrypt .e.2 file") . decryptE2 . BL.toStrict) r)
   Nothing    -> if ".lua" `T.isSuffixOf` name
     then (name, transformBytes (fromMaybe (error "Couldn't decrypt .lua file") . decryptE2 . BL.toStrict) r)
@@ -405,7 +409,7 @@ decryptPKContents = modifyFiles $ \(name, r) -> case T.stripSuffix ".e.2" name o
 encryptPKContents
   :: Folder T.Text Readable
   -> Folder T.Text Readable
-encryptPKContents = modifyFiles $ \(name, r) -> if ".lua" `T.isSuffixOf` name
+encryptPKContents = modifyFiles \(name, r) -> if ".lua" `T.isSuffixOf` name
   then (name, transformBytes (fromMaybe (error "Couldn't encrypt .lua file") . encryptE2 . BL.toStrict) r)
   else if "_all.xma" `T.isSuffixOf` name
     then (name <> ".e.2", transformBytes (fromMaybe (error "Couldn't encrypt .xma file") . encryptE2 . BL.toStrict) r)

@@ -1,10 +1,11 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
+{-# LANGUAGE OverloadedLabels      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE PatternSynonyms       #-}
 {-# LANGUAGE TupleSections         #-}
-{-# OPTIONS_GHC -fno-warn-ambiguous-fields #-}
 module Onyx.Import.DTXMania where
 
 import           Control.Monad.Extra              (forM, guard, unless)
@@ -15,6 +16,8 @@ import           Data.Default.Class               (def)
 import           Data.Either                      (lefts, rights)
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Foldable                    (toList)
+import           Data.Function                    ((&))
+import           Data.Functor                     ((<&>))
 import qualified Data.HashMap.Strict              as HM
 import qualified Data.HashSet                     as HS
 import           Data.List.NonEmpty               (NonEmpty (..))
@@ -38,6 +41,7 @@ import           Onyx.MIDI.Track.FiveFret
 import           Onyx.Project                     hiding (TargetDTX (..))
 import           Onyx.StackTrace
 import           Onyx.Util.Handle                 (fileReadable)
+import           Optics                           ((.~))
 import qualified Sound.MIDI.Util                  as U
 import qualified System.Directory                 as Dir
 import           System.FilePath                  (takeDirectory, takeExtension,
@@ -47,8 +51,8 @@ dtxConvertDrums, dtxConvertGuitar, dtxConvertBass
   :: DTX -> F.Song (F.OnyxFile U.Beats) -> F.Song (F.OnyxFile U.Beats)
 dtxConvertDrums dtx (F.Song tmap mmap onyx) = let
   importEliteDrums notes = mempty
-    { ED.tdDifficulties = Map.singleton Expert $ let
-      gems = flip RTB.mapMaybe notes $ \case
+    { ED.difficulties = Map.singleton Expert let
+      gems = flip RTB.mapMaybe notes \case
         HihatClose -> Just (ED.Hihat    , ED.GemHihatClosed, VelocityNormal)
         Snare      -> Just (ED.Snare    , ED.GemNormal     , VelocityNormal)
         BassDrum   -> Just (ED.Kick RH  , ED.GemNormal     , VelocityNormal)
@@ -69,13 +73,13 @@ dtxConvertDrums dtx (F.Song tmap mmap onyx) = let
       in ED.makeEliteDifficultyDTX gems'
     }
   in F.Song tmap mmap $ F.editOnyxPart F.PartDrums
-    (\opart -> opart { F.onyxPartEliteDrums = importEliteDrums $ fmap fst $ dtx_Drums dtx })
+    (\opart -> opart { F.onyxPartEliteDrums = importEliteDrums $ fmap fst dtx.dtx_Drums })
     onyx
-dtxConvertGuitar = dtxConvertGB dtx_Guitar dtx_GuitarLong $ \onyx five -> F.editOnyxPart
+dtxConvertGuitar = dtxConvertGB (.dtx_Guitar) (.dtx_GuitarLong) \onyx five -> F.editOnyxPart
   F.PartGuitar
   (\opart -> opart { F.onyxPartGuitar = five })
   onyx
-dtxConvertBass   = dtxConvertGB dtx_Bass   dtx_BassLong   $ \onyx five -> F.editOnyxPart
+dtxConvertBass   = dtxConvertGB (.dtx_Bass  ) (.dtx_BassLong  ) \onyx five -> F.editOnyxPart
   F.PartBass
   (\opart -> opart { F.onyxPartGuitar = five })
   onyx
@@ -95,12 +99,12 @@ dtxConvertGB getter getLong setter dtx (F.Song tmap mmap fixed) = let
       pairs
       (drop 1 pairs)
   guitarToFive notes = mempty
-    { fiveDifficulties = Map.singleton Expert $ emitGuitar5 $ let
-      noSustains = RTB.flatten $ flip fmap notes $ \case
+    { difficulties = Map.singleton Expert $ emitGuitar5 let
+      noSustains = RTB.flatten $ notes <&> \case
         [] -> [((Nothing, Strum), Nothing)]
         xs -> [((Just x , Strum), Nothing) | x <- xs ]
       merged = RTB.merge (Left <$> longLengths) (Right <$> noSustains)
-      in RTB.flatten $ flip fmap (RTB.collectCoincident merged) $ \instant ->
+      in RTB.flatten $ RTB.collectCoincident merged <&> \instant ->
         case lefts instant of
           sustain : _ -> [ (note, Just sustain) | (note, _) <- rights instant ]
           []          -> rights instant
@@ -108,20 +112,20 @@ dtxConvertGB getter getLong setter dtx (F.Song tmap mmap fixed) = let
   in F.Song tmap mmap $ setter fixed $ guitarToFive $ fmap fst $ getter dtx
 
 dtxBaseMIDI :: DTX -> F.Song (F.OnyxFile U.Beats)
-dtxBaseMIDI dtx = F.Song (dtx_TempoMap dtx) (dtx_MeasureMap dtx) mempty
+dtxBaseMIDI dtx = F.Song dtx.dtx_TempoMap dtx.dtx_MeasureMap mempty
 
 dtxAddChipAudio :: (SendMessage m, MonadIO m) => DTX -> FilePath -> StackTraceT m (SongYaml SoftFile -> SongYaml SoftFile)
 dtxAddChipAudio dtx fin = do
-  audio <- fmap catMaybes $ forM (HM.toList $ dtx_WAV dtx) $ \(chip, fp) -> do
+  audio <- fmap catMaybes $ forM (HM.toList dtx.dtx_WAV) \(chip, fp) -> do
     msrc <- dtxAudioSource $ takeDirectory fin </> fp -- already fixed backslashes and yens in readDTXLines
-    return $ flip fmap msrc $ \src -> let
+    return $ msrc <&> \src -> let
       -- could be smarter about this (apply volume later) but this works
-      adjustVolume = case fromMaybe 100 $ HM.lookup chip $ dtx_VOLUME dtx of
+      adjustVolume = case fromMaybe 100 $ HM.lookup chip dtx.dtx_VOLUME of
         100 -> id
         vol -> CA.gain $ realToFrac vol / 100
       fixMono = case CA.channels src of
         1 -> applyPansVols
-          [maybe 0 (\n -> realToFrac n / 100) $ HM.lookup chip $ dtx_PAN dtx]
+          [maybe 0 (\n -> realToFrac n / 100) $ HM.lookup chip dtx.dtx_PAN]
           [0]
         _ -> id
       in (chip, AudioFile AudioInfo
@@ -133,7 +137,7 @@ dtxAddChipAudio dtx fin = do
         , rate = Nothing
         , channels = 2
         })
-  return $ \songYaml -> songYaml { audio = HM.fromList audio }
+  return \songYaml -> songYaml { audio = HM.fromList audio }
 
 dtxMakeAudioPlan :: DTX
   -> (SongYaml SoftFile, F.Song (F.OnyxFile U.Beats))
@@ -149,9 +153,12 @@ dtxMakeAudioPlan dtx (songYaml, mid) = let
         }
       audios = AudioSamples poly
       track = F.SamplesTrack
-        $ fmap (\chip -> F.SampleTrigger "" chip)
-        -- don't include sample if we didn't find its audio
-        $ RTB.filter (\chip -> HS.member chip foundChips) chips
+        { F.sampleTriggers
+          = fmap F.simpleTrigger
+          -- don't include sample if we didn't find its audio
+          $ RTB.filter (\chip -> HS.member chip foundChips) chips
+        , F.sampleNotes = RTB.empty
+        }
       in (Just (name, audios), Just (name, track))
   audioForChipGroups polyphony name chips = if all (RTB.null . snd) chips
     then (Nothing, Nothing)
@@ -161,18 +168,21 @@ dtxMakeAudioPlan dtx (songYaml, mid) = let
         , groupCrossfade = 0.002
         }
       audios = AudioSamples poly
-      track = F.SamplesTrack $ foldr RTB.merge RTB.empty $ do
-        (groupName, groupChips) <- chips
-        return
-          $ fmap (F.SampleTrigger groupName)
-          -- don't include sample if we didn't find its audio
-          $ RTB.filter (\chip -> HS.member chip foundChips) groupChips
+      track = F.SamplesTrack
+        { F.sampleTriggers = foldr RTB.merge RTB.empty do
+          (groupName, groupChips) <- chips
+          return
+            $ fmap (\x -> (F.simpleTrigger x) { F.group = groupName })
+            -- don't include sample if we didn't find its audio
+            $ RTB.filter (\chip -> HS.member chip foundChips) groupChips
+        , F.sampleNotes = RTB.empty
+        }
       in (Just (name, audios), Just (name, track))
   getDrumChipGroup (groupName, lanes)
-    = (groupName, RTB.mapMaybe (\(l, chip) -> guard (elem l lanes) >> Just chip) $ dtx_Drums dtx)
-  (songAudio, songTrack) = audioForChipsOverlap "audio-song" $ dtx_BGM dtx
-  (guitarAudio, guitarTrack) = audioForChipGroups 1 "audio-guitar" [("", snd <$> dtx_Guitar dtx)]
-  (bassAudio, bassTrack) = audioForChipGroups 1 "audio-bass" [("", snd <$> dtx_Bass dtx)]
+    = (groupName, RTB.mapMaybe (\(l, chip) -> guard (elem l lanes) >> Just chip) dtx.dtx_Drums)
+  (songAudio, songTrack) = audioForChipsOverlap "audio-song" dtx.dtx_BGM
+  (guitarAudio, guitarTrack) = audioForChipGroups 1 "audio-guitar" [("", snd <$> dtx.dtx_Guitar)]
+  (bassAudio, bassTrack) = audioForChipGroups 1 "audio-bass" [("", snd <$> dtx.dtx_Bass)]
   -- giving each drum lane polyphony 2 based on info at
   -- https://osdn.net/projects/dtxmania/wiki/DTX%20data%20format
   (kickAudio, kickTrack) = audioForChipGroups 2 "audio-kick" $ map getDrumChipGroup
@@ -197,13 +207,10 @@ dtxMakeAudioPlan dtx (songYaml, mid) = let
   -- LP notes should cut off any previous HH notes, and HHC should cut off HHO.
   -- but this implementation does mean HHC only has polyphony 1 - should revisit in future
   hihatSilencer = Just ("hihat-silencer", AudioSnippet $ Silence 2 $ CA.Frames 0)
-  hihatSilencerTrigger = F.SampleTrigger
-    { sampleGroup = "HH"
-    , sampleAudio = "hihat-silencer"
-    }
-  cymbalTrack' = flip fmap cymbalTrack $ fmap $ \trk -> trk
+  hihatSilencerTrigger = (F.simpleTrigger "hihat-silencer") { F.group = "HH" }
+  cymbalTrack' = cymbalTrack <&> fmap \trk -> trk
     { F.sampleTriggers = RTB.merge trk.sampleTriggers $
-      RTB.flatten $ flip fmap (RTB.collectCoincident $ dtx_Drums dtx) $ \instant ->
+      RTB.flatten $ RTB.collectCoincident dtx.dtx_Drums <&> \instant ->
         if any (\(lane, _) -> elem lane [LeftPedal, HihatClose]) instant
           then case length $ filter (\(lane, _) -> elem lane [HihatClose, HihatOpen]) instant of
             0 -> [hihatSilencerTrigger, hihatSilencerTrigger]
@@ -211,7 +218,7 @@ dtxMakeAudioPlan dtx (songYaml, mid) = let
             _ -> []
           else []
     }
-  extraResults = flip map (HM.toList $ dtx_BGMExtra dtx) $ \(chan, chips) ->
+  extraResults = HM.toList dtx.dtx_BGMExtra <&> \(chan, chips) ->
     audioForChipGroups 1 ("audio-extra-" <> chan) [("", chips)]
   audioExpr name = Input $ Named name
   audiosExpr names = Mix $ fmap (Input . Named) names
@@ -220,24 +227,24 @@ dtxMakeAudioPlan dtx (songYaml, mid) = let
       $ [songAudio, guitarAudio, bassAudio, kickAudio, snareAudio, cymbalAudio, tomAudio, hihatSilencer]
       <> map fst extraResults
     , plans = HM.singleton "dtx" $ StandardPlan StandardPlanInfo
-      { song        = flip fmap songAudio $ \(name, _) -> audioExpr name
+      { song        = songAudio <&> \(name, _) -> audioExpr name
       , parts       = Parts $ HM.fromList $ concat
-        [ toList $ flip fmap guitarAudio $ \(name, _) -> (F.PartGuitar, PartSingle $ audioExpr name)
-        , toList $ flip fmap bassAudio $ \(name, _) -> (F.PartBass, PartSingle $ audioExpr name)
+        [ toList $ guitarAudio <&> \(name, _) -> (F.PartGuitar, PartSingle $ audioExpr name)
+        , toList $ bassAudio <&> \(name, _) -> (F.PartBass, PartSingle $ audioExpr name)
         , toList $ (F.PartDrums ,) <$> case cymbalAudio of
           Just (name, _) -> Just PartDrumKit
-            { kick  = flip fmap kickAudio $ \(n, _) -> audioExpr n
-            , snare = flip fmap snareAudio $ \(n, _) -> audioExpr n
-            , toms  = flip fmap tomAudio $ \(n, _) -> audioExpr n
+            { kick  = kickAudio <&> \(n, _) -> audioExpr n
+            , snare = snareAudio <&> \(n, _) -> audioExpr n
+            , toms  = tomAudio <&> \(n, _) -> audioExpr n
             , kit   = audioExpr name
             }
           Nothing -> do
             xs <- NE.nonEmpty $ catMaybes [kickAudio, snareAudio, cymbalAudio, tomAudio]
-            Just $ PartSingle $ case xs of
+            Just $ PartSingle case xs of
               (name, _) :| [] -> audioExpr name
               _               -> audiosExpr $ fmap fst xs
-        , flip mapMaybe extraResults $ \(extraAudio, _) -> flip fmap extraAudio
-          $ \(name, _) -> (F.PartName name, PartSingle $ audioExpr name)
+        , flip mapMaybe extraResults \(extraAudio, _) -> extraAudio
+          <&> \(name, _) -> (F.PartName name, PartSingle $ audioExpr name)
         ]
       , crowd       = Nothing
       , comments    = []
@@ -255,7 +262,7 @@ dtxMakeAudioPlan dtx (songYaml, mid) = let
   in (songYaml', mid')
 
 importSet :: (SendMessage m, MonadIO m) => FilePath -> StackTraceT m [Import m]
-importSet setDefPath = inside ("Loading DTX set.def from: " <> setDefPath) $ do
+importSet setDefPath = inside ("Loading DTX set.def from: " <> setDefPath) do
   songs <- stackIO $ loadSet setDefPath
   return $ map (importSetDef $ Just setDefPath) songs
 
@@ -267,13 +274,13 @@ importSetDef setDefPath song level = do
   -- TODO need to fix path separators (both backslash and yen)
   let relToSet = maybe id (\sdp -> (takeDirectory sdp </>)) setDefPath
       fs = map (relToSet . T.unpack)
-        $ mapMaybe ($ song) [setL5File, setL4File, setL3File, setL2File, setL1File]
-  diffs <- fmap catMaybes $ forM fs $ \f -> let
+        $ mapMaybe ($ song) [(.setL5File), (.setL4File), (.setL3File), (.setL2File), (.setL1File)]
+  diffs <- fmap catMaybes $ forM fs \f -> let
     fmt = case map toLower $ takeExtension f of
       ".gda" -> FormatGDA
       _      -> FormatDTX
     in stackIO (Dir.doesFileExist f) >>= \case
-      True -> stackIO $ do
+      True -> stackIO do
         dtx <- readDTXLines fmt <$> loadDTXLines f
         return $ Just (f, dtx)
       False -> do
@@ -287,9 +294,9 @@ importSetDef setDefPath song level = do
     ImportQuick -> return id
     ImportFull  -> dtxAddChipAudio topDiffDTX topDiffPath
 
-  let hasDrums  = not . RTB.null . dtx_Drums
-      hasGuitar = not . RTB.null . dtx_Guitar
-      hasBass   = not . RTB.null . dtx_Bass
+  let hasDrums  = not . RTB.null . (.dtx_Drums )
+      hasGuitar = not . RTB.null . (.dtx_Guitar)
+      hasBass   = not . RTB.null . (.dtx_Bass  )
   topDrumDiff <- case filter (hasDrums . snd) diffs of
     []       -> return Nothing
     (path, diff) : _ -> do
@@ -318,7 +325,7 @@ importSetDef setDefPath song level = do
 
   art <- case level of
     ImportQuick -> return Nothing
-    ImportFull  -> case (takeDirectory topDiffPath </>) <$> dtx_PREIMAGE topDiffDTX of
+    ImportFull  -> case (takeDirectory topDiffPath </>) <$> topDiffDTX.dtx_PREIMAGE of
       Nothing -> return Nothing
       Just f  -> stackIO (Dir.doesFileExist f) >>= \case
         False -> do
@@ -329,9 +336,9 @@ importSetDef setDefPath song level = do
           return $ Just $ SoftFile loc $ SoftReadable $ fileReadable f
   video <- case level of
     ImportQuick -> return Nothing
-    ImportFull  -> case dtx_Video topDiffDTX of
+    ImportFull  -> case topDiffDTX.dtx_Video of
       RNil -> return Nothing
-      Wait posn chip RNil -> case HM.lookup chip $ dtx_AVI topDiffDTX of
+      Wait posn chip RNil -> case HM.lookup chip topDiffDTX.dtx_AVI of
         Just videoPath -> let
           fullVideoPath = takeDirectory topDiffPath </> videoPath
           in stackIO (Dir.doesFileExist fullVideoPath) >>= \case
@@ -341,7 +348,7 @@ importSetDef setDefPath song level = do
             True -> return $ Just VideoInfo
               { fileVideo      = SoftFile ("video" <.> takeExtension videoPath)
                 $ SoftReadable $ fileReadable $ takeDirectory topDiffPath </> videoPath
-              , videoStartTime = Just $ negate $ realToFrac $ U.applyTempoMap (dtx_TempoMap topDiffDTX) posn
+              , videoStartTime = Just $ negate $ realToFrac $ U.applyTempoMap topDiffDTX.dtx_TempoMap posn
               , videoEndTime   = Nothing
               , videoLoop      = False
               }
@@ -366,18 +373,19 @@ importSetDef setDefPath song level = do
 
   let yamlWithAudio = addChipAudio SongYaml
         { metadata = def'
-          { title         = case setTitle song of
-            ""    -> dtx_TITLE topDiffDTX
+          { title         = case song.setTitle of
+            ""    -> topDiffDTX.dtx_TITLE
             title -> Just title
-          , artist        = dtx_ARTIST topDiffDTX
-          , loadingPhrase = dtx_COMMENT topDiffDTX
-          , genre         = dtx_GENRE topDiffDTX
+          , artist        = topDiffDTX.dtx_ARTIST
+          , loadingPhrase = topDiffDTX.dtx_COMMENT
+          , genre         = topDiffDTX.dtx_GENRE
           , fileAlbumArt  = art
           }
         , global = def'
           { backgroundVideo = video
           , fileBackgroundImage = Nothing
           , fileMidi = SoftFile "notes.mid" $ SoftChart midiOnyx
+          , fileMidiOriginal = Nothing
           , fileSongAnim = Nothing
           }
         , audio = HM.empty
@@ -385,25 +393,21 @@ importSetDef setDefPath song level = do
         , plans = HM.empty
         , targets = HM.empty
         , parts = Parts $ HM.fromList $ catMaybes
-          [ flip fmap topDrumDiff $ \diff -> (F.PartDrums, emptyPart
-            { drums = Just $ let
-              kicks = if any ((== LeftBass) . fst) $ dtx_Drums diff
-                then KicksBoth
-                else Kicks1x
-              in (emptyPartDrums DrumsElite kicks)
-                { difficulty = translateDifficulty (dtx_DLEVEL diff) (dtx_DLVDEC diff)
-                }
-            })
-          , flip fmap topGuitarDiff $ \diff -> (F.PartGuitar, emptyPart
-            { grybo = Just (def :: ModeFive)
-              { difficulty = translateDifficulty (dtx_GLEVEL diff) (dtx_GLVDEC diff)
-              }
-            })
-          , flip fmap topBassDiff $ \diff -> (F.PartBass, emptyPart
-            { grybo = Just (def :: ModeFive)
-              { difficulty = translateDifficulty (dtx_BLEVEL diff) (dtx_BLVDEC diff)
-              }
-            })
+          [ topDrumDiff <&> \diff -> (F.PartDrums, emptyPart & #drums .~ Just let
+            kicks = if any ((== LeftBass) . fst) diff.dtx_Drums
+              then KicksBoth
+              else Kicks1x
+            in (emptyPartDrums DrumsElite kicks :: ModeDrums SoftFile)
+              & #difficulty .~ translateDifficulty diff.dtx_DLEVEL diff.dtx_DLVDEC
+            )
+          , topGuitarDiff <&> \diff -> (F.PartGuitar, emptyPart & #grybo .~ Just do
+            (def :: ModeFive)
+              & #difficulty .~ translateDifficulty diff.dtx_GLEVEL diff.dtx_GLVDEC
+            )
+          , topBassDiff <&> \diff -> (F.PartBass, emptyPart & #grybo .~ Just do
+            (def :: ModeFive)
+              & #difficulty .~ translateDifficulty diff.dtx_BLEVEL diff.dtx_BLVDEC
+            )
           ]
         }
       (finalSongYaml, finalMidi) = case level of

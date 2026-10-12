@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns          #-}
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE LambdaCase            #-}
@@ -16,7 +17,7 @@ import           Data.Char                        (toLower)
 import qualified Data.EventList.Absolute.TimeBody as ATB
 import qualified Data.EventList.Relative.TimeBody as RTB
 import           Data.Foldable                    (toList)
-import           Data.Functor                     (($>))
+import           Data.Functor                     (($>), (<&>))
 import qualified Data.HashMap.Strict              as HM
 import           Data.List                        (sort, sortOn)
 import qualified Data.Map.Strict                  as Map
@@ -34,7 +35,7 @@ import           Onyx.MIDI.Common
 import qualified Onyx.MIDI.Track.Beat             as Beat
 import qualified Onyx.MIDI.Track.Drums            as D
 import qualified Onyx.MIDI.Track.Drums.Elite      as ED
-import           Onyx.MIDI.Track.Events           (eventsCoda, eventsSections)
+import           Onyx.MIDI.Track.Events           (coda, sections)
 import qualified Onyx.MIDI.Track.File             as F
 import qualified Onyx.MIDI.Track.FiveFret         as Five
 import           Onyx.MIDI.Track.Mania
@@ -121,7 +122,7 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
   drumDiffPairs = (Nothing, "X+") : [ (Just diff, letter) | (diff, letter) <- diffPairs ]
 
   makeLanes colors lanes = let
-    gemToggle gem = U.trackJoin $ flip fmap lanes $ \(gem', t) -> if gem == gem'
+    gemToggle gem = U.trackJoin $ lanes <&> \(gem', t) -> if gem == gem'
       then Wait 0 True $ Wait t False RNil
       else RNil
     gemSingletons = do
@@ -141,8 +142,7 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
     assigned
       = splitEdges
       $ fmap (\(key, len) -> ((), key, len))
-      $ edgeBlips_ minSustainLengthRB
-      $ maniaNotes src
+      $ edgeBlips_ minSustainLengthRB src.notes
     assignedMap :: Map.Map Double (Map.Map Int (PNF.PNF NoteType NoteType))
     assignedMap
       = rtbToMap
@@ -174,7 +174,7 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
       in Wait dt this $ buildStatus this rest
     states = PNF.ManiaState <$> assignedMap
     in do
-      guard $ not $ RTB.null $ maniaNotes src
+      guard $ not $ RTB.null src.notes
       Just $ (\((((a, b), c), d), e) -> PNF.CommonState a b c d e) <$> do
         states
           `PNF.zipStateMaps` Map.empty
@@ -198,8 +198,8 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
     drumPro = let
       ddiff = D.getDrumDifficulty diff thisSrc
       in case pdrums.mode of
-        Drums4     -> (\(gem, vel) -> (gem $> D.Tom, vel)) <$> ddiff
-        Drums5     -> flip fmap ddiff $ \(gem, vel) -> let
+        Drums4     -> ddiff <&> \(gem, vel) -> (gem $> D.Tom, vel)
+        Drums5     -> ddiff <&> \(gem, vel) -> let
           gem' = case gem of
             D.Kick            -> D.Kick
             D.Red             -> D.Red
@@ -212,17 +212,17 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
         DrumsReal  -> D.computePro diff $ D.psRealToPro thisSrc
         DrumsElite -> D.computePro diff thisSrc
     hands = RTB.filter (/= D.Kick) $ fmap fst drumPro
-    (acts, bres) = case fmap (fst . fst) $ RTB.viewL song.tracks.onyxEvents.eventsCoda of
-      Nothing   -> (thisSrc.drumActivation, RTB.empty)
+    (acts, bres) = case fmap (fst . fst) $ RTB.viewL song.tracks.onyxEvents.coda of
+      Nothing   -> (thisSrc.activation, RTB.empty)
       Just coda ->
-        ( U.trackTake coda thisSrc.drumActivation
-        , RTB.delay coda $ U.trackDrop coda thisSrc.drumActivation
+        ( U.trackTake coda thisSrc.activation
+        , RTB.delay coda $ U.trackDrop coda thisSrc.activation
         )
     drumStates = (\((a, b), c) -> PNF.DrumState a b c) <$> do
       (Set.fromList <$> drumMap)
         `PNF.zipStateMaps` (let
-          single = findTremolos hands $ laneDifficulty (fromMaybe Expert diff) thisSrc.drumSingleRoll
-          double = findTrills   hands $ laneDifficulty (fromMaybe Expert diff) thisSrc.drumDoubleRoll
+          single = findTremolos hands $ laneDifficulty (fromMaybe Expert diff) thisSrc.singleRoll
+          double = findTrills   hands $ laneDifficulty (fromMaybe Expert diff) thisSrc.doubleRoll
           in makeLanes (D.Red : (D.Pro <$> each <*> each)) (RTB.merge single double)
           )
         `PNF.zipStateMaps` toggle acts
@@ -231,41 +231,41 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
       guard $ not $ diff == Nothing && pdrums.kicks == Kicks1x
       Just $ (\((((a, b), c), d), e) -> PNF.CommonState a b c d e) <$> do
         drumStates
-          `PNF.zipStateMaps` toggle thisSrc.drumOverdrive
+          `PNF.zipStateMaps` toggle thisSrc.overdrive
           `PNF.zipStateMaps` toggle bres
-          `PNF.zipStateMaps` toggle thisSrc.drumSolo
+          `PNF.zipStateMaps` toggle thisSrc.solo
           `PNF.zipStateMaps` fmap Just beats
 
-  drumTrackTrue fpart pdrums diff = let
+  drumTrackElite fpart pdrums diff = let
     -- TODO if kicks = 2, don't emit an X track, only X+
     thisSrc = maybe mempty (.onyxPartEliteDrums) $ Map.lookup fpart song.tracks.onyxParts
     thisDiff = ED.getDifficulty diff thisSrc
     drumMap :: Map.Map Double [ED.EliteDrumNote ED.FlamStatus]
     drumMap = rtbToMap $ RTB.collectCoincident thisDiff
-    (acts, bres) = case fmap (fst . fst) $ RTB.viewL song.tracks.onyxEvents.eventsCoda of
-      Nothing   -> (ED.tdActivation thisSrc, RTB.empty)
+    (acts, bres) = case fmap (fst . fst) $ RTB.viewL song.tracks.onyxEvents.coda of
+      Nothing   -> (thisSrc.activation, RTB.empty)
       Just coda ->
-        ( U.trackTake coda $ ED.tdActivation thisSrc
-        , RTB.delay coda $ U.trackDrop coda $ ED.tdActivation thisSrc
+        ( U.trackTake coda thisSrc.activation
+        , RTB.delay coda $ U.trackDrop coda thisSrc.activation
         )
     maxSolidOpenTime = 1   :: U.Seconds
     fadeOpenTime     = 0.5 :: U.Seconds
     hihatEvents
       = RTB.collectCoincident
-      $ RTB.mapMaybe (\tdn -> case ED.tdn_gem tdn of
+      $ RTB.mapMaybe (\edn -> case edn.gem of
         ED.HihatFoot
-          | ED.tdn_type tdn == ED.GemHihatOpen   -> Just HihatEventSplash
+          | edn.type_ == ED.GemHihatOpen   -> Just HihatEventSplash
           | otherwise                            -> Just HihatEventStomp
         ED.Hihat
-          | ED.tdn_type tdn == ED.GemHihatClosed -> Just HihatEventHitClosed
-          | ED.tdn_type tdn == ED.GemHihatOpen   -> Just HihatEventHitOpen
+          | edn.type_ == ED.GemHihatClosed -> Just HihatEventHitClosed
+          | edn.type_ == ED.GemHihatOpen   -> Just HihatEventHitOpen
         _                                        -> Nothing
         ) thisDiff
     stomps = Map.union notatedStomps implicitStomps -- Map.union prefers left values in conflict
     notatedStomps
       = rtbToMap
       $ fmap (const $ Just PNF.EliteHihatStompNotated)
-      $ RTB.filter (\tdn -> ED.tdn_gem tdn == ED.HihatFoot) thisDiff
+      $ RTB.filter (\edn -> edn.gem == ED.HihatFoot) thisDiff
     implicitStomps
       = rtbToMapSecs
       $ makeImplicitStomps
@@ -304,7 +304,7 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
       RNil -> RNil
     drumStates = (\((((a, b), c), d), e) -> PNF.EliteDrumState a b c d e) <$> do
       (Set.fromList <$> drumMap)
-        `PNF.zipStateMaps` (makeLanes each $ fmap (\((), gem, len) -> (gem, len)) $ joinEdgesSimple $ ED.tdLanes thisSrc)
+        `PNF.zipStateMaps` (makeLanes each $ fmap (\((), gem, len) -> (gem, len)) $ joinEdgesSimple thisSrc.lanes)
         `PNF.zipStateMaps` toggle acts
         `PNF.zipStateMaps` stomps
         `PNF.zipStateMaps` openZones
@@ -313,9 +313,9 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
       guard $ not $ diff == Nothing && pdrums.kicks == Kicks1x
       Just $ (\((((a, b), c), d), e) -> PNF.CommonState a b c d e) <$> do
         drumStates
-          `PNF.zipStateMaps` toggle (ED.tdOverdrive thisSrc)
+          `PNF.zipStateMaps` toggle thisSrc.overdrive
           `PNF.zipStateMaps` toggle bres
-          `PNF.zipStateMaps` toggle (ED.tdSolo thisSrc)
+          `PNF.zipStateMaps` toggle thisSrc.solo
           `PNF.zipStateMaps` fmap Just beats
 
   fiveTrack :: Difficulty -> FiveResult -> Maybe (Map.Map Double (PNF.CommonState (PNF.GuitarState Double (Maybe Five.Color))))
@@ -325,7 +325,7 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
     assigned :: RTB.T U.Beats (LongNote Bool (Maybe Five.Color, StrumHOPOTap))
     assigned = splitEdges
       $ fmap (\(a, (b, c)) -> (a, b, c))
-      $ applyStatus1 False (RTB.normalize result.other.fiveOverdrive)
+      $ applyStatus1 False (RTB.normalize result.other.overdrive)
       $ thisDiff
     assignedMap :: Map.Map Double (Map.Map (Maybe Five.Color) (PNF.PNF (PNF.GuitarSustain Double) StrumHOPOTap))
     assignedMap
@@ -366,15 +366,15 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
       in At t this $ buildFiveStatus this rest
     fiveStates = (\((a, b), c) -> PNF.GuitarState a b c) <$> do
       assignedMap
-        `PNF.zipStateMaps` (makeLanes (Nothing : map Just each) $ findTremolos ons $ laneDifficulty diff result.other.fiveTremolo)
-        `PNF.zipStateMaps` (makeLanes (Nothing : map Just each) $ findTrills   ons $ laneDifficulty diff result.other.fiveTrill  )
+        `PNF.zipStateMaps` (makeLanes (Nothing : map Just each) $ findTremolos ons $ laneDifficulty diff result.other.tremolo)
+        `PNF.zipStateMaps` (makeLanes (Nothing : map Just each) $ findTrills   ons $ laneDifficulty diff result.other.trill  )
     in do
       guard $ not $ RTB.null thisDiff
       Just $ (\((((a, b), c), d), e) -> PNF.CommonState a b c d e) <$> do
         fiveStates
-          `PNF.zipStateMaps` toggle result.other.fiveOverdrive
-          `PNF.zipStateMaps` toggle result.other.fiveBRE
-          `PNF.zipStateMaps` toggle result.other.fiveSolo
+          `PNF.zipStateMaps` toggle result.other.overdrive
+          `PNF.zipStateMaps` toggle result.other.bre
+          `PNF.zipStateMaps` toggle result.other.solo
           `PNF.zipStateMaps` fmap Just beats
 
   vocalTrack :: (SendMessage m) => F.PartName -> ModeVocal FilePath -> StackTraceT m (Map.Map Double (PNF.CommonState (PNF.VocalState Double)))
@@ -420,7 +420,7 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
             . fmap (\b -> if b then EdgeOn () () else EdgeOff ())
           in map (\(t, ((), (), len)) -> (beatsToDouble t, beatsToDouble (t + len)))
             $ Set.toAscList
-            $ Set.fromList (withBools thisSrc.vocalPhrase1) <> Set.fromList (withBools thisSrc.vocalPhrase2)
+            $ Set.fromList (withBools thisSrc.phrase1) <> Set.fromList (withBools thisSrc.phrase2)
             -- TODO probably make this more resilient so P1 and P2 phrases don't have to exactly coincide
         phrases :: [(Double, PNF.SustainView (Double, Double))]
         phrases = PNF.makeSustainView fst snd phrasesDouble
@@ -461,18 +461,18 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
     notes = let
       eachString str = let
         stringNotes :: RTB.T U.Seconds (IsOverdrive, (StrumHOPOTap, (PG.GtrFret, PG.NoteType), Maybe (U.Seconds, Maybe PG.Slide)))
-        stringNotes = RTB.fromAbsoluteEventList $ ATB.fromPairList $ sort $ do
-          note <- V.toList (lvl_notes $ rso_level rso) <> do
-            V.toList (lvl_chords $ rso_level rso) >>= V.toList . chd_chordNotes
-          guard $ PG.getStringIndex 6 str == n_string note
-          let time = n_time note
-              sht = if n_tap note then Tap
-                else if n_hammerOn note || n_pullOff note then HOPO
+        stringNotes = RTB.fromAbsoluteEventList $ ATB.fromPairList $ sort do
+          note <- V.toList rso.rso_level.lvl_notes <> do
+            V.toList rso.rso_level.lvl_chords >>= V.toList . (.chd_chordNotes)
+          guard $ PG.getStringIndex 6 str == note.n_string
+          let time = note.n_time
+              sht = if note.n_tap then Tap
+                else if note.n_hammerOn || note.n_pullOff then HOPO
                   else Strum
-              fret = n_fret note
+              fret = note.n_fret
               ntype = PG.NormalNote -- TODO
-              sust = flip fmap (n_sustain note) $ \len -> let
-                slide = case n_slideTo note <|> n_slideUnpitchTo note of
+              sust = note.n_sustain <&> \len -> let
+                slide = case note.n_slideTo <|> note.n_slideUnpitchTo of
                   Nothing -> Nothing
                   Just slideToFret -> case compare fret slideToFret of
                     LT -> Just PG.SlideUp
@@ -506,20 +506,20 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
         `PNF.zipStateMaps` Map.empty -- TODO area :: Maybe PG.StrumArea
         `PNF.zipStateMaps` Map.empty -- TODO chords :: PNF T.Text T.Text
         `PNF.zipStateMaps` Map.empty -- TODO arpeggio :: PNF (Map.Map PG.GtrString PG.GtrFret) ()
-    in (\(((((a, b), c), d), e)) -> PNF.CommonState a b c d e) <$> do
+    in (\((((a, b), c), d), e) -> PNF.CommonState a b c d e) <$> do
       pgStates
         `PNF.zipStateMaps` Map.empty
         `PNF.zipStateMaps` Map.empty
         `PNF.zipStateMaps` Map.empty
         `PNF.zipStateMaps` fmap Just beats
 
-  rsTracks fpart ppg = sequence $ let
+  rsTracks fpart ppg = sequence let
     (srcG, srcB) = case Map.lookup fpart song.tracks.onyxParts of
       Nothing   -> (mempty, mempty)
       Just part -> (part.onyxPartRSGuitar, part.onyxPartRSBass)
     in catMaybes
       [ do
-        guard $ not $ RTB.null $ rsNotes srcG
+        guard $ not $ RTB.null srcG.rsNotes
         let name = case fpart of
               F.PartGuitar              -> "RS Lead"
               F.PartName "rhythm"       -> "RS Rhythm"
@@ -528,7 +528,7 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
               _                         -> F.displayPartName fpart <> " [RS Guitar]"
         return $ (\rso -> (name, PreviewPG ppg.tuning $ pgRocksmith rso)) <$> buildRS tempos 0 srcG
       , do
-        guard $ not $ RTB.null $ rsNotes srcB
+        guard $ not $ RTB.null srcB.rsNotes
         let name = case fpart of
               F.PartBass              -> "RS Bass"
               F.PartName "bonus-bass" -> "RS Bonus Bass"
@@ -542,7 +542,7 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
       Just part
         | not $ PG.nullPG part.onyxPartRealGuitar22 -> part.onyxPartRealGuitar22
         | otherwise                                 -> part.onyxPartRealGuitar
-    thisDiff = fromMaybe mempty $ Map.lookup diff src.pgDifficulties
+    thisDiff = fromMaybe mempty $ Map.lookup diff src.difficulties
     _tuning = PG.tuningPitches ppg.tuning { PG.gtrGlobal = 0 }
     _flatDefault = maybe False songKeyUsesFlats songYaml.metadata.key
     _chordNames = PG.computeChordNames diff _tuning _flatDefault src
@@ -553,8 +553,8 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
     notes = let
       eachString str = let
         stringNotes :: RTB.T U.Beats (IsOverdrive, (StrumHOPOTap, (PG.GtrFret, PG.NoteType), Maybe (U.Beats, Maybe PG.Slide)))
-        stringNotes = applyStatus1 False (RTB.normalize src.pgOverdrive) $
-          flip RTB.mapMaybe computed $ \(sht, trips, sust) ->
+        stringNotes = applyStatus1 False (RTB.normalize src.overdrive) $
+          flip RTB.mapMaybe computed \(sht, trips, sust) ->
             case [ (fret, ntype) | (str', fret, ntype) <- trips, str == str' ] of
               []       -> Nothing
               pair : _ -> Just (sht, pair, sust)
@@ -585,19 +585,19 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
         `PNF.zipStateMaps` Map.empty -- TODO chords :: PNF T.Text T.Text
         `PNF.zipStateMaps` Map.empty -- TODO arpeggio :: PNF (Map.Map PG.GtrString PG.GtrFret) ()
     in do
-      guard $ not $ RTB.null thisDiff.pgNotes
-      Just $ (\(((((a, b), c), d), e)) -> PNF.CommonState a b c d e) <$> do
+      guard $ not $ RTB.null thisDiff.notes
+      Just $ (\((((a, b), c), d), e) -> PNF.CommonState a b c d e) <$> do
         pgStates
-          `PNF.zipStateMaps` toggle src.pgOverdrive
-          `PNF.zipStateMaps` toggle (snd <$> src.pgBRE)
-          `PNF.zipStateMaps` toggle src.pgSolo
+          `PNF.zipStateMaps` toggle src.overdrive
+          `PNF.zipStateMaps` toggle (snd <$> src.bre)
+          `PNF.zipStateMaps` toggle src.solo
           `PNF.zipStateMaps` fmap Just beats
 
   beats :: Map.Map Double (Maybe Beat.BeatEvent)
   beats = let
     sourceMidi = song.tracks.onyxBeat.beatLines
     source = if RTB.null sourceMidi
-      then (timingBeat timing).beatLines
+      then timing.timingBeat.beatLines
       else sourceMidi
     makeBeats _         RNil            = RNil
     makeBeats _         (Wait 0 e rest) = Wait 0 (Just e) $ makeBeats False rest
@@ -613,7 +613,7 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
       $ RTB.toAbsoluteEventList 0
       $ makeBeats True source
 
-  tracks = fmap (filter $ not . null) $ forM (sortOn fst $ HM.toList parts.getParts) $ \(fpart, part) -> let
+  tracks = fmap (filter $ not . null) $ forM (sortOn fst $ HM.toList parts.getParts) \(fpart, part) -> let
     five = case nativeFiveFret part <|> proGuitarToFiveFret part <|> proKeysToFiveFret part of
       Nothing -> []
       Just buildFive -> let
@@ -653,7 +653,7 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
             Nothing  -> []
             Just trk -> [(name <> " (" <> letter <> ")", PreviewDrums pdrums.mode trk)]
           true = case pdrums.mode of
-            DrumsElite -> case drumTrackTrue fpart pdrums diff of
+            DrumsElite -> case drumTrackElite fpart pdrums diff of
               Nothing -> []
               Just trkElite ->
                 [ ( case fpart of
@@ -707,8 +707,8 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
       let rb3 = compileVenueRB3 song.tracks.onyxVenue
       return $ ("Venue Track", PreviewBGVenue
         $ (\(a, b) -> PNF.VenueState a b) <$> do
-          PNF.makeLightStates (rtbToMap rb3.venueLighting)
-            `PNF.zipStateMaps` PNF.makeLightStates (rtbToMap rb3.venuePostProcessRB3)
+          PNF.makeLightStates (rtbToMap rb3.lighting)
+            `PNF.zipStateMaps` PNF.makeLightStates (rtbToMap rb3.postProcessRB3)
         )
     ]
 
@@ -720,7 +720,7 @@ computeTracks songYaml song = basicTiming False song (return 0) >>= \timing -> l
     , previewBG       = bgs
     , previewSections = rtbToMap
       $ fmap (sectionBody . makeDisplaySection)
-      $ song.tracks.onyxEvents.eventsSections
+      $ song.tracks.onyxEvents.sections
     }
 
 loadTracks

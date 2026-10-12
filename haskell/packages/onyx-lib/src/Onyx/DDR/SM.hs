@@ -1,4 +1,6 @@
+{-# LANGUAGE BlockArguments    #-}
 {-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE NoFieldSelectors  #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 module Onyx.DDR.SM where
@@ -44,7 +46,7 @@ parse :: [Token] -> [(T.Text, [T.Text])]
 parse toks = case break (== Hash) toks of
   (_, Hash : toks') -> let
     (line, after) = break (== Semicolon) toks'
-    in case map T.pack [ s | Atom s <- line ] of
+    in case [ T.pack s | Atom s <- line ] of
       []           -> parse after
       atom : atoms -> (T.strip atom, map T.strip atoms) : parse after
   _ -> []
@@ -107,7 +109,7 @@ getSMNumber lns k = getSMString lns k >>= \case
 getSMNumberPairs :: (MonadFail m) => [(T.Text, [T.Text])] -> T.Text -> m [(Scientific, Scientific)]
 getSMNumberPairs lns k = getSMString lns k >>= \case
   Nothing -> return []
-  Just s -> forM (splitNoEmpty "," s) $ \pair -> case T.splitOn "=" pair of
+  Just s -> forM (splitNoEmpty "," s) \pair -> case T.splitOn "=" pair of
     [x, y] -> case (readMaybe $ T.unpack x, readMaybe $ T.unpack y) of
       (Just x', Just y') -> return (x', y')
       _                  -> fail $ "Couldn't parse number=number: " <> show pair
@@ -158,16 +160,16 @@ readSMNotes = \case
     smn_NumericalMeter <- case readMaybe $ T.unpack nm of
       Nothing -> fail $ "Couldn't read numerical meter value: " <> show nm
       Just v  -> return v
-    smn_GrooveRadar <- forM (splitNoEmpty "," gr) $ \x -> case readMaybe $ T.unpack x of
+    smn_GrooveRadar <- forM (splitNoEmpty "," gr) \x -> case readMaybe $ T.unpack x of
       Nothing -> fail $ "Couldn't read groove radar value: " <> show x
       Just v  -> return v
-    smn_Notes <- forM (splitNoEmpty "," notes) $ \bar -> do
-      forM (filter (T.any $ not . isSpace) $ T.lines bar) $ \line -> do
+    smn_Notes <- forM (splitNoEmpty "," notes) \bar -> do
+      forM (filter (T.any $ not . isSpace) $ T.lines bar) \line -> do
         return $ T.strip line
     return SMNotes{..}
   xs -> fail $ "Expected 6 parts to #NOTES but found " <> show (length xs)
 
 splitNoEmpty :: T.Text -> T.Text -> [T.Text]
 splitNoEmpty x y = case T.splitOn x y of
-  [v] -> if T.all isSpace v then [] else [v]
+  [v] -> [v | not $ T.all isSpace v]
   vs  -> vs

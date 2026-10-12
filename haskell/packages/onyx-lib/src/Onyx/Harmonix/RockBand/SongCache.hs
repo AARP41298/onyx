@@ -1,12 +1,16 @@
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoFieldSelectors    #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
 module Onyx.Harmonix.RockBand.SongCache where
 
 import           Control.Monad
 import           Control.Monad.IO.Class               (MonadIO (..))
 import qualified Data.ByteString                      as B
 import qualified Data.ByteString.Lazy                 as BL
+import           Data.Functor                         ((<&>))
 import qualified Data.HashMap.Strict                  as HM
 import           Data.List.Extra                      (elemIndex, nubOrd, sort)
 import           Data.List.NonEmpty                   (NonEmpty ((:|)))
@@ -39,7 +43,7 @@ lenArray c = Codec
   { codecIn = do
     len <- getWord32le
     replicateM (fromIntegral len) $ codecIn c
-  , codecOut = fmapArg $ \xs -> do
+  , codecOut = fmapArg \xs -> do
     putWord32le $ fromIntegral $ length xs
     forM_ xs $ codecOut c
   }
@@ -50,7 +54,7 @@ string = Codec
   { codecIn = do
     len <- getWord32le
     TE.decodeUtf8 <$> getByteString (fromIntegral len)
-  , codecOut = fmapArg $ \t -> do
+  , codecOut = fmapArg \t -> do
     let bs = TE.encodeUtf8 t
     putWord32le $ fromIntegral $ B.length bs
     putByteString bs
@@ -70,12 +74,12 @@ data SongCache = SongCache
 
 instance Bin SongCache where
   bin = do
-    sc_Version    <- sc_Version    =. word32le
-    sc_Files      <- sc_Files      =. lenArray bin
-    sc_Songs      <- sc_Songs      =. lenArray bin
-    sc_NewSongIDs <- sc_NewSongIDs =. lenArray word32le
-    sc_FileNames  <- sc_FileNames  =. lenArray string
-    sc_FileNames2 <- sc_FileNames2 =. lenArray bin
+    sc_Version    <- (.sc_Version   ) =. word32le
+    sc_Files      <- (.sc_Files     ) =. lenArray bin
+    sc_Songs      <- (.sc_Songs     ) =. lenArray bin
+    sc_NewSongIDs <- (.sc_NewSongIDs) =. lenArray word32le
+    sc_FileNames  <- (.sc_FileNames ) =. lenArray string
+    sc_FileNames2 <- (.sc_FileNames2) =. lenArray bin
     return SongCache{..}
 
 data FileEntry = FileEntry
@@ -85,8 +89,8 @@ data FileEntry = FileEntry
 
 instance Bin FileEntry where
   bin = do
-    fe_Name    <- fe_Name    =. string
-    fe_SongIDs <- fe_SongIDs =. lenArray word32le
+    fe_Name    <- (.fe_Name   ) =. string
+    fe_SongIDs <- (.fe_SongIDs) =. lenArray word32le
     return FileEntry{..}
 
 data SongEntry = SongEntry
@@ -152,62 +156,62 @@ data SongEntry = SongEntry
 
 instance Bin SongEntry where
   bin = do
-    se_SongID           <- se_SongID           =. word32le
-    se_Mystery1         <- se_Mystery1         =. word32le
-    se_Mystery2         <- se_Mystery2         =. word32le
-    se_Version          <- se_Version          =. word16le
-    se_SongID2          <- se_SongID2          =. word32le
-    se_Mystery3         <- se_Mystery3         =. word8
-    se_GameOrigin       <- se_GameOrigin       =. string
-    se_PreviewStart     <- se_PreviewStart     =. floatle
-    se_PreviewEnd       <- se_PreviewEnd       =. floatle
-    se_Key1             <- se_Key1             =. string
-    se_Mystery4         <- se_Mystery4         =. word32le
-    se_Mystery5         <- se_Mystery5         =. word32le
-    se_Key2             <- se_Key2             =. string
-    se_Path             <- se_Path             =. string
-    se_Mystery6         <- se_Mystery6         =. word32le
-    se_VocalParts       <- se_VocalParts       =. word32le
-    se_HopoThreshold    <- se_HopoThreshold    =. word32le
-    se_MuteVolume       <- se_MuteVolume       =. floatle
-    se_MuteVolumeVocals <- se_MuteVolumeVocals =. floatle
-    se_Pans             <- se_Pans             =. lenArray floatle
-    se_Vols             <- se_Vols             =. lenArray floatle
-    se_Cores            <- se_Cores            =. lenArray int32le
-    se_CrowdChannels    <- se_CrowdChannels    =. lenArray word32le
-    se_DrumSolo         <- se_DrumSolo         =. lenArray string
-    se_DrumFreestyle    <- se_DrumFreestyle    =. lenArray string
-    se_Tracks           <- se_Tracks           =. lenArray bin
-    se_Mystery7         <- se_Mystery7         =. word32le
-    se_Title            <- se_Title            =. string
-    se_Artist           <- se_Artist           =. string
-    se_Album            <- se_Album            =. string
-    se_AlbumTrackNumber <- se_AlbumTrackNumber =. word32le
-    se_MysteryDates     <- se_MysteryDates     =. byteString 10
-    se_Genre            <- se_Genre            =. string
-    se_Mystery8         <- se_Mystery8         =. word32le
-    se_Mystery9         <- se_Mystery9         =. word32le
-    se_Ranks            <- se_Ranks            =. lenArray bin
-    se_Rating           <- se_Rating           =. word32le
-    se_Mystery10        <- se_Mystery10        =. word16le
-    se_SongScrollSpeed  <- se_SongScrollSpeed  =. floatle
-    se_Mystery11        <- se_Mystery11        =. word16le
-    se_Mystery12        <- se_Mystery12        =. word16le
-    se_Bank             <- se_Bank             =. string
-    se_DrumBank         <- se_DrumBank         =. string
-    se_VocalTonicNote   <- se_VocalTonicNote   =. int32le
-    se_Mystery13        <- se_Mystery13        =. int32le
-    se_SongTonality     <- se_SongTonality     =. int32le
-    se_SongLength       <- se_SongLength       =. word32le
-    se_HasAlbumArt      <- se_HasAlbumArt      =. word8
-    se_Master           <- se_Master           =. word8
-    se_Mystery14        <- se_Mystery14        =. word8
-    se_AnimTempo        <- se_AnimTempo        =. word32le
-    se_VocalGender      <- se_VocalGender      =. string
-    se_GuitarTuning     <- se_GuitarTuning     =. fixedArray 6 int32le
-    se_BassTuning       <- se_BassTuning       =. fixedArray 4 int32le
-    se_Mystery15        <- se_Mystery15        =. word8
-    se_Solo             <- se_Solo             =. lenArray string
+    se_SongID           <- (.se_SongID          ) =. word32le
+    se_Mystery1         <- (.se_Mystery1        ) =. word32le
+    se_Mystery2         <- (.se_Mystery2        ) =. word32le
+    se_Version          <- (.se_Version         ) =. word16le
+    se_SongID2          <- (.se_SongID2         ) =. word32le
+    se_Mystery3         <- (.se_Mystery3        ) =. word8
+    se_GameOrigin       <- (.se_GameOrigin      ) =. string
+    se_PreviewStart     <- (.se_PreviewStart    ) =. floatle
+    se_PreviewEnd       <- (.se_PreviewEnd      ) =. floatle
+    se_Key1             <- (.se_Key1            ) =. string
+    se_Mystery4         <- (.se_Mystery4        ) =. word32le
+    se_Mystery5         <- (.se_Mystery5        ) =. word32le
+    se_Key2             <- (.se_Key2            ) =. string
+    se_Path             <- (.se_Path            ) =. string
+    se_Mystery6         <- (.se_Mystery6        ) =. word32le
+    se_VocalParts       <- (.se_VocalParts      ) =. word32le
+    se_HopoThreshold    <- (.se_HopoThreshold   ) =. word32le
+    se_MuteVolume       <- (.se_MuteVolume      ) =. floatle
+    se_MuteVolumeVocals <- (.se_MuteVolumeVocals) =. floatle
+    se_Pans             <- (.se_Pans            ) =. lenArray floatle
+    se_Vols             <- (.se_Vols            ) =. lenArray floatle
+    se_Cores            <- (.se_Cores           ) =. lenArray int32le
+    se_CrowdChannels    <- (.se_CrowdChannels   ) =. lenArray word32le
+    se_DrumSolo         <- (.se_DrumSolo        ) =. lenArray string
+    se_DrumFreestyle    <- (.se_DrumFreestyle   ) =. lenArray string
+    se_Tracks           <- (.se_Tracks          ) =. lenArray bin
+    se_Mystery7         <- (.se_Mystery7        ) =. word32le
+    se_Title            <- (.se_Title           ) =. string
+    se_Artist           <- (.se_Artist          ) =. string
+    se_Album            <- (.se_Album           ) =. string
+    se_AlbumTrackNumber <- (.se_AlbumTrackNumber) =. word32le
+    se_MysteryDates     <- (.se_MysteryDates    ) =. byteString 10
+    se_Genre            <- (.se_Genre           ) =. string
+    se_Mystery8         <- (.se_Mystery8        ) =. word32le
+    se_Mystery9         <- (.se_Mystery9        ) =. word32le
+    se_Ranks            <- (.se_Ranks           ) =. lenArray bin
+    se_Rating           <- (.se_Rating          ) =. word32le
+    se_Mystery10        <- (.se_Mystery10       ) =. word16le
+    se_SongScrollSpeed  <- (.se_SongScrollSpeed ) =. floatle
+    se_Mystery11        <- (.se_Mystery11       ) =. word16le
+    se_Mystery12        <- (.se_Mystery12       ) =. word16le
+    se_Bank             <- (.se_Bank            ) =. string
+    se_DrumBank         <- (.se_DrumBank        ) =. string
+    se_VocalTonicNote   <- (.se_VocalTonicNote  ) =. int32le
+    se_Mystery13        <- (.se_Mystery13       ) =. int32le
+    se_SongTonality     <- (.se_SongTonality    ) =. int32le
+    se_SongLength       <- (.se_SongLength      ) =. word32le
+    se_HasAlbumArt      <- (.se_HasAlbumArt     ) =. word8
+    se_Master           <- (.se_Master          ) =. word8
+    se_Mystery14        <- (.se_Mystery14       ) =. word8
+    se_AnimTempo        <- (.se_AnimTempo       ) =. word32le
+    se_VocalGender      <- (.se_VocalGender     ) =. string
+    se_GuitarTuning     <- (.se_GuitarTuning    ) =. fixedArray 6 int32le
+    se_BassTuning       <- (.se_BassTuning      ) =. fixedArray 4 int32le
+    se_Mystery15        <- (.se_Mystery15       ) =. word8
+    se_Solo             <- (.se_Solo            ) =. lenArray string
     return SongEntry{..}
 
 data TracksEntry = TracksEntry
@@ -217,8 +221,8 @@ data TracksEntry = TracksEntry
 
 instance Bin TracksEntry where
   bin = do
-    te_Instrument <- te_Instrument =. word32le
-    te_Channels   <- te_Channels   =. lenArray word32le
+    te_Instrument <- (.te_Instrument) =. word32le
+    te_Channels   <- (.te_Channels  ) =. lenArray word32le
     return TracksEntry{..}
 
 data RankEntry = RankEntry
@@ -228,8 +232,8 @@ data RankEntry = RankEntry
 
 instance Bin RankEntry where
   bin = do
-    re_Part <- re_Part =. string
-    re_Rank <- re_Rank =. floatle
+    re_Part <- (.re_Part) =. string
+    re_Rank <- (.re_Rank) =. floatle
     return RankEntry{..}
 
 data FileNames2Entry = FileNames2Entry
@@ -239,8 +243,8 @@ data FileNames2Entry = FileNames2Entry
 
 instance Bin FileNames2Entry where
   bin = do
-    fn2_Path    <- fn2_Path    =. string
-    fn2_Mystery <- fn2_Mystery =. word32le
+    fn2_Path    <- (.fn2_Path   ) =. string
+    fn2_Mystery <- (.fn2_Mystery) =. word32le
     return FileNames2Entry{..}
 
 -- | Orders keys to match an existing list, and puts new ones at the end (sorted).
@@ -256,22 +260,22 @@ matchOrder template xs = let
 
 applyDTA :: DTASingle -> SongEntry -> SongEntry
 applyDTA single entry = let
-  pkg = dtaSongPackage single
+  pkg = single.dtaSongPackage
   songID orig = case D.songId pkg of
     Just (Left i) -> fromIntegral i
     _             -> orig
   in entry
-    { se_SongID           = songID $ se_SongID entry
-    , se_Version          = fromIntegral $ D.version pkg
-    , se_SongID2          = songID $ se_SongID2 entry
-    , se_GameOrigin       = fromMaybe (se_GameOrigin entry) $ D.gameOrigin pkg
+    { se_SongID           = songID entry.se_SongID
+    , se_Version          = maybe 0 fromIntegral $ D.version pkg
+    , se_SongID2          = songID entry.se_SongID2
+    , se_GameOrigin       = fromMaybe entry.se_GameOrigin $ D.gameOrigin pkg
     , se_PreviewStart     = fromIntegral $ fst $ D.preview pkg
     , se_PreviewEnd       = fromIntegral $ snd $ D.preview pkg
-    , se_Key1             = dtaTopKey single
-    , se_Key2             = dtaTopKey single
+    , se_Key1             = single.dtaTopKey
+    , se_Key2             = single.dtaTopKey
     , se_Path             = D.songName $ D.song pkg
-    , se_VocalParts       = maybe (se_VocalParts entry) fromIntegral $ D.vocalParts $ D.song pkg
-    , se_HopoThreshold    = maybe (se_HopoThreshold entry) fromIntegral $ D.hopoThreshold $ D.song pkg
+    , se_VocalParts       = maybe entry.se_VocalParts fromIntegral $ D.vocalParts $ D.song pkg
+    , se_HopoThreshold    = maybe entry.se_HopoThreshold fromIntegral $ D.hopoThreshold $ D.song pkg
     , se_MuteVolume       = fromMaybe (-16) $ D.muteVolume $ D.song pkg
     , se_MuteVolumeVocals = fromMaybe (-12) $ D.muteVolumeVocals $ D.song pkg
     , se_Pans             = D.pans $ D.song pkg
@@ -281,8 +285,8 @@ applyDTA single entry = let
     , se_DrumSolo         = D.seqs $ D.drumSolo $ D.song pkg
     , se_DrumFreestyle    = D.seqs $ D.drumFreestyle $ D.song pkg
     , se_Tracks           = do
-      (inst, chans) <- matchOrder (map te_Instrument $ se_Tracks entry) $ do
-        (inst, chans) <- fromDictList $ D.tracks $ D.song pkg
+      (inst, chans) <- matchOrder (map (.te_Instrument) entry.se_Tracks) do
+        (inst, chans) <- pkg.song.tracks.fromDictList
         case inst of
           "drum"   -> [(0, chans)]
           "guitar" -> [(1, chans)]
@@ -293,21 +297,21 @@ applyDTA single entry = let
       return TracksEntry { te_Instrument = inst, te_Channels = map fromIntegral chans }
     , se_Title            = D.name pkg
     , se_Artist           = fromMaybe "" $ D.artist pkg
-    , se_Album            = fromMaybe (se_Album entry) $ D.albumName pkg
-    , se_AlbumTrackNumber = maybe (se_AlbumTrackNumber entry) fromIntegral $ D.albumTrackNumber pkg
+    , se_Album            = fromMaybe entry.se_Album $ D.albumName pkg
+    , se_AlbumTrackNumber = maybe entry.se_AlbumTrackNumber fromIntegral $ D.albumTrackNumber pkg
     -- TODO se_MysteryDates
     , se_Genre            = fromMaybe "" $ D.genre pkg
     , se_Ranks            = do
-      (t, i) <- matchOrder (map re_Part $ se_Ranks entry) $ HM.toList $ D.rank pkg
+      (t, i) <- matchOrder (map (.re_Part) entry.se_Ranks) $ HM.toList $ D.rank pkg
       return RankEntry { re_Part = t, re_Rank = fromIntegral i }
     , se_Rating           = fromIntegral $ D.rating pkg
     , se_SongScrollSpeed  = fromIntegral $ D.songScrollSpeed pkg
-    , se_Bank             = fromMaybe (se_Bank entry) $ D.bank pkg
-    , se_DrumBank         = fromMaybe (se_DrumBank entry) $ D.drumBank pkg
+    , se_Bank             = fromMaybe entry.se_Bank $ D.bank pkg
+    , se_DrumBank         = fromMaybe entry.se_DrumBank $ D.drumBank pkg
     , se_VocalTonicNote   = maybe (-1) (fromIntegral . fromEnum) $ D.vocalTonicNote pkg
     , se_SongTonality     = maybe (-1) (fromIntegral . fromEnum) $ D.songTonality pkg
-    , se_SongLength       = maybe (se_SongLength entry) fromIntegral $ D.songLength pkg
-    , se_HasAlbumArt      = maybe (se_HasAlbumArt entry) (\b -> if b then 1 else 0) $ D.albumArt pkg
+    , se_SongLength       = maybe entry.se_SongLength fromIntegral $ D.songLength pkg
+    , se_HasAlbumArt      = maybe entry.se_HasAlbumArt (\b -> if b then 1 else 0) $ D.albumArt pkg
     , se_Master           = if D.master pkg then 1 else 0
     , se_AnimTempo        = case D.animTempo pkg of
       Right i              -> fromIntegral i
@@ -317,12 +321,12 @@ applyDTA single entry = let
     , se_VocalGender      = case D.vocalGender pkg of
       Just Female -> "female"
       Just Male   -> "male"
-      Nothing     -> se_VocalGender entry
+      Nothing     -> entry.se_VocalGender
     , se_GuitarTuning     = take 6 $
       maybe [] (map fromIntegral) (D.realGuitarTuning pkg) ++ repeat 0
     , se_BassTuning       = take 4 $
       maybe [] (map fromIntegral) (D.realBassTuning pkg) ++ repeat 0
-    , se_Solo             = flip map (fromMaybe [] $ D.solo pkg) $ \case
+    , se_Solo             = fromMaybe [] (D.solo pkg) <&> \case
       "vocal_percussion" -> "vocals"
       inst               -> inst
     }
@@ -333,15 +337,16 @@ fixSongCache path = do
   origCache <- case mcache of
     Nothing -> fatal "Couldn't find song cache file inside STFS"
     Just bs -> inside "Parsing song cache file" $ runGetM (codecIn bin) bs
-  cons <- fmap (filter $ \s -> take 1 s /= ".")
+  cons <- fmap (filter \s -> take 1 s /= ".")
     $ stackIO $ listDirectory $ takeDirectory path
-  let checkCON cache con = do
+  let checkCON :: (MonadIO m, SendMessage m) => SongCache -> [Char] -> StackTraceT m SongCache
+      checkCON cache con = do
         let conFull = takeDirectory path </> con
         lg con
         stackIO (doesFileExist conFull) >>= \case
           False -> return cache
           True  -> do
-            magic <- stackIO $ IO.withBinaryFile conFull IO.ReadMode $ \h -> B.hGet h 4
+            magic <- stackIO $ IO.withBinaryFile conFull IO.ReadMode \h -> B.hGet h 4
             if elem magic ["CON ", "LIVE"]
               then do
                 dta <- fmap join $ errorToWarning $ stackIO $ getSTFSFolder conFull
@@ -352,11 +357,12 @@ fixSongCache path = do
                     songs <- map fst <$> readDTASingles (BL.toStrict bs)
                     foldM (checkSingle $ T.pack con) cache (zip [1..] songs)
               else return cache
+      checkSingle :: (MonadIO m, SendMessage m) => T.Text -> SongCache -> (Int, DTASingle) -> StackTraceT m SongCache
       checkSingle name cache (i, single) = do
-        let numericID = case D.songId $ dtaSongPackage single of
+        let numericID = case D.songId single.dtaSongPackage of
               Just (Left nid) -> Just $ fromIntegral nid
               _               -> Nothing
-        case concat [ take 1 $ drop i $ fe_SongIDs fe | fe <- sc_Files cache, fe_Name fe == name ] of
+        case concat [ take 1 $ drop i fe.fe_SongIDs | fe <- cache.sc_Files, fe.fe_Name == name ] of
           [] -> case numericID of
             Just nid -> checkSongID name nid single cache
             Nothing  -> return cache -- non-numeric ID, no generated ID, nothing to do
@@ -366,19 +372,20 @@ fixSongCache path = do
               else do
                 lg $ T.unpack name <> ": updated song ID from " <> show cid <> " to " <> show nid
                 checkSongID name nid single cache
-                  { sc_Files = flip map (sc_Files cache) $ \fe ->
+                  { sc_Files = cache.sc_Files <&> \fe ->
                     -- replace the existing numeric ID with a new one
-                    if fe_Name fe == name
+                    if fe.fe_Name == name
                       then fe
-                        { fe_SongIDs = flip map (zip [0..] $ fe_SongIDs fe) $ \(j, origID) ->
+                        { fe_SongIDs = zip [0..] fe.fe_SongIDs <&> \(j, origID) ->
                           if i == j then nid else origID
                         }
                       else fe
                   }
             Nothing -> checkSongID name cid single cache -- keep the generated ID
+      checkSongID :: (MonadIO m, SendMessage m) => T.Text -> Word32 -> DTASingle -> SongCache -> StackTraceT m SongCache
       checkSongID name sid single cache = do
-        newSongs <- forM (sc_Songs cache) $ \se ->
-          if se_SongID se == sid
+        newSongs <- forM cache.sc_Songs \se ->
+          if se.se_SongID == sid
             then do
               let se' = applyDTA single se
               when (se /= se') $ lg $ T.unpack name <> " [" <> show sid <> "]: updated metadata"
@@ -415,11 +422,12 @@ hardcodeSongCacheIDs pathCache pathCONs = do
   cache <- case mcache of
     Nothing -> fatal "Couldn't find song cache file inside STFS"
     Just bs -> inside "Parsing song cache file" $ runGetM (codecIn bin) bs
+  let _ = cache :: SongCache
   cons <- stackIO $ filter (/= "songcache") <$> listDirectory pathCONs
-  forM_ cons $ \pathCON -> inside pathCON $ errorToWarning $ do
+  forM_ cons \pathCON -> inside pathCON $ errorToWarning do
     let fullPathCON = pathCONs </> pathCON
-    hdrMeta <- errorToEither $ stackIO $ withSTFSPackage fullPathCON $ \pkg ->
-      return (stfsHeader pkg, stfsMetadata pkg)
+    hdrMeta <- errorToEither $ stackIO $ withSTFSPackage fullPathCON \pkg ->
+      return (pkg.stfsHeader, pkg.stfsMetadata)
     case hdrMeta of
       Right (CON _, meta) -> do
         topFolder <- stackIO $ getSTFSFolder fullPathCON
@@ -427,29 +435,29 @@ hardcodeSongCacheIDs pathCache pathCONs = do
           Nothing -> fatal "Couldn't find songs/songs.dta in the CON file"
           Just bs -> return bs
         songs <- fmap (map fst) $ readDTASingles $ BL.toStrict dtaBS
-        songs' <- forM (zip ([0..] :: [Int]) songs) $ \(i, single) -> let
+        songs' <- forM (zip ([0..] :: [Int]) songs) \(i, single) -> let
           logLabel = pathCON <> " (" <> show i <> ")"
           insertID newID = single
-            { dtaSongPackage = (dtaSongPackage single) { D.songId = Just $ Left $ fromIntegral newID }
+            { dtaSongPackage = single.dtaSongPackage { D.songId = Just $ Left $ fromIntegral newID }
             }
-          in case D.songId $ dtaSongPackage single of
+          in case D.songId single.dtaSongPackage of
             Just (Left n) -> do
               lg $ logLabel <> ": already has number ID " <> show n
               return single
-            _ -> case concat [ take 1 $ drop i $ fe_SongIDs fe | fe <- sc_Files cache, fe_Name fe == T.pack pathCON ] of
+            _ -> case concat [ take 1 $ drop i fe.fe_SongIDs | fe <- cache.sc_Files, fe.fe_Name == T.pack pathCON ] of
               cid : _ -> do
                 lg $ logLabel <> ": found filename cache ID " <> show cid
                 return $ insertID cid
               [] -> let
-                entryIDs = nubOrd $ do
-                  se <- sc_Songs cache
-                  guard $ se_Title se == D.name (dtaSongPackage single)
-                  guard $ Just (se_Artist se) == D.artist (dtaSongPackage single)
-                  return $ se_SongID se
-                fileForID cid = maybe "(no filename found)" show $ listToMaybe $ do
-                  fe <- sc_Files cache
-                  guard $ elem cid $ fe_SongIDs fe
-                  return $ fe_Name fe
+                entryIDs = nubOrd do
+                  se <- cache.sc_Songs
+                  guard $ se.se_Title == D.name single.dtaSongPackage
+                  guard $ Just se.se_Artist == D.artist single.dtaSongPackage
+                  return se.se_SongID
+                fileForID cid = maybe "(no filename found)" show $ listToMaybe do
+                  fe <- cache.sc_Files
+                  guard $ elem cid fe.fe_SongIDs
+                  return fe.fe_Name
                 in case entryIDs of
                   [] -> do
                     lg $ logLabel <> ": couldn't find matching ID"
@@ -459,22 +467,22 @@ hardcodeSongCacheIDs pathCache pathCONs = do
                     return $ insertID cid
                   cids -> do
                     lg $ logLabel <> ": found multiple matches for title/artist. To select an ID, rename to one of these choices:"
-                    forM_ cids $ \cid -> do
+                    forM_ cids \cid -> do
                       lg $ "  * " <> fileForID cid <> " (" <> show cid <> ")"
                     return single
-        when (songs /= songs') $ let
-          songsUTF8 = flip map songs' $ \single -> single
-            { dtaSongPackage = (dtaSongPackage single) { D.encoding = Just "utf8" }
+        when (songs /= songs') let
+          songsUTF8 = songs' <&> \single -> single
+            { dtaSongPackage = single.dtaSongPackage { D.encoding = Just "utf8" }
             }
           newDTABytes = TE.encodeUtf8 $ T.unlines $ map writeDTASingle songsUTF8
           updateFolder folder = do
-            newFiles <- forM (folderFiles folder) $ \(name, readable) -> do
+            newFiles <- forM (folderFiles folder) \(name, readable) -> do
               let r = if name == "songs.dta"
                     then makeHandle "songs.dta updated with new ID"
                       $ byteStringSimpleHandle $ BL.fromStrict newDTABytes
                     else readable
               return (name, r)
-            newSubs <- forM (folderSubfolders folder) $ \(name, sub) -> do
+            newSubs <- forM (folderSubfolders folder) \(name, sub) -> do
               sub' <- updateFolder sub
               return (name, sub')
             return Folder
@@ -482,12 +490,12 @@ hardcodeSongCacheIDs pathCache pathCONs = do
               , folderSubfolders = newSubs
               }
           opts = CreateOptions
-            { createNames         = md_DisplayName meta
-            , createDescriptions  = md_DisplayDescription meta
-            , createTitleID       = md_TitleID meta
-            , createTitleName     = md_TitleName meta
-            , createThumb         = md_ThumbnailImage meta
-            , createTitleThumb    = md_TitleThumbnailImage meta
+            { createNames         = meta.md_DisplayName
+            , createDescriptions  = meta.md_DisplayDescription
+            , createTitleID       = meta.md_TitleID
+            , createTitleName     = meta.md_TitleName
+            , createThumb         = meta.md_ThumbnailImage
+            , createTitleThumb    = meta.md_TitleThumbnailImage
             , createLicenses      = [LicenseEntry (-1) 1 0] -- unlocked
             , createMediaID       = 0
             , createVersion       = 0
@@ -495,7 +503,7 @@ hardcodeSongCacheIDs pathCache pathCONs = do
             , createTransferFlags = 0xC0
             , createLIVE          = False
             }
-          in stackIO $ do
+          in stackIO do
             topFolder' <- updateFolder topFolder
             makeCONReadable opts topFolder' fullPathCON
       _ -> warn "Does not appear to be a CON file"

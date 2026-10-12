@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns      #-}
+{-# LANGUAGE BlockArguments    #-}
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes       #-}
@@ -7,10 +8,11 @@
 module Onyx.Harmonix.MOGG.Crypt where
 
 import           Control.Exception        (bracket, onException)
-import           Control.Monad            (when)
+import           Control.Monad            (guard)
 import qualified Data.ByteString          as B
 import           Data.ByteString.Internal (fromForeignPtr0)
 import qualified Data.ByteString.Lazy     as BL
+import           Data.Functor             ((<&>))
 import           Foreign
 import           Foreign.C
 import qualified GHC.IO.Handle            as H
@@ -19,10 +21,10 @@ import           Onyx.Util.Handle
 import           System.IO
 import           System.Posix.Internals   (sEEK_CUR, sEEK_END, sEEK_SET)
 
-newtype OVCallbacks     = OVCallbacks     (Ptr OVCallbacks    )
-newtype VorbisReader    = VorbisReader    (Ptr VorbisReader   )
-newtype VorbisEncrypter = VorbisEncrypter (Ptr VorbisEncrypter)
-newtype BinkReader      = BinkReader      (Ptr BinkReader     )
+data OVCallbacks
+data VorbisReader
+data VorbisEncrypter
+data BinkReader
 
 C.context $ C.cppCtx <> C.cppTypePairs
   [ ("ov_callbacks"   , [t| OVCallbacks     |])
@@ -60,8 +62,8 @@ ovCallbacksNew
   -> FunPtr (Ptr () -> Int64 -> CInt -> IO CInt)
   -> FunPtr (Ptr () -> IO CInt)
   -> FunPtr (Ptr () -> IO CLong)
-  -> IO OVCallbacks
-ovCallbacksNew read_func seek_func close_func tell_func = OVCallbacks <$>
+  -> IO (Ptr OVCallbacks)
+ovCallbacksNew read_func seek_func close_func tell_func =
   [C.block| ov_callbacks* {
     ov_callbacks* cb = new ov_callbacks();
     cb->read_func  = $(size_t(*read_func)  (void *ptr, size_t size, size_t nmemb, void *datasource));
@@ -71,12 +73,12 @@ ovCallbacksNew read_func seek_func close_func tell_func = OVCallbacks <$>
     return cb;
   } |]
 
-ovCallbacksDelete :: OVCallbacks -> IO ()
-ovCallbacksDelete (OVCallbacks cb) =
+ovCallbacksDelete :: Ptr OVCallbacks -> IO ()
+ovCallbacksDelete cb =
   [C.block| void { delete $(ov_callbacks* cb); } |]
 
-vorbisReaderOpen :: Ptr a -> OVCallbacks -> IO VorbisReader
-vorbisReaderOpen (castPtr -> src) (OVCallbacks cb) = VorbisReader <$>
+vorbisReaderOpen :: Ptr a -> Ptr OVCallbacks -> IO (Maybe (Ptr VorbisReader))
+vorbisReaderOpen (castPtr -> src) cb =
   [C.block| VorbisReader* {
     VorbisReader* vr = new VorbisReader();
     if (vr->Open($(void* src), *$(ov_callbacks* cb))) {
@@ -85,53 +87,53 @@ vorbisReaderOpen (castPtr -> src) (OVCallbacks cb) = VorbisReader <$>
     } else {
       return vr;
     }
-  } |]
+  } |] <&> \p -> guard (p /= nullPtr) >> Just p
 
-vorbisReaderDelete :: VorbisReader -> IO ()
-vorbisReaderDelete (VorbisReader vr) =
+vorbisReaderDelete :: Ptr VorbisReader -> IO ()
+vorbisReaderDelete vr =
   [C.block| void { delete $(VorbisReader* vr); } |]
 
-vorbisReaderSeekRaw :: VorbisReader -> Int64 -> CInt -> IO CInt
-vorbisReaderSeekRaw (VorbisReader vr) offset whence =
+vorbisReaderSeekRaw :: Ptr VorbisReader -> Int64 -> CInt -> IO CInt
+vorbisReaderSeekRaw vr offset whence =
   [C.exp| int { $(VorbisReader* vr)->SeekRaw($(int64_t offset), $(int whence)) } |]
 
-vorbisReaderTellRaw :: VorbisReader -> IO CSize
-vorbisReaderTellRaw (VorbisReader vr) =
+vorbisReaderTellRaw :: Ptr VorbisReader -> IO CSize
+vorbisReaderTellRaw vr =
   [C.exp| size_t { $(VorbisReader* vr)->TellRaw() } |]
 
-vorbisReaderSizeRaw :: VorbisReader -> IO CSize
-vorbisReaderSizeRaw (VorbisReader vr) =
+vorbisReaderSizeRaw :: Ptr VorbisReader -> IO CSize
+vorbisReaderSizeRaw vr =
   [C.exp| size_t { $(VorbisReader* vr)->SizeRaw() } |]
 
-vorbisReaderReadRaw :: VorbisReader -> Ptr a -> CSize -> CSize -> IO CSize
-vorbisReaderReadRaw (VorbisReader vr) (castPtr -> buf) elementSize elements =
+vorbisReaderReadRaw :: Ptr VorbisReader -> Ptr a -> CSize -> CSize -> IO CSize
+vorbisReaderReadRaw vr (castPtr -> buf) elementSize elements =
   [C.exp| size_t { $(VorbisReader* vr)->ReadRaw($(void* buf), $(size_t elementSize), $(size_t elements)) } |]
 
-vorbisEncrypterOpen :: Ptr a -> OVCallbacks -> IO VorbisEncrypter
-vorbisEncrypterOpen (castPtr -> src) (OVCallbacks cb) = VorbisEncrypter <$>
+vorbisEncrypterOpen :: Ptr a -> Ptr OVCallbacks -> IO (Ptr VorbisEncrypter)
+vorbisEncrypterOpen (castPtr -> src) cb =
   [C.exp| VorbisEncrypter* { new VorbisEncrypter($(void* src), *$(ov_callbacks* cb)) } |]
 
-vorbisEncrypterDelete :: VorbisEncrypter -> IO ()
-vorbisEncrypterDelete (VorbisEncrypter ve) =
+vorbisEncrypterDelete :: Ptr VorbisEncrypter -> IO ()
+vorbisEncrypterDelete ve =
   [C.block| void { delete $(VorbisEncrypter* ve); } |]
 
-vorbisEncrypterReadRaw :: VorbisEncrypter -> Ptr a -> CSize -> CSize -> IO CSize
-vorbisEncrypterReadRaw (VorbisEncrypter ve) (castPtr -> buf) elementSize elements =
+vorbisEncrypterReadRaw :: Ptr VorbisEncrypter -> Ptr a -> CSize -> CSize -> IO CSize
+vorbisEncrypterReadRaw ve (castPtr -> buf) elementSize elements =
   [C.exp| size_t { $(VorbisEncrypter* ve)->ReadRaw($(void* buf), $(size_t elementSize), $(size_t elements)) } |]
 
-binkReaderOpen :: Ptr a -> OVCallbacks -> IO BinkReader
-binkReaderOpen (castPtr -> src) (OVCallbacks cb) = BinkReader <$>
+binkReaderOpen :: Ptr a -> Ptr OVCallbacks -> IO (Ptr BinkReader)
+binkReaderOpen (castPtr -> src) cb =
   [C.exp| BinkReader* { new BinkReader($(void* src), *$(ov_callbacks* cb)) } |]
 
-binkReaderDelete :: BinkReader -> IO ()
-binkReaderDelete (BinkReader br) =
+binkReaderDelete :: Ptr BinkReader -> IO ()
+binkReaderDelete br =
   [C.block| void { delete $(BinkReader* br); } |]
 
-binkReaderReadToArray :: BinkReader -> Ptr (Ptr Word8) -> Ptr CSize -> IO CInt
-binkReaderReadToArray (BinkReader br) buffer size = do
+binkReaderReadToArray :: Ptr BinkReader -> Ptr (Ptr Word8) -> Ptr CSize -> IO CInt
+binkReaderReadToArray br buffer size = do
   [C.exp| int { $(BinkReader* br)->ReadToArray($(uint8_t** buffer), $(size_t* size)) } |]
 
-handleOVCallbacks :: Handle -> IO (OVCallbacks, IO ())
+handleOVCallbacks :: Handle -> IO (Ptr OVCallbacks, IO ())
 handleOVCallbacks h = do
   let modeMap =
         [ (sEEK_END, SeekFromEnd )
@@ -163,10 +165,11 @@ handleOVCallbacks h = do
 moggToOggHandles :: Handle -> IO SimpleHandle
 moggToOggHandles h = do
   (cb, cleanup) <- handleOVCallbacks h
-  vr@(VorbisReader p) <- vorbisReaderOpen nullPtr cb
-  when (p == nullPtr) $ do
-    cleanup
-    fail "Failed to decrypt .mogg file"
+  vr <- vorbisReaderOpen nullPtr cb >>= \case
+    Just vr -> return vr
+    Nothing -> do
+      cleanup
+      fail "Failed to decrypt .mogg file"
   size <- vorbisReaderSizeRaw vr
   return SimpleHandle
     { shSize  = fromIntegral size
@@ -184,7 +187,7 @@ moggToOggHandles h = do
     }
 
 moggToOgg :: Readable -> Readable
-moggToOgg r = makeHandle "decrypted mogg" $ do
+moggToOgg r = makeHandle "decrypted mogg" do
   h <- rOpen r
   moggToOggHandles h `onException` hClose h
 

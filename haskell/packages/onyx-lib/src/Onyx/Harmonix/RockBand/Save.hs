@@ -1,4 +1,6 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE BlockArguments   #-}
+{-# LANGUAGE NoFieldSelectors #-}
+{-# LANGUAGE RecordWildCards  #-}
 module Onyx.Harmonix.RockBand.Save where
 
 import           Control.Monad        (guard, replicateM)
@@ -42,13 +44,13 @@ readRB3SaveDat :: Get RB3Save
 readRB3SaveDat = do
   sUnknown1 <- getWord32le
   awardLen <- getWord32le
-  sAwards <- replicateM (fromIntegral awardLen) $ do
+  sAwards <- replicateM (fromIntegral awardLen) do
     aKey <- readFixedString 46
     aValue <- getWord32le
     return Award{..}
   sUnknown2 <- getByteString 290871 -- TODO
   sCharacterCount <- getWord32le
-  sCharacters <- replicateM 10 $ do
+  sCharacters <- replicateM 10 do
     getByteString 134902
   sUnknown3 <- getByteString $ 0x2C7123 - 0x194743
   sUnknown4 <- getByteString $ 0x42245F - 0x2C7123

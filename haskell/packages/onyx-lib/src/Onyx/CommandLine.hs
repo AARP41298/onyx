@@ -1,11 +1,12 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE CPP                   #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImplicitParams        #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiWayIf            #-}
+{-# LANGUAGE NoFieldSelectors      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE PatternSynonyms       #-}
 {-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE ViewPatterns          #-}
 module Onyx.CommandLine
@@ -32,6 +33,7 @@ import           Data.Char                            (isAlphaNum, isAscii,
                                                        isDigit, isUpper,
                                                        toLower)
 import qualified Data.Conduit.Audio                   as CA
+import           Data.Conduit.Audio.LAME              (sinkMP3WithHandle)
 import qualified Data.Conduit.Audio.LAME.Binding      as L
 import           Data.Conduit.Audio.SampleRate
 import           Data.Default.Class                   (def)
@@ -39,6 +41,7 @@ import qualified Data.Digest.Pure.MD5                 as MD5
 import qualified Data.EventList.Absolute.TimeBody     as ATB
 import qualified Data.EventList.Relative.TimeBody     as RTB
 import           Data.Foldable                        (toList)
+import           Data.Functor                         ((<&>))
 import           Data.Functor.Identity                (Identity (..))
 import qualified Data.HashMap.Strict                  as HM
 import           Data.List.Extra                      (find, isPrefixOf,
@@ -58,8 +61,7 @@ import           Onyx.Amplitude.PS2.TxtBin            (TxtBin (..), dtaToTxtBin,
 import           Onyx.Audio                           (Audio (..), audioLength,
                                                        audioMD5, buildSource',
                                                        makeFSB4, makeFSB4',
-                                                       makeXMAFSB3, runAudio,
-                                                       sinkMP3PadWithHandle)
+                                                       makeXMAFSB3, runAudio)
 import           Onyx.Audio.FSB                       (FSBExtraMP3 (..),
                                                        FSBExtraXMA (..),
                                                        emitFSB, fsb3Songs,
@@ -94,7 +96,10 @@ import qualified Onyx.Harmonix.DTA.Serialize.Magma    as RBProj
 import qualified Onyx.Harmonix.DTA.Serialize.RockBand as D
 import           Onyx.Harmonix.GH2.File               (GH2File (..))
 import           Onyx.Harmonix.GH2.PartGuitar         (nullPart)
-import           Onyx.Harmonix.Magma                  (getRBAFile, runMagmaMIDI)
+import           Onyx.Harmonix.Magma                  (RBAFiles (..),
+                                                       isReadableBMP,
+                                                       readRBAFiles,
+                                                       runMagmaMIDI)
 import           Onyx.Harmonix.MOGG                   (applyMoggPatch,
                                                        checkOldC3Mogg,
                                                        decryptBink,
@@ -117,7 +122,8 @@ import           Onyx.Harmonix.RockBand.Milo          (autoLipsync,
 import           Onyx.Harmonix.RockBand.Score
 import           Onyx.Image.DXT                       (readRBImageMaybe)
 import           Onyx.Import
-import           Onyx.ISO                             (folderISO)
+import           Onyx.ISO                             (folderCueBin, folderISO)
+import qualified Onyx.JS                              as JS
 import           Onyx.Keys.Ranges                     (closeShiftsFile)
 import           Onyx.MIDI.Common                     (Difficulty (..),
                                                        showPosition)
@@ -142,12 +148,14 @@ import           Onyx.Neversoft.PS2                   (hedFolder, hookUpWAD,
                                                        parseHed)
 import           Onyx.Neversoft.QB                    (discardStrings, lookupQB,
                                                        lookupQS, parseQB, putQB)
+import           Onyx.Nintendo.CISO                   (cisoReadable)
 import           Onyx.Nintendo.GCM                    (loadGCM)
 import           Onyx.Nintendo.U8                     (packU8, readU8)
 import           Onyx.Nintendo.WAD                    (getWAD, hackSplitU8s)
 import           Onyx.PlayStation.NPData
 import           Onyx.PlayStation.PKG                 (PKG (..), loadPKG,
-                                                       makePKG, tryDecryptEDATs)
+                                                       makePKG, tryDecryptEDAT,
+                                                       tryDecryptEDATs)
 import qualified Onyx.PowerGig.Crypt                  as PG
 import           Onyx.Project
 import qualified Onyx.QuickConvert.FretsOnFire        as QCH
@@ -196,7 +204,7 @@ import           System.MountPoints
 #endif
 
 loadRBProj :: (SendMessage m, MonadIO m) => FilePath -> StackTraceT m RBProj.RBProj
-loadRBProj f = inside f $ do
+loadRBProj f = inside f do
   stackIO (decodeGeneral <$> B.readFile f)
     >>= scanStack >>= parseStack >>= D.unserialize D.stackChunks
 
@@ -205,7 +213,7 @@ getInfoForSTFS dir stfs = do
   let dta = dir </> "songs/songs.dta"
   ex <- stackIO $ Dir.doesFileExist dta
   fromMaybe (T.pack $ takeFileName stfs, T.pack stfs) <$> if ex
-    then errorToWarning $ do
+    then errorToWarning do
       (_, pkg, _) <- readRB3DTA dta
       return (D.name pkg, D.name pkg <> maybe "" (\artist -> " (" <> artist <> ")") (D.artist pkg))
     else return Nothing
@@ -213,7 +221,7 @@ getInfoForSTFS dir stfs = do
 _installSTFS :: (MonadIO m) => FilePath -> FilePath -> StackTraceT m ()
 _installSTFS stfs usb = do
   (titleID, sign) <- stfsFolder stfs
-  packageTitle <- stackIO $ IO.withBinaryFile stfs IO.ReadMode $ \h -> do
+  packageTitle <- stackIO $ IO.withBinaryFile stfs IO.ReadMode \h -> do
     IO.hSeek h IO.AbsoluteSeek 0x411
     bs <- B.hGet h 0x80
     return $ T.takeWhile (/= '\0') $ TE.decodeUtf16BE bs
@@ -227,13 +235,13 @@ _installSTFS stfs usb = do
   stackIO $ Dir.copyFile stfs $ usb </> folder </> file
 
 _findXbox360USB :: (MonadIO m) => StackTraceT m [FilePath]
-_findXbox360USB = stackIO $ do
+_findXbox360USB = stackIO do
 #ifdef WINDOWS
   dword <- getLogicalDrives
   let drives = [ letter : ":\\" | (letter, i) <- zip ['A'..'Z'] [0..], dword `testBit` i ]
 #else
   mnts <- getMounts
-  let drives = map mnt_dir $ flip filter mnts $ \mnt ->
+  let drives = map mnt_dir $ flip filter mnts \mnt ->
         ("/dev/" `isPrefixOf` mnt_fsname mnt) && (mnt_dir mnt /= "/")
 #endif
   filterM (\drive -> Dir.doesDirectoryExist $ drive </> "Content") drives
@@ -259,6 +267,8 @@ identifyFile fp = Dir.doesFileExist fp >>= \case
     ".chart" -> return $ FileType FileChart fp
     ".psarc" -> return $ FileType FilePSARC fp
     ".iso" -> return $ FileType FileISO fp
+    ".ciso" -> return $ FileType FileISO fp
+    ".cue" -> return $ FileType FileISO fp
     ".blob" -> return $ FileType FileBlob fp
     ".iga" -> return $ FileType FileIGA fp
     ".hdr" -> return $ FileType FileHdrOrArk fp
@@ -267,6 +277,7 @@ identifyFile fp = Dir.doesFileExist fp >>= \case
     ".fsb" -> return $ FileType FileFSB fp
     ".wad" -> return $ FileType FileWAD fp
     ".hed" -> return $ FileType FileHED fp
+    ".edat" -> return $ FileType FileEDAT fp -- may not actually be edat if unencrypted midi
     ".app" -> return $ FileType FileU8 fp -- note, we check both extension and "U.8-" magic since official rb u8 don't actually start with that
     ".2" | ".hdr.e.2" `T.isSuffixOf` T.toLower (T.pack $ takeFileName fp) -> return $ FileType FileHdrE2 fp
     ext | any (`isPrefixOf` ext) [".png_", ".bmp_"] -> return $ FileType FileHarmonixImage fp -- assume this is .png_xbox, .bmp_ps2, etc.
@@ -277,8 +288,8 @@ identifyFile fp = Dir.doesFileExist fp >>= \case
       _ -> case takeFileName fp of
         "song.ini" -> return $ FileType FilePS fp
         _ -> do
-          magic <- IO.withBinaryFile fp IO.ReadMode $ \h -> BL.hGet h 4
-          return $ case magic of
+          magic <- IO.withBinaryFile fp IO.ReadMode \h -> BL.hGet h 4
+          return case magic of
             "RBSF" -> FileType FileRBA fp
             "CON " -> FileType FileSTFS fp
             "LIVE" -> FileType FileSTFS fp
@@ -295,7 +306,8 @@ identifyFile fp = Dir.doesFileExist fp >>= \case
               [0xAF, 0xDE, 0xBE, 0xCB] -> FileType FileMilo fp
               [0xAF, 0xDE, 0xBE, 0xCC] -> FileType FileMilo fp
               [0xAF, 0xDE, 0xBE, 0xCD] -> FileType FileMilo fp
-              [0x7F, 0x50, 0x4B, 0x47] -> FileType FilePKG fp
+              [0x7F, 0x50, 0x4B, 0x47] -> FileType FilePKGPS3 fp
+              [0x7F, 0x43, 0x4E, 0x54] -> FileType FilePKGPS4 fp
               [0x55, 0xAA, 0x38, 0x2D] -> FileType FileU8 fp
               _                        -> FileUnrecognized
   False -> Dir.doesDirectoryExist fp >>= \case
@@ -339,7 +351,8 @@ data FileType
   | FileZip
   | FilePSARC
   | FileMilo
-  | FilePKG
+  | FilePKGPS3
+  | FilePKGPS4
   | FileHdrE2
   | FileISO
   | FileFSB
@@ -354,6 +367,7 @@ data FileType
   | FileHarmonixImage
   | FileSNG
   | FileHED
+  | FileEDAT
   deriving (Eq, Ord, Show)
 
 identifyFile' :: (MonadIO m) => FilePath -> StackTraceT m (FileType, FilePath)
@@ -400,7 +414,9 @@ buildTarget yamlPath fout opts = do
           _      -> targetFolder </> "ps"
         GH2   {} -> targetFolder </> "gh2.zip"
         GH1   {} -> undefined -- TODO
-        GH3   {} -> undefined -- TODO
+        GH3   {} -> case map toLower $ takeExtension fout of
+          ".pkg" -> targetFolder </> "ps3.pkg"
+          _      -> targetFolder </> "gh3live"
         GH5   {} -> case map toLower $ takeExtension fout of
           ".pkg" -> targetFolder </> "ps3.pkg"
           _      -> targetFolder </> "ghworlive"
@@ -432,7 +448,7 @@ getInputMIDI files = optionalFile files >>= \case
   (FileSongYaml, yamlPath) -> return $ takeDirectory yamlPath </> "notes.mid"
   (FileRBProj, rbprojPath) -> do
     rbproj <- loadRBProj rbprojPath
-    return $ T.unpack $ RBProj.midiFile $ RBProj.midi $ RBProj.project rbproj
+    return $ T.unpack rbproj.project.midi.midiFile
   (FileMidi, mid) -> return mid
   (FilePS, ini) -> return $ takeDirectory ini </> "notes.mid"
   (ftype, fpath) -> unrecognized ftype fpath
@@ -460,9 +476,9 @@ commands =
         [x] -> return x
         _   -> fatal "Expected 0 or 1 files/folders"
       proj <- openProject (optIndex opts) fpath
-      out <- outputFile opts $ return $ projectTemplate proj ++ "_import"
+      out <- outputFile opts $ return $ proj.projectTemplate ++ "_import"
       stackIO $ Dir.createDirectoryIfMissing False out
-      copyDirRecursive (takeDirectory $ projectLocation proj) out
+      copyDirRecursive (takeDirectory proj.projectLocation) out
       when (OptVenueGen `elem` opts) $ changeToVenueGen out
       return [out]
     }
@@ -517,10 +533,10 @@ commands =
         _   -> fatal "Expected 0 or 1 files/folders"
       proj <- openProject (optIndex opts) fpath
       player <- buildPlayer (getMaybePlan opts) proj
-      case projectRelease proj of
+      case proj.projectRelease of
         Nothing -> return [player </> "index.html"] -- onyx project, return folder directly
         Just _ -> do
-          out <- outputFile opts $ return $ projectTemplate proj ++ "_player"
+          out <- outputFile opts $ return $ proj.projectTemplate ++ "_player"
           stackIO $ Dir.createDirectoryIfMissing False out
           copyDirRecursive player out
           return [out </> "index.html"]
@@ -543,12 +559,12 @@ commands =
           return [rpp]
         else do
           proj <- openProject (optIndex opts) fpath
-          yamlDir <- case projectRelease proj of
-            Nothing -> return $ takeDirectory $ projectLocation proj
+          yamlDir <- case proj.projectRelease of
+            Nothing -> return $ takeDirectory proj.projectLocation
             Just _  -> do
-              out <- outputFile opts $ return $ projectTemplate proj ++ "_reaper"
+              out <- outputFile opts $ return $ proj.projectTemplate ++ "_reaper"
               stackIO $ Dir.createDirectoryIfMissing False out
-              copyDirRecursive (takeDirectory $ projectLocation proj) out
+              copyDirRecursive (takeDirectory proj.projectLocation) out
               return out
           let yamlPath = yamlDir </> "song.yml"
           planName <- getPlanName (Just "author") yamlPath opts
@@ -575,13 +591,14 @@ commands =
         FileSongYaml -> withProject (optIndex opts) fpath $ proKeysHanging $ getMaybePlan opts
         FileRBProj   -> do
           rbproj <- loadRBProj fpath
-          let midPath = T.unpack $ RBProj.midiFile $ RBProj.midi $ RBProj.project rbproj
+          let midPath = T.unpack rbproj.project.midi.midiFile
           withMIDI (takeDirectory fpath </> midPath)
         FileSTFS     -> undone
-        FileRBA      -> tempDir "onyx_hanging_rba" $ \tmp -> do
-          let midPath = tmp </> "notes.mid"
-          getRBAFile 1 fpath midPath
-          withMIDI midPath
+        FileRBA      -> do
+          contents <- stackIO $ readRBAFiles $ fileReadable fpath
+          case contents.midi of
+            Nothing -> fatal "No midi found in .rba file"
+            Just r  -> F.loadMIDIBytes r >>= F.readMIDIFile' . fmap decodeGeneral >>= lg . T.unpack . closeShiftsFile
         FilePS       -> withMIDI $ takeDirectory fpath </> "notes.mid"
         FileMidi     -> withMIDI fpath
         _            -> unrecognized ftype fpath
@@ -732,18 +749,18 @@ commands =
         return [fout]
       "gh4-mp3" : streams -> do
         fout <- outputFile opts $ fatal "Need --to"
-        tempDir "onyx-fsb" $ \tmp -> do
+        tempDir "onyx-fsb" \tmp -> do
           let tmpWav = tmp </> "temp.wav"
-          mp3s <- forM streams $ \fin -> case map toLower $ takeExtension tmp of
+          mp3s <- forM streams \fin -> case map toLower $ takeExtension tmp of
             ".mp3" -> stackIO $ BL.fromStrict <$> B.readFile fin
             ".wav" -> do
-              let setup lame = liftIO $ do
+              let setup lame = liftIO do
                     L.check $ L.setBrate lame 128
                     L.check $ L.setQuality lame 5
                     L.check $ L.setOutSamplerate lame 48000
               src <- buildSource' $ Input fin
               let resampled = resampleTo 48000 SincMediumQuality src
-              stackIO $ runResourceT $ sinkMP3PadWithHandle tmpWav setup resampled
+              stackIO $ runResourceT $ sinkMP3WithHandle tmpWav setup resampled
               stackIO $ BL.fromStrict <$> B.readFile tmpWav
             _ -> fatal $ "Expected mp3 or wav file extension for audio: " <> show fin
           stackIO $ ghBandMP3sToFSB4 mp3s >>= BL.writeFile fout . emitFSB
@@ -762,12 +779,12 @@ commands =
         contents <- stackIO $ readFile $ dir </> "pak-contents.txt"
         let nodes = map read $ lines contents
         files <- stackIO $ Dir.listDirectory dir
-        let fileMap = Map.fromList $ do
+        let fileMap = Map.fromList do
               f <- files
               n <- toList $ readMaybe $ takeWhile isDigit f
               guard $ not $ ".parsed." `T.isInfixOf` T.pack f
               return (n, f)
-        newContents <- forM (zip [0..] nodes) $ \(i, node) -> case Map.lookup (i :: Int) fileMap of
+        newContents <- forM (zip [0..] nodes) \(i, node) -> case Map.lookup (i :: Int) fileMap of
           Just f -> do
             bs <- stackIO $ BL.fromStrict <$> B.readFile (dir </> f)
             return (node, bs)
@@ -793,11 +810,11 @@ commands =
             $ (<.> "pkg") . dropTrailingPathSeparator
             <$> stackIO (Dir.makeAbsolute dir)
           folderOrig <- stackIO $ crawlFolder dir
-          folderEDATs <- tempDir "onyx-pkg" $ \tmp -> let
+          folderEDATs <- tempDir "onyx-pkg" \tmp -> let
             tmpIn  = tmp </> "input"
             tmpOut = tmp </> "output.edat"
             modifyFolder folder = do
-              newFiles <- forM (folderFiles folder) $ \(name, r) ->
+              newFiles <- forM (folderFiles folder) \(name, r) ->
                 if ".PS3" `T.isSuffixOf` name
                   then do
                     let edatName = name <> ".EDAT"
@@ -817,7 +834,7 @@ commands =
                     edat <- stackIO $ BL.fromStrict <$> B.readFile tmpOut
                     return (edatName, makeHandle "(new edat)" $ byteStringSimpleHandle edat)
                   else return (name, r)
-              newFolders <- forM (folderSubfolders folder) $ \(name, sub) -> do
+              newFolders <- forM (folderSubfolders folder) \(name, sub) -> do
                 sub' <- modifyFolder sub
                 return (name, sub')
               return Folder { folderFiles = newFiles, folderSubfolders = newFolders }
@@ -884,12 +901,12 @@ commands =
     , commandRun = \args opts -> case args of
       [stfs] -> do
         out <- outputFile opts $ return $ stfs <> "_ps3"
-        displayName <- stackIO $ withSTFSPackage stfs $ return . head . md_DisplayName . stfsMetadata
+        displayName <- stackIO $ withSTFSPackage stfs \pkg -> return $ head pkg.stfsMetadata.md_DisplayName
         let displayName' = TE.decodeLatin1 $ packageNameHashFormat True displayName
         contents <- stackIO $ getSTFSFolder stfs
         contents' <- let
           modifyFolder folder = do
-            newFiles <- flip concatMapM (folderFiles folder) $ \(name, r) -> let
+            newFiles <- flip concatMapM (folderFiles folder) \(name, r) -> let
               upper = T.toUpper name
               in case T.stripSuffix ".FSB.XEN" upper of
                 Just audioName -> do
@@ -902,7 +919,7 @@ commands =
                       Nothing -> do
                         warn $ "Couldn't parse .fsb to determine audio codec: " <> show name
                         return False
-                      Just fsb -> case map fsbExtra $ either fsb3Songs fsb4Songs $ fsbHeader fsb of
+                      Just fsb -> case map (.fsbExtra) $ either (.fsb3Songs) (.fsb4Songs) fsb.fsbHeader of
                         [] -> do
                           warn $ ".fsb has no song tracks? " <> show name
                           return True
@@ -937,7 +954,7 @@ commands =
                         ]
                     Nothing -> return [(baseName <> ".PS3", r)]
                   Nothing       -> return [(name, r)] -- shouldn't happen
-            newFolders <- forM (folderSubfolders folder) $ \(name, sub) -> do
+            newFolders <- forM (folderSubfolders folder) \(name, sub) -> do
               sub' <- modifyFolder sub
               return (name, sub')
             return Folder { folderFiles = newFiles, folderSubfolders = newFolders }
@@ -965,7 +982,7 @@ commands =
       , "- Magma (v1/v2) .rba"
       , "- Rock Band .milo_*"
       , "- Power Gig .hdr.e.2"
-      , "- Standard (PS2) and Xbox 360 .iso"
+      , "- Standard (PS1/PS2) .iso, .bin/.cue, and Xbox 360 .iso"
       , "- FMOD Sample Bank v3/v4 (extracts to individual streams)"
       , "- Wii U8 archive"
       , "- Harmonix PS2 .vgs (extracts each channel to WAV)"
@@ -980,7 +997,7 @@ commands =
       [ "onyx extract file_in [--to folder_out]"
       ]
     , commandList = True
-    , commandRun = \files opts -> forM files $ \f -> identifyFile' f >>= \case
+    , commandRun = \files opts -> forM files \f -> identifyFile' f >>= \case
       (FileSTFS, stfs) -> do
         out <- outputFile opts $ return $ stfs ++ "_extract"
         stackIO $ Dir.createDirectoryIfMissing False out
@@ -994,44 +1011,61 @@ commands =
         return out
       (FileRBA, rba) -> do
         out <- outputFile opts $ return $ rba ++ "_extract"
-        stackIO $ Dir.createDirectoryIfMissing False out
-        getRBAFile 0 rba $ out </> "songs.dta"
-        getRBAFile 1 rba $ out </> "notes.mid"
-        getRBAFile 2 rba $ out </> "audio.mogg"
-        getRBAFile 3 rba $ out </> "song.milo"
-        getRBAFile 4 rba $ out </> "cover.bmp"
-        getRBAFile 5 rba $ out </> "weights.bin"
-        getRBAFile 6 rba $ out </> "extra.dta"
+        stackIO do
+          Dir.createDirectoryIfMissing False out
+          contents <- readRBAFiles $ fileReadable rba
+          mapM_ (`saveReadable` (out </> "songs.dta"  )) contents.dta
+          mapM_ (`saveReadable` (out </> "notes.mid"  )) contents.midi
+          mapM_ (`saveReadable` (out </> "audio.mogg" )) contents.mogg
+          mapM_ (`saveReadable` (out </> "song.milo"  )) contents.milo
+          forM_ contents.albumArt \r -> do
+            isBMP <- isReadableBMP r
+            saveReadable r $ out </> if isBMP then "cover.bmp" else "cover.png_xbox"
+          mapM_ (`saveReadable` (out </> "weights.bin")) contents.weights
+          mapM_ (`saveReadable` (out </> "extra.dta"  )) contents.dtaExtra
         return out
       (FileMilo, milo) -> do
         out <- outputFile opts $ return $ milo ++ "_extract"
         unpackMilo milo out
         return out
-      (FilePKG, pkg) -> do
+      (FilePKGPS3, pkg) -> do
         out <- outputFile opts $ return $ pkg <> "_extract"
         stackIO $ Dir.createDirectoryIfMissing False out
-        folder <- stackIO (loadPKG pkg) >>= tryDecryptEDATs . pkgFolder
+        folder <- stackIO (loadPKG pkg) >>= tryDecryptEDATs . (.pkgFolder)
         stackIO $ saveHandleFolder (first TE.decodeLatin1 folder) out
         return out
+      (FilePKGPS4, _pkg) -> do
+        fatal "PS4 .pkg not supported yet"
+        {-
+        out <- outputFile opts $ return $ pkg <> "_extract"
+        stackIO $ Dir.createDirectoryIfMissing False out
+        folder <- stackIO $ loadPkgFolder $ fileReadable pkg
+        stackIO $ saveHandleFolder folder out
+        return out
+        -}
       (FileHdrE2, hdrE2) -> do
         let base = takeWhile (/= '.') $ takeFileName hdrE2
         out <- outputFile opts $ return $ takeDirectory hdrE2 </> (base <> "_extract")
         hdr <- stackIO (B.readFile hdrE2) >>= PG.decryptE2 >>= PG.readHeader
-        stackIO $ do
+        stackIO do
           tree <- crawlFolder $ takeDirectory hdrE2
           let connected = (if elem OptCrypt opts then PG.decryptPKContents else id)
-                $ PG.connectPKFiles tree base $ PG.getFolder $ PG.fh_Contents hdr
+                $ PG.connectPKFiles tree base $ PG.getFolder hdr.fh_Contents
           saveHandleFolder connected out
         return out
       (FileISO, iso) -> do
         out <- outputFile opts $ return $ iso <> "_extract"
-        dir <- stackIO $ do
-          magic <- IO.withBinaryFile iso IO.ReadMode $ \h -> BL.hGet h 1
-          if magic == "G" -- maybe not foolproof
-            then loadGCM $ fileReadable iso
-            else loadXboxISO (fileReadable iso) >>= \case
-              Just xiso -> return xiso
-              Nothing   -> folderISO $ fileReadable iso
+        dir <- stackIO do
+          magic <- IO.withBinaryFile iso IO.ReadMode \h -> BL.hGet h 4
+          if  | map toLower (takeExtension iso) == ".cue"
+                -> folderCueBin iso
+              | magic == "CISO"
+                -> loadGCM $ cisoReadable $ fileReadable iso
+              | BL.take 1 magic == "G" -- maybe not foolproof
+                -> loadGCM $ fileReadable iso
+              | otherwise -> loadXboxISO (fileReadable iso) >>= \case
+                Just xiso -> return xiso
+                Nothing   -> folderISO $ fileReadable iso
         stackIO $ saveHandleFolder (first TE.decodeLatin1 dir) out
         return out
       (FileFSB, fin) -> do
@@ -1050,38 +1084,40 @@ commands =
         out <- outputFile opts $ return $ vgs <> "_extract"
         stackIO $ Dir.createDirectoryIfMissing False out
         srcs <- liftIO $ readVGS vgs
-        forM_ (zip [0..] srcs) $ \(i, src) -> do
+        forM_ (zip [0..] srcs) \(i, src) -> do
           let fout = out </> show (i :: Int) <.> "wav"
           runAudio (CA.mapSamples CA.fractionalSample src) fout
         return out
       (FileBlob, fin) -> do
         out <- outputFile opts $ return $ fin <> "_extract"
-        stackIO $ do
+        stackIO do
           Dir.createDirectoryIfMissing False out
           dec <- IOS.decodeBlob fin
           (blob, dats) <- IOS.loadBlob fin
           B.writeFile (out </> "decrypted.bin") dec
           writeFile (out </> "decrypted.txt") $ show blob
-          forM_ dats $ \(fout, bs) -> B.writeFile (out </> fout) bs
+          forM_ dats \(fout, bs) -> B.writeFile (out </> fout) bs
         return out
       (FileIGA, fin) -> do
         out <- outputFile opts $ return $ fin <> "_extract"
         (_hdr, contents) <- stackIO $ loadIGA fin
         stackIO $ Dir.createDirectoryIfMissing False out
-        stackIO $ forM_ contents $ \(name, content) -> do
+        stackIO $ forM_ contents \(name, content) -> do
           let outName = out </> B8.unpack name
           Dir.createDirectoryIfMissing True $ takeDirectory outName
           BL.writeFile outName content
         return out
       (FileHdrOrArk, fin) -> do
         out <- outputFile opts $ return $ fin <> "_extract"
-        hdr <- stackIO (B.readFile fin) >>= Ark.readHdr . BL.fromStrict
-        arks <- mapM fixFileCase $ do
+        hdr <- case map toLower $ takeExtension fin of
+          ".ark" -> stackIO $ Ark.readLoneArk $ fileReadable fin
+          _      -> stackIO (B.readFile fin) >>= Ark.readHdr . BL.fromStrict
+        arks <- mapM fixFileCase do
           ark <- Ark.getFileArks hdr $ T.pack $ takeFileName fin
           return $ takeDirectory fin </> T.unpack ark
         Ark.extractArk hdr (map fileReadable arks) out
         return out
-      (FilePak, pak) -> inside ("extracting pak " <> pak) $ do
+      (FilePak, pak) -> inside ("extracting pak " <> pak) do
         dout <- outputFile opts $ return $ pak <> "_extract"
         stackIO $ Dir.createDirectoryIfMissing False dout
         pabData <- do
@@ -1105,24 +1141,24 @@ commands =
               , ".skiv", ".snp", ".sqb", ".stat", ".stex", ".table", ".tex", ".trkobj", ".tvx", ".wav", ".xml"
               ]
             digits = length $ show $ length nodes - 1
-        forM_ (zip [0..] nodes) $ \(i, (node, contents)) -> do
+        forM_ (zip [0..] nodes) \(i, (node, contents)) -> do
           let ext = fromMaybe ("." <> show node.nodeFileType)
                 $ find ((== node.nodeFileType) . qbKeyCRC . B8.pack) knownExts
               name = reverse (take digits $ reverse (show (i :: Int)) <> repeat '0') <> ext
           stackIO $ BL.writeFile (dout </> name) contents
-          when (node.nodeFileType == ".note") $ do
+          when (node.nodeFileType == ".note") do
             -- TODO handle failure
             note <- loadNoteFile contents
             stackIO $ writeFile (dout </> name <.> "parsed.txt") $ show note
-          when (node.nodeFileType == ".qb") $ do
-            let matchingQS = flip filter nodes $ \(otherNode, _) ->
+          when (node.nodeFileType == ".qb") do
+            let matchingQS = flip filter nodes \(otherNode, _) ->
                   node.nodeFilenameCRC == otherNode.nodeFilenameCRC
                     && otherNode.nodeFileType == ".qs.en"
                 mappingQS = qsBank matchingQS
-            inside ("Parsing QB file: " <> show name) $ do
+            inside ("Parsing QB file: " <> show name) do
               let ?endian = format.pakByteOrder
               mqb <- errorToWarning $ runGetM parseQB contents
-              forM_ mqb $ \qb -> do
+              forM_ mqb \qb -> do
                 let filled = map (lookupQB knownKeys . lookupQS mappingQS) qb
                 stackIO $ Y.encodeFile (dout </> name <.> "parsed.yaml") filled
         return dout
@@ -1132,7 +1168,7 @@ commands =
         wad <- stackIO (BL.readFile fin) >>= runGetM getWAD
         (initialData, u8s) <- hackSplitU8s wad
         stackIO $ B.writeFile (out </> "initial-data.bin") initialData
-        forM_ (zip [0..] u8s) $ \(i, (u8Bytes, u8)) -> do
+        forM_ (zip [0..] u8s) \(i, (u8Bytes, u8)) -> do
           stackIO $ B.writeFile (out </> ("u8-" <> show (i :: Int) <> ".app")) u8Bytes
           let u8' = bimap TE.decodeLatin1 (makeHandle "" . byteStringSimpleHandle) u8
           stackIO $ saveHandleFolder u8' $ out </> ("u8-" <> show (i :: Int))
@@ -1161,12 +1197,13 @@ commands =
       , "onyx unwrap in.mogg --to out.ogg     # unwrap/decrypt MOGG"
       , "onyx unwrap in.bik --to out.bik      # decrypt encrypted Bink"
       , "onyx unwrap in.png_xbox --to out.png # decode Harmonix image format"
+      , "onyx unwrap in.mid.edat --to out.mid # decrypt supported PS3 .edat"
       ]
     , commandList = True
-    , commandRun = \files opts -> forM files $ \f -> identifyFile' f >>= \case
+    , commandRun = \files opts -> forM files \f -> identifyFile' f >>= \case
       (FileFSBEncrypted, fin) -> do
         dec <- stackIO (decryptFSB fin) >>= maybe (fatal "Couldn't decrypt GH .fsb.(xen/ps3) audio") return
-        out <- outputFile opts $ return $ case stripSuffix ".fsb.xen" fin <|> stripSuffix ".fsb.ps3" fin <|> stripSuffix ".FSB.PS3" fin of
+        out <- outputFile opts $ return case stripSuffix ".fsb.xen" fin <|> stripSuffix ".fsb.ps3" fin <|> stripSuffix ".FSB.PS3" fin of
           Just root -> root <.> "fsb"
           Nothing   -> f <.> "fsb"
         stackIO $ BL.writeFile out dec
@@ -1188,6 +1225,18 @@ commands =
             stackIO $ writePng fout img
             return fout
           Nothing -> fatal "Couldn't decode image file"
+      (FileEDAT, fin) -> do
+        fout <- outputFile opts $ return case stripSuffix ".edat" fin <|> stripSuffix ".EDAT" fin of
+          Just root -> root
+          Nothing   -> fin <.> "dec"
+        absolute <- stackIO $ Dir.makeAbsolute fin
+        -- from [USRDIR/]packagename/songs/songname/songname.mid.edat, we want packagename
+        let rbPackageDir = takeFileName $ takeDirectory $ takeDirectory $ takeDirectory absolute
+            filename = takeFileName fin
+        tryDecryptEDAT (B8.pack rbPackageDir) (B8.pack filename) (fileReadable fin) >>= \case
+          Nothing -> fatal "Couldn't decode .edat"
+          Just r  -> stackIO $ saveReadable r fout
+        return fout
       p -> fatal $ "Unexpected file type given to unwrap: " <> show p
     }
 
@@ -1288,7 +1337,7 @@ commands =
             comments = case filter (\src -> T.take 1 src /= "(") $ map TE.decodeLatin1 txtBin.sources of
               []      -> ""
               sources -> T.unlines ("; .bin sources:" : map (";   " <>) sources) <> "\n"
-        stackIO $ B.writeFile fout $ B8.pack $ T.unpack $ if binSources
+        stackIO $ B.writeFile fout $ B8.pack $ T.unpack if binSources
           then dta
           else comments <> dta
         return [fout]
@@ -1346,7 +1395,7 @@ commands =
     , commandList = False
     , commandRun = \args opts -> case args of
       audios@(_ : _) -> do
-        pairs <- forM audios $ \audio -> inside ("audio file: " <> audio) $ do
+        pairs <- forM audios \audio -> inside ("audio file: " <> audio) do
           md5 <- audioMD5 audio >>= maybe (fatal "Couldn't compute audio hash") return
           len <- audioLength audio >>= maybe (fatal "Couldn't compute audio length") return
           return (md5, len)
@@ -1355,7 +1404,7 @@ commands =
         stackIO $ yamlEncodeFile (dir </> "song.yml") $ toJSON (SongYaml
           { metadata = def
           , global   = def
-          , audio    = HM.fromList $ flip map (zip [1..] pairs) $ \(i, (md5, len)) -> let
+          , audio    = HM.fromList $ zip [1..] pairs <&> \(i, (md5, len)) -> let
             ainfo = AudioFile AudioInfo
               { md5      = Just $ T.pack md5
               , frames   = Just len
@@ -1416,8 +1465,8 @@ commands =
                 , map addWarnings proTracks.tracks
                 ]
               }
-        forM_ (ATB.toPairList $ RTB.toAbsoluteEventList 0 warnings) $ \(posn, warning) -> do
-          inside (showPosition onyx.timesigs posn) $ do
+        forM_ (ATB.toPairList $ RTB.toAbsoluteEventList 0 warnings) \(posn, warning) -> do
+          inside (showPosition onyx.timesigs posn) do
             warn $ T.unpack warning
         F.saveMIDIUtf8 fmid raw'
         return [fmid]
@@ -1437,7 +1486,7 @@ commands =
         fout <- outputFile opts $ return fin
         let r = fileReadable fin
         stackIO (checkOldC3Mogg r) >>= \case
-          Just patch -> tempDir "onyx-fix-mogg" $ \tmp -> do
+          Just patch -> tempDir "onyx-fix-mogg" \tmp -> do
             let ftmp = tmp </> "out.mogg"
             stackIO $ saveReadable (applyMoggPatch patch r) ftmp
             stackIO $ Dir.copyFile ftmp fout
@@ -1461,11 +1510,34 @@ commands =
             Nothing -> fatal $ "Couldn't load FoF song: " <> f2
             Just q2 -> do
               combined <- QCH.combineCharts q1 q2
-              stackIO $ case takeExtension fout of
+              stackIO case takeExtension fout of
                 ".sng" -> QCH.saveQuickFoFSNG    fout combined
                 _      -> QCH.saveQuickFoFFolder fout combined
               return [fout]
       _ -> fatal "Expected 2 arguments: song-base song-new"
+    }
+
+  , Command
+    { commandWord = "js"
+    , commandDesc = "Test execution of .js files"
+    , commandUsage = "onyx js f1.js f2.js ..."
+    , commandList = False
+    , commandRun = \args _opts -> do
+      forM_ args \f -> do
+        stackIO $ JS.withJSContext \ctx -> do
+          js <- TE.decodeUtf8 <$> B.readFile f
+          print f
+          print js
+          v <- JS.js_Eval_Catch ctx js (T.pack f) JS.js_EVAL_TYPE_MODULE
+          print v
+          case v of
+            Left e -> do
+              JS.getJSException ctx e >>= print
+              JS.js_FreeValue ctx e
+            Right x -> do
+              JS.jsValueToJSON ctx x >>= print
+              JS.js_FreeValue ctx x
+      return []
     }
 
   ]
@@ -1490,11 +1562,11 @@ _oldCommands =
         return []
       (FileRBProj, rbprojPath) -> do
         rbproj <- loadRBProj rbprojPath
-        let isMagmaV2 = case RBProj.projectVersion $ RBProj.project rbproj of
+        let isMagmaV2 = case rbproj.project.projectVersion of
               24 -> True
               5  -> False -- v1
               _  -> True -- need to do more testing
-        tempDir "onyx_check" $ \tmp -> if isMagmaV2
+        tempDir "onyx_check" \tmp -> if isMagmaV2
           then runMagmaMIDI rbprojPath (tmp </> "out.mid") >>= lg
           else undone
         return []
@@ -1522,9 +1594,9 @@ _oldCommands =
       -- TODO this is untested!
       [pathHdr, dir] -> do
         hdrOrig <- stackIO (B.readFile pathHdr) >>= PG.decryptE2 >>= PG.readHeader
-        let origFolder = PG.getFolder $ PG.fh_Contents hdrOrig
+        let origFolder = PG.getFolder hdrOrig.fh_Contents
             newPKNum = fromIntegral $
-              maximum (map PG.oe_PKNum $ toList origFolder >>= toList . PG.pkOffsetEntries) + 1
+              maximum (map (.oe_PKNum) $ toList origFolder >>= toList . (.pkOffsetEntries)) + 1
         src <- (if elem OptCrypt opts then PG.encryptPKContents else id)
           <$> stackIO (crawlFolder dir)
         (newFolder, newPK) <- stackIO $ PG.makeNewPK newPKNum src
@@ -1542,7 +1614,7 @@ _oldCommands =
     , commandDesc = "Decrypt .e.2, producing crypt header and file"
     , commandUsage = ""
     , commandList = False
-    , commandRun = \files _opts -> fmap concat $ forM files $ \f -> do
+    , commandRun = \files _opts -> fmap concat $ forM files \f -> do
       let out = case T.stripSuffix ".e.2" $ T.pack f of
             Nothing -> f <> ".dec"
             Just f' -> T.unpack f'
@@ -1552,7 +1624,7 @@ _oldCommands =
       dec <- PG.decryptE2 enc
       stackIO $ B.writeFile outCryptHeader cryptHeader
       stackIO $ BL.writeFile out dec
-      when (".hdr" `T.isSuffixOf` T.pack out) $ do
+      when (".hdr" `T.isSuffixOf` T.pack out) do
         PG.readHeader dec >>= stackIO . writeFile (out <> ".txt") . show
       return [outCryptHeader, out]
     }
@@ -1562,7 +1634,7 @@ _oldCommands =
     , commandDesc = "Encrypt to .e.2"
     , commandUsage = ""
     , commandList = False
-    , commandRun = \files _opts -> forM files $ \f -> do
+    , commandRun = \files _opts -> forM files \f -> do
       let out = f <> ".e.2"
       stackIO (B.readFile f) >>= PG.encryptE2 >>= stackIO . BL.writeFile out
       return out
@@ -1592,11 +1664,11 @@ _oldCommands =
     , commandUsage = "onyx install-ark song GEN/ --target gh2"
     , commandList = False
     , commandRun = \args opts -> case args of
-      [song, gen] -> withProject (optIndex opts) song $ \proj -> do
+      [song, gen] -> withProject (optIndex opts) song \proj -> do
         targetName <- case [ t | OptTarget t <- opts ] of
           []    -> fatal "command requires --target, none given"
           t : _ -> return t
-        target <- case HM.lookup targetName (projectSongYaml proj).targets of
+        target <- case HM.lookup targetName proj.projectSongYaml.targets of
           Nothing     -> fatal $ "Target not found in YAML file: " <> show targetName
           Just target -> return target
         gh2 <- case target of
@@ -1642,7 +1714,7 @@ _oldCommands =
               , (mid.tracks.fixedHarm3     , "_harm3.lipsync"  , False)
               , (mempty                      , "_empty.lipsync"  , True )
               ]
-        fmap catMaybes $ forM tracks $ \(trk, suffix, alwaysWrite) -> do
+        fmap catMaybes $ forM tracks \(trk, suffix, alwaysWrite) -> do
           let fout = template <> suffix
           if nullVox trk && not alwaysWrite
             then return Nothing
@@ -1678,8 +1750,8 @@ _oldCommands =
             voxToLip
               = (if game == GameTBRB then setBeatles else id)
               . lipsyncFromMIDITrack vmap
-        fmap concat $ forM (Map.toList mid.tracks.onyxParts) $ \(fpart, opart) -> do
-          fmap catMaybes $ forM tracks $ \(getter, suffix) -> do
+        fmap concat $ forM (Map.toList mid.tracks.onyxParts) \(fpart, opart) -> do
+          fmap catMaybes $ forM tracks \(getter, suffix) -> do
             let trk = getter opart
                 fout = template <> "_" <> T.unpack (F.getPartName fpart) <> suffix
             if trk == mempty
@@ -1706,10 +1778,10 @@ _oldCommands =
       fin : players -> do
         mid <- F.loadMIDI fin
         case players of
-          [] -> stackIO $ forM_ [minBound .. maxBound] $ \scoreTrack -> do
-            forM_ [minBound .. maxBound] $ \diff -> do
+          [] -> stackIO $ forM_ [minBound .. maxBound] \scoreTrack -> do
+            forM_ [minBound .. maxBound] \diff -> do
               let stars = starCutoffs mid.tracks [(scoreTrack, diff)]
-              when (any (maybe False (> 0)) stars) $ do
+              when (any (maybe False (> 0)) stars) do
                 putStrLn $ unwords [show scoreTrack, show diff, show stars]
           _ -> let
             parsePlayers [] = Right []
@@ -1722,8 +1794,8 @@ _oldCommands =
               ((part, diff) :) <$> parsePlayers rest
             in case parsePlayers players of
               Left  err   -> fatal err
-              Right pairs -> stackIO $ do
-                forM_ pairs $ \pair -> let
+              Right pairs -> stackIO do
+                forM_ pairs \pair -> let
                   (base, solo) = baseAndSolo mid.tracks pair
                   in putStrLn $ show pair <> ": base " <> show base <> ", solo bonuses " <> show solo
                 print $ starCutoffs mid.tracks pairs
@@ -1859,7 +1931,7 @@ commandLine args = let
     [ "Onyx Music Game Toolkit"
     , ""
     , "Usage: onyx [command] [files] [options]"
-    , "Commands: " <> T.unwords (map commandWord $ filter commandList commands)
+    , "Commands: " <> T.unwords (map (.commandWord) $ filter (.commandList) commands)
     , "Run `onyx [command] --help` for further instructions."
     , ""
     ]
@@ -1868,20 +1940,20 @@ commandLine args = let
       [] -> if elem OptHelp opts
         then printIntro >> return []
         else printIntro >> fatal "No command given."
-      cmd : nonopts' -> case [ c | c <- commands, commandWord c == T.pack cmd ] of
-        [c] -> inside ("command: onyx " <> cmd) $ if elem OptHelp opts
+      cmd : nonopts' -> case [ c | c <- commands, c.commandWord == T.pack cmd ] of
+        [c@(Command { commandRun = run })] -> inside ("command: onyx " <> cmd) if elem OptHelp opts
           then do
             lg $ T.unpack $ T.unlines
-              [ "onyx " <> commandWord c
-              , commandDesc c
+              [ "onyx " <> c.commandWord
+              , c.commandDesc
               , ""
               , "Usage:"
-              , commandUsage c
+              , c.commandUsage
               ]
             return []
-          else commandRun c nonopts' opts
+          else run nonopts' opts
         _ -> printIntro >> fatal ("Unrecognized command: " ++ show cmd)
-    _ -> inside "command line parsing" $ do
+    _ -> inside "command line parsing" do
       printIntro
       throwError $ Messages [ Message e [] | e <- errors ]
 
