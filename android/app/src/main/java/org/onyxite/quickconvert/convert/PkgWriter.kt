@@ -96,7 +96,10 @@ object PkgWriter {
             riv = riv,
         )
         val (digest1, digest2) = digests(finalHeader, metadata)
-        val encrypted = xorStream(qa, 0L, entries + payload)
+        val encrypted = ByteArray(entries.size + payload.size)
+        val prefix = keyPrefix(qa)
+        xorInto(prefix, 0L, entries, encrypted, 0)
+        xorInto(prefix, entries.size / 16L, payload, encrypted, entries.size)
         val out = ByteArrayBuilder()
         out.append(finalHeader)
         out.append(digest1)
@@ -194,13 +197,19 @@ object PkgWriter {
     }
 
     /**
-     * Onyx `nonFinalizedCrypt`: each 16-byte block is the first 16 bytes of
-     * SHA-1(prefix || big-endian block index). The prefix is hashed again for
-     * every block. Cloning a [MessageDigest] drops that prefix on some Android
-     * versions, and Onyx then rejects the package.
+     * Onyx `nonFinalizedCryptParallel`: each 16-byte block is the first 16 bytes of
+     * SHA-1(prefix || big-endian block index). Pieces of 64 KB are independent, so
+     * large files are encrypted in parallel. The prefix is hashed again for every
+     * block; cloning a [MessageDigest] drops that prefix on some Android versions.
      */
     private fun xorStream(keySource: ByteArray, startIndex: Long, data: ByteArray): ByteArray {
-        // 8+8+8+8 bytes of the key, then 0x18 zero bytes. 0x30 was one block short of Onyx.
+        val out = ByteArray(data.size)
+        xorInto(keyPrefix(keySource), startIndex, data, out, 0)
+        return out
+    }
+
+    private fun keyPrefix(keySource: ByteArray): ByteArray {
+        // 8+8+8+8 bytes of the key, then 0x18 zero bytes.
         val prefix = ByteArray(0x38)
         keySource.copyInto(prefix, 0, 0, minOf(8, keySource.size))
         keySource.copyInto(prefix, 8, 0, minOf(8, keySource.size))
@@ -209,25 +218,58 @@ object PkgWriter {
             keySource.copyInto(prefix, 16, 8, 8 + n)
             keySource.copyInto(prefix, 24, 8, 8 + n)
         }
-        val out = ByteArray(data.size)
-        var index = startIndex
-        var pos = 0
+        return prefix
+    }
+
+    private fun xorInto(
+        prefix: ByteArray,
+        startIndex: Long,
+        data: ByteArray,
+        out: ByteArray,
+        outOffset: Int,
+    ) {
+        if (data.isEmpty()) return
+        val pieces = (data.size + PIECE_SIZE - 1) / PIECE_SIZE
+        if (pieces == 1) {
+            cryptPiece(prefix, startIndex, data, 0, data.size, out, outOffset)
+            return
+        }
+        java.util.stream.IntStream.range(0, pieces).parallel().forEach { piece ->
+            val from = piece * PIECE_SIZE
+            val until = minOf(data.size, from + PIECE_SIZE)
+            cryptPiece(prefix, startIndex + from / 16L, data, from, until, out, outOffset + from)
+        }
+    }
+
+    private fun cryptPiece(
+        prefix: ByteArray,
+        startIndex: Long,
+        data: ByteArray,
+        from: Int,
+        until: Int,
+        out: ByteArray,
+        outOffset: Int,
+    ) {
+        val md = MessageDigest.getInstance("SHA-1")
         val indexBytes = ByteArray(8)
-        while (pos < data.size) {
+        var pos = from
+        var index = startIndex
+        while (pos < until) {
             put64(indexBytes, 0, index)
-            val block = MessageDigest.getInstance("SHA-1").apply {
-                update(prefix)
-                update(indexBytes)
-            }.digest()
-            val n = minOf(16, data.size - pos)
+            md.update(prefix)
+            md.update(indexBytes)
+            val block = md.digest()
+            val n = minOf(16, until - pos)
+            val dest = outOffset + (pos - from)
             for (i in 0 until n) {
-                out[pos + i] = (data[pos + i].toInt() xor (block[i].toInt() and 0xFF)).toByte()
+                out[dest + i] = (data[pos + i].toInt() xor (block[i].toInt() and 0xFF)).toByte()
             }
             pos += n
             index += 1
         }
-        return out
     }
+
+    private const val PIECE_SIZE = 0x10000
 
     private class Rec(val path: String, val data: ByteArray, val flags: Int)
 

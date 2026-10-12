@@ -77,6 +77,33 @@ class ConToPkgTest {
     }
 
     @Test
+    fun largeFileSurvivesParallelKeystream() {
+        val payload = ByteArray(0x10000 + 100) { (it * 17).toByte() }
+        val root = PkgWriter.Dir()
+        root.add("USRDIR/song/songs/audio.mogg", payload)
+        val pkg = PkgWriter.write(root, "UP8802-BLUS30463_00-Osong")
+        val count = be32(pkg, 0x14)
+        val dataOff = be64(pkg, 0x20).toInt()
+        val qa = pkg.copyOfRange(0x60, 0x70)
+        val records = decrypt(pkg, qa, dataOff, 0, count * 0x20)
+        var found = false
+        for (i in 0 until count) {
+            val at = i * 0x20
+            val nameOff = be32(records, at)
+            val nameLen = be32(records, at + 4)
+            val fileOff = be64(records, at + 8)
+            val fileLen = be64(records, at + 16)
+            val name = String(decrypt(pkg, qa, dataOff, nameOff, nameLen), Charsets.ISO_8859_1)
+            if (!name.endsWith("audio.mogg")) continue
+            found = true
+            assertEquals(payload.size.toLong(), fileLen)
+            val decoded = decrypt(pkg, qa, dataOff, fileOff.toInt(), payload.size)
+            assertTrue(payload.contentEquals(decoded))
+        }
+        assertTrue(found)
+    }
+
+    @Test
     fun nonFinalizedKeystreamMatchesOnyx() {
         val qa = ByteArray(16) { it.toByte() }
         val root = PkgWriter.Dir()
