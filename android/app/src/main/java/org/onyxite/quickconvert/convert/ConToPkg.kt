@@ -222,14 +222,12 @@ object ConToPkg {
         return replaced.toByteArray(Charsets.ISO_8859_1)
     }
 
+    /** RBEnhanced `CorrectSongID`: CRC-32 of the lowercased symbol, then `(crc % 9999999) + 2130000000`. */
     fun songIdNumber(symbol: String): Int {
-        var hash = 0
-        for (b in symbol.toByteArray(Charsets.ISO_8859_1)) {
-            hash = hash * 31 + (b.toInt() and 0xFF)
-        }
-        var n = Math.floorMod(hash, 1_000_000_000)
-        if (n < 10_000_000) n += 10_000_000
-        return n
+        val crc = java.util.zip.CRC32()
+        val lower = symbol.lowercase(java.util.Locale.ROOT).toByteArray(Charsets.ISO_8859_1)
+        crc.update(lower)
+        return ((crc.value % 9_999_999L) + 2_130_000_000L).toInt()
     }
 
     fun swapPng(bytes: ByteArray): ByteArray {

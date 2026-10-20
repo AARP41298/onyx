@@ -11,7 +11,8 @@ class ConToPkgTest {
         val dta = "(song (rating 4) (song_id my_song))".toByteArray(Charsets.ISO_8859_1)
         val text = String(ConToPkg.adjustDta(dta), Charsets.ISO_8859_1)
         assertTrue(text.contains("(rating 2)"))
-        assertTrue(text.contains("(song_id ${ConToPkg.songIdNumber("my_song")})"))
+        assertTrue(text.contains("(song_id 2130153358)"))
+        assertEquals(2130153358, ConToPkg.songIdNumber("My_Song"))
     }
 
     @Test
@@ -56,7 +57,7 @@ class ConToPkgTest {
         val dta = "('rating' 4) ('song_id' my_song)".toByteArray(Charsets.ISO_8859_1)
         val text = String(ConToPkg.adjustDta(dta), Charsets.ISO_8859_1)
         assertTrue(text.contains("'rating' 2"))
-        assertTrue(text.contains("'song_id' ${ConToPkg.songIdNumber("my_song")}"))
+        assertTrue(text.contains("'song_id' 2130153358"))
         assertTrue(!text.contains("my_song"))
     }
 
