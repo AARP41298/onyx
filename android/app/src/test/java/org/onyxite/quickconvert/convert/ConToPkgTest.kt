@@ -1,5 +1,6 @@
 package org.onyxite.quickconvert.convert
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -101,6 +102,28 @@ class ConToPkgTest {
             assertTrue(payload.contentEquals(decoded))
         }
         assertTrue(found)
+    }
+
+    @Test
+    fun shortReadsMatchASingleByteArray() {
+        val first = ByteArray(1000) { (it * 3).toByte() }
+        val second = ByteArray(1) { 7 }
+        val whole = PkgWriter.Dir().apply {
+            add("a.bin", first)
+            add("b.bin", second)
+        }
+        val pieces = PkgWriter.Dir().apply {
+            add("a.bin", PkgWriter.Blob(first.size.toLong()) { pos, dest, off, len ->
+                val n = minOf(len, 3, first.size - pos.toInt())
+                if (n <= 0) 0 else {
+                    first.copyInto(dest, off, pos.toInt(), pos.toInt() + n)
+                    n
+                }
+            })
+            add("b.bin", second)
+        }
+        val id = "UP8802-BLUS30463_00-Osong"
+        assertArrayEquals(PkgWriter.write(whole, id), PkgWriter.write(pieces, id))
     }
 
     @Test

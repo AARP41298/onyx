@@ -11,13 +11,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.onyxite.quickconvert.convert.ConToPkg
 import org.onyxite.quickconvert.convert.EdatPacker
 import org.onyxite.quickconvert.convert.OutputTemplate
+import org.onyxite.quickconvert.convert.StfsExtractor
 import org.onyxite.quickconvert.convert.TreeFiles
+import java.io.File
+import java.io.FileInputStream
+import java.io.RandomAccessFile
 import org.onyxite.quickconvert.model.Adjustment
 import org.onyxite.quickconvert.model.ConvertSettings
 import org.onyxite.quickconvert.model.SongFile
@@ -170,15 +175,22 @@ class QuickConvertViewModel(app: Application) : AndroidViewModel(app) {
                         continue
                     }
                     try {
-                        val input = app.contentResolver.openInputStream(Uri.parse(song.uri))?.use { it.readBytes() }
-                            ?: throw IllegalStateException("Could not read ${song.displayName}")
-                        val built = ConToPkg.convert(input, snapshotSettings, encryptor) { rb3 ->
-                            loadPackageFiles(app, rb3)
+                        val written = openPackage(app, Uri.parse(song.uri)) { source ->
+                            var result: ConToPkg.Written? = null
+                            TreeFiles.writeTo(app.contentResolver, tree, planned.relativePath) { out ->
+                                result = ConToPkg.writeTo(source, snapshotSettings, encryptor, { rb3 ->
+                                    loadPackageFiles(app, rb3)
+                                }, out)
+                            }
+                            result ?: throw IllegalStateException("Could not write ${planned.relativePath}")
                         }
-                        TreeFiles.write(app.contentResolver, tree, planned.relativePath, built.bytes)
                         lines += LogLine("Wrote ${planned.relativePath}", LogTone.OK)
-                        lines += LogLine(built.summary)
-                        built.notes.forEach { lines += LogLine(it, LogTone.WARN) }
+                        lines += LogLine(written.summary)
+                        written.notes.forEach { lines += LogLine(it, LogTone.WARN) }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: OutOfMemoryError) {
+                        lines += LogLine("Ran out of memory converting ${song.displayName}.", LogTone.BAD)
                     } catch (error: Exception) {
                         lines += LogLine(error.message ?: "Could not convert ${song.displayName}", LogTone.BAD)
                     }
@@ -218,6 +230,39 @@ class QuickConvertViewModel(app: Application) : AndroidViewModel(app) {
             template = prefs.getString(KEY_TEMPLATE, OutputTemplate.DEFAULT) ?: OutputTemplate.DEFAULT,
             adjustments = adjustments,
         )
+    }
+
+    /**
+     * Opens the CON for random reads. A local document is read in place.
+     * Anything that cannot be seeked is copied to the cache in 1 MB pieces.
+     */
+    private fun <T> openPackage(app: Application, uri: Uri, body: (StfsExtractor.Source) -> T): T {
+        val descriptor = runCatching { app.contentResolver.openFileDescriptor(uri, "r") }.getOrNull()
+        if (descriptor != null) {
+            val stream = runCatching { FileInputStream(descriptor.fileDescriptor) }.getOrNull()
+            val size = stream?.let { runCatching { it.channel.size() }.getOrNull() } ?: -1L
+            if (stream != null && size > 0) {
+                try {
+                    return body(StfsExtractor.ChannelSource(stream.channel))
+                } finally {
+                    stream.close()
+                    runCatching { descriptor.close() }
+                }
+            }
+            stream?.close()
+            descriptor.close()
+        }
+        val cache = File(app.cacheDir, "quick-convert-input.bin")
+        try {
+            app.contentResolver.openInputStream(uri)?.use { input ->
+                cache.outputStream().use { output -> input.copyTo(output, 1024 * 1024) }
+            } ?: throw IllegalStateException("Could not read the song")
+            RandomAccessFile(cache, "r").use { file ->
+                return body(StfsExtractor.ChannelSource(file.channel))
+            }
+        } finally {
+            cache.delete()
+        }
     }
 
     private fun loadPackageFiles(app: Application, rb3: Boolean): Map<String, ByteArray> {

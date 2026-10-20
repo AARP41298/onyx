@@ -3,6 +3,7 @@ package org.onyxite.quickconvert.convert
 import android.content.ContentResolver
 import android.net.Uri
 import android.provider.DocumentsContract
+import java.io.OutputStream
 
 /** Reads and writes folders the user picked with the system file picker. */
 object TreeFiles {
@@ -61,6 +62,10 @@ object TreeFiles {
     private data class Child(val id: String, val name: String, val mime: String, val size: Long)
 
     fun write(resolver: ContentResolver, tree: Uri, relativePath: String, bytes: ByteArray) {
+        writeTo(resolver, tree, relativePath) { it.write(bytes) }
+    }
+
+    fun writeTo(resolver: ContentResolver, tree: Uri, relativePath: String, write: (OutputStream) -> Unit) {
         val rootId = DocumentsContract.getTreeDocumentId(tree)
         var parent = DocumentsContract.buildDocumentUriUsingTree(tree, rootId)
         val parts = relativePath.split('/').filter { it.isNotEmpty() }
@@ -74,7 +79,7 @@ object TreeFiles {
             runCatching { DocumentsContract.deleteDocument(resolver, existing) }
         }
         val doc = create(resolver, parent, name, "application/octet-stream")
-        resolver.openOutputStream(doc)?.use { it.write(bytes) }
+        resolver.openOutputStream(doc)?.use(write)
             ?: throw IllegalStateException("Could not open $name for writing")
     }
 

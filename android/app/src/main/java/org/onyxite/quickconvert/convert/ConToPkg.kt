@@ -2,6 +2,8 @@ package org.onyxite.quickconvert.convert
 
 import org.onyxite.quickconvert.model.Adjustment
 import org.onyxite.quickconvert.model.ConvertSettings
+import java.io.ByteArrayOutputStream
+import java.io.OutputStream
 import java.security.MessageDigest
 
 /**
@@ -15,6 +17,8 @@ object ConToPkg {
         val notes: List<String>,
     )
 
+    data class Written(val summary: String, val notes: List<String>)
+
     fun interface MidiEncryptor {
         fun encrypt(fileName: String, midi: ByteArray, contentId: ByteArray, klic: ByteArray): ByteArray
     }
@@ -25,10 +29,22 @@ object ConToPkg {
         encryptor: MidiEncryptor?,
         packageFiles: (rb3: Boolean) -> Map<String, ByteArray> = { emptyMap() },
     ): Built {
-        val extracted = StfsExtractor.extract(input)
+        val out = ByteArrayOutputStream()
+        val written = writeTo(StfsExtractor.BytesSource(input), settings, encryptor, packageFiles, out)
+        return Built(out.toByteArray(), written.summary, written.notes)
+    }
+
+    fun writeTo(
+        input: StfsExtractor.Source,
+        settings: ConvertSettings,
+        encryptor: MidiEncryptor?,
+        packageFiles: (rb3: Boolean) -> Map<String, ByteArray> = { emptyMap() },
+        out: OutputStream,
+    ): Written {
+        val extracted = StfsExtractor.list(input)
         val dtaFile = extracted.firstOrNull { it.path.substringAfterLast('/').equals("songs.dta", ignoreCase = true) }
             ?: throw IllegalArgumentException("No songs.dta inside this package")
-        val dta = dtaFile.bytes
+        val dta = dtaFile.readAll()
         val rb3 = isRb3(dta)
         val title = songTitle(dta) ?: "song"
         val folder = usrdirName(dta, title)
@@ -57,20 +73,11 @@ object ConToPkg {
         var plainMidis = 0
         for (file in extracted) {
             val relative = file.path.trimStart('/')
-            val (name, bytes) = transform(
-                relative,
-                file.bytes,
-                settings.encryptMidEdat,
-                folder,
-                contentIdBytes,
-                klic,
-                encryptor,
-                notes,
-            )
-            if (name.endsWith(".mid.edat", ignoreCase = true)) {
-                if (bytes.size >= 4 && bytes[0] == 'N'.code.toByte()) encryptedMidis++ else plainMidis++
+            val placed = place(relative, file, settings.encryptMidEdat, contentIdBytes, klic, encryptor, notes)
+            if (placed.name.endsWith(".mid.edat", ignoreCase = true)) {
+                if (placed.encrypted) encryptedMidis++ else plainMidis++
             }
-            root.add("USRDIR/$folder/$name", bytes)
+            root.add("USRDIR/$folder/${placed.name}", placed.blob)
         }
         if (settings.encryptMidEdat && plainMidis > 0 && encryptedMidis == 0) {
             notes += "MIDI was packed without .mid.edat encryption."
@@ -83,35 +90,102 @@ object ConToPkg {
             append(folder)
             append(".")
         }
-        return Built(PkgWriter.write(root, contentId), summary, notes)
+        PkgWriter.write(root, contentId, out)
+        return Written(summary, notes)
     }
 
-    private fun transform(
+    private class Placed(val name: String, val blob: PkgWriter.Blob, val encrypted: Boolean)
+
+    private fun place(
         path: String,
-        bytes: ByteArray,
+        file: StfsExtractor.StoredFile,
         encryptMidi: Boolean,
-        folder: String,
         contentId: ByteArray,
         klic: ByteArray,
         encryptor: MidiEncryptor?,
         notes: MutableList<String>,
-    ): Pair<String, ByteArray> {
+    ): Placed {
         val slash = path.lastIndexOf('/')
         val dir = if (slash < 0) "" else path.substring(0, slash + 1)
         val name = if (slash < 0) path else path.substring(slash + 1)
         val lower = name.lowercase()
         return when {
-            lower == "songs.dta" -> path to adjustDta(bytes)
-            lower.endsWith(".milo_xbox") -> dir + name.dropLast(10) + ".milo_ps3" to bytes
-            lower.endsWith(".png_xbox") -> dir + name.dropLast(9) + ".png_ps3" to swapPng(bytes)
+            lower == "songs.dta" -> Placed(path, PkgWriter.Blob.of(adjustDta(file.readAll())), false)
+            lower.endsWith(".milo_xbox") -> Placed(dir + name.dropLast(10) + ".milo_ps3", blobOf(file), false)
+            lower.endsWith(".png_xbox") -> Placed(dir + name.dropLast(9) + ".png_ps3", swapped(file), false)
             lower.endsWith(".mid") -> {
-                val outName = "$dir$name.edat"
+                val bytes = file.readAll()
                 val edat = if (encryptMidi) encryptMidi(name + ".edat", bytes, contentId, klic, encryptor, notes) else bytes
-                outName to edat
+                val encrypted = edat.size >= 4 && edat[0] == 'N'.code.toByte()
+                Placed("$dir$name.edat", PkgWriter.Blob.of(edat), encrypted)
             }
-            lower.endsWith(".mogg") -> path to fixMogg(bytes)
-            else -> path to bytes
+            lower.endsWith(".mogg") -> Placed(path, patchedMogg(file), false)
+            else -> Placed(path, blobOf(file), false)
         }
+    }
+
+    private fun blobOf(file: StfsExtractor.StoredFile): PkgWriter.Blob =
+        PkgWriter.Blob(file.size) { position, dest, destOff, length ->
+            file.readAt(position, dest, destOff, length)
+        }
+
+    /** Pair swap of [swapPng], applied while the file is read. Chunks start on even offsets. */
+    private fun swapped(file: StfsExtractor.StoredFile): PkgWriter.Blob =
+        PkgWriter.Blob(file.size) { position, dest, destOff, length ->
+            val n = file.readAt(position, dest, destOff, length)
+            var i = 0
+            while (i < n) {
+                val abs = position + i
+                if (abs >= 0x20 && ((abs - 0x20) and 1L) == 0L && i + 1 < n) {
+                    val at = destOff + i
+                    val tmp = dest[at]
+                    dest[at] = dest[at + 1]
+                    dest[at + 1] = tmp
+                    i += 2
+                } else {
+                    i++
+                }
+            }
+            n
+        }
+
+    /** [fixMogg] applied to the 16-byte mask while the file is read. */
+    private fun patchedMogg(file: StfsExtractor.StoredFile): PkgWriter.Blob {
+        val patch = moggPatch(file)
+        return PkgWriter.Blob(file.size) { position, dest, destOff, length ->
+            val n = file.readAt(position, dest, destOff, length)
+            if (patch != null && n > 0) {
+                val start = position
+                val end = position + n
+                val at = patch.first
+                if (at < end && at + 16 > start) {
+                    val srcFrom = maxOf(0L, start - at).toInt()
+                    val dstFrom = maxOf(0L, at - start).toInt()
+                    val count = minOf(16 - srcFrom, n - dstFrom)
+                    if (count > 0) patch.second.copyInto(dest, destOff + dstFrom, srcFrom, srcFrom + count)
+                }
+            }
+            n
+        }
+    }
+
+    private fun moggPatch(file: StfsExtractor.StoredFile): Pair<Long, ByteArray>? {
+        if (file.size < 36) return null
+        val head = ByteArray(36)
+        if (file.readAt(0, head, 0, 36) < 36) return null
+        if (head[0] == 0x0A.toByte()) return null
+        val enc = le32(head, 0)
+        val entries = le32(head, 16)
+        val at = 20L + entries.toLong() * 8L + 32L
+        if (at < 0 || at + 16 > file.size) return null
+        val mask = ByteArray(16)
+        if (file.readAt(at, mask, 0, 16) < 16) return null
+        val good = when {
+            mask.contentEquals(OLD_C3_MASK) -> NEW_C3_MASK
+            enc == 12 && mask.contentEquals(OLD_V12_MASK) -> NEW_V12_MASK
+            else -> return null
+        }
+        return at to good
     }
 
     private fun encryptMidi(
